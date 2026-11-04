@@ -40,6 +40,9 @@ spec:
             - --snapshot-bucket={{ . }}
             {{- end }}
             {{- if .Values.curated.enabled }}
+            {{- if not (and .Values.erasure.kagent.target .Values.erasure.substrate.target) }}
+            {{- fail "curated.enabled needs erasure.kagent.target and erasure.substrate.target: a deleted organization's sessions and actors are erased through them" }}
+            {{- end }}
             {{- if not .Values.snapshots.bucket }}
             {{- fail "curated.enabled needs snapshots.bucket: a Harness copy's snapshot location is s3://<bucket>/<uid>/<harness>" }}
             {{- end }}
@@ -54,6 +57,21 @@ spec:
             {{- end }}
             {{- with $quota }}
             - --object-quota={{ join "," . }}
+            {{- end }}
+            - --flux-kustomization-api-version={{ .Values.erasure.kustomizationApiVersion }}
+            - --flux-helmrelease-api-version={{ .Values.erasure.helmReleaseApiVersion }}
+            - --snapshot-erase-delay={{ .Values.erasure.snapshotDelay }}
+            - --erasure-poll-interval={{ .Values.erasure.pollInterval }}
+            {{- with .Values.erasure.kagent.target }}
+            - --kagent-target={{ . }}
+            - --kagent-token-file=/var/run/secrets/agent-platform-operator/kagent/token
+            {{- end }}
+            {{- with .Values.erasure.substrate.target }}
+            - --substrate-target={{ . }}
+            - --substrate-token-file=/var/run/secrets/agent-platform-operator/substrate/token
+            {{- if $.Values.erasure.substrate.caConfigMap.name }}
+            - --substrate-ca-file=/var/run/secrets/agent-platform-operator/substrate-ca/{{ $.Values.erasure.substrate.caConfigMap.key }}
+            {{- end }}
             {{- end }}
             - --sync-period={{ .Values.syncPeriod }}
             - --leader-election-namespace={{ .Release.Namespace }}
@@ -74,3 +92,48 @@ spec:
             {{- toYaml .Values.resources | nindent 12 }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
+          {{- $e := .Values.erasure }}
+          {{- if or $e.kagent.target $e.substrate.target }}
+          volumeMounts:
+            {{- if $e.kagent.target }}
+            - name: kagent-token
+              mountPath: /var/run/secrets/agent-platform-operator/kagent
+              readOnly: true
+            {{- end }}
+            {{- if $e.substrate.target }}
+            - name: substrate-token
+              mountPath: /var/run/secrets/agent-platform-operator/substrate
+              readOnly: true
+            {{- if $e.substrate.caConfigMap.name }}
+            - name: substrate-ca
+              mountPath: /var/run/secrets/agent-platform-operator/substrate-ca
+              readOnly: true
+            {{- end }}
+            {{- end }}
+      # The ServiceAccount's tokens the erasure calls kagent and Substrate
+      # with, each bound to the audience its server accepts.
+      volumes:
+        {{- if $e.kagent.target }}
+        - name: kagent-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: {{ required "erasure.kagent.audience is required with erasure.kagent.target" $e.kagent.audience }}
+                  expirationSeconds: 3600
+        {{- end }}
+        {{- if $e.substrate.target }}
+        - name: substrate-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: {{ required "erasure.substrate.audience is required with erasure.substrate.target" $e.substrate.audience }}
+                  expirationSeconds: 3600
+        {{- if $e.substrate.caConfigMap.name }}
+        - name: substrate-ca
+          configMap:
+            name: {{ $e.substrate.caConfigMap.name }}
+        {{- end }}
+        {{- end }}
+      {{- end }}

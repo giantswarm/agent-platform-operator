@@ -193,8 +193,16 @@ func (r *OrganizationReconciler) keepCurated(ctx context.Context, org *v1alpha1.
 
 // workerReplicas is the worker replica rule: the organization's
 // spec.workers.replicas, but 0 while its namespace holds no ModelConfig (no
-// agent can run without a model) and while it is Orphaned.
+// agent can run without a model) and while it is Orphaned. A deleted
+// organization runs its replicas until its sessions are gone, whatever else
+// holds, since kagent needs a worker to suspend an actor, and 0 after.
 func workerReplicas(org *v1alpha1.AgentPlatformOrganization, holdsModelConfig bool) int64 {
+	if org.DeletionTimestamp != nil {
+		if sessionsGone(org.Status.ErasureStep) {
+			return 0
+		}
+		return int64(org.Spec.Workers.Replicas)
+	}
 	if !holdsModelConfig || meta.IsStatusConditionTrue(org.Status.Conditions, v1alpha1.ConditionOrphaned) {
 		return 0
 	}

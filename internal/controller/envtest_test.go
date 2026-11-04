@@ -70,6 +70,10 @@ const (
 	// configMapQuota is the ConfigMap count of the object quota: no other
 	// case writes ConfigMaps.
 	configMapQuota = 3
+
+	// snapshotDelay is the erasure's delay between the two deletions of a
+	// snapshot prefix.
+	snapshotDelay = 2 * time.Second
 )
 
 var (
@@ -85,6 +89,9 @@ var (
 	modelGVK    = kagentGV.WithKind("ModelConfig")
 	serverGVK   = kagentGV.WithKind("RemoteMCPServer")
 	poolGVK     = substrateGV.WithKind("WorkerPool")
+	// The Flux kinds the erasure deletes.
+	kustomizationGVK = schema.GroupVersionKind{Group: "kustomize.toolkit.fluxcd.io", Version: "v1", Kind: "Kustomization"}
+	helmReleaseGVK   = schema.GroupVersionKind{Group: "helm.toolkit.fluxcd.io", Version: "v2", Kind: "HelmRelease"}
 )
 
 // cluster is a kube-apiserver holding the chart's CRD and RBAC, with the
@@ -94,6 +101,13 @@ type cluster struct {
 	admin client.Client
 	// config is the reconciler's Config.
 	config controller.Config
+	// log records, in order, what the erasure did through the fakes of
+	// kagent's session API, Substrate's actors and the snapshot bucket, and
+	// what the erasure observers saw it delete.
+	log      *eventLog
+	sessions *fakeSessions
+	actors   *fakeActors
+	bucket   *fakeBucket
 }
 
 // startEnvtest starts the API server, installs the chart's CRD and applies
@@ -114,6 +128,9 @@ func startEnvtest(t *testing.T) *cluster {
 		"--set", "networkPolicy.names={"+workerPolicy+"}",
 		"--set", "curated.enabled=true",
 		"--set", "snapshots.bucket="+snapshotBucket,
+		"--set", "erasure.kagent.target=grpc://kagent-controller.kagent.svc:8083",
+		"--set", "erasure.substrate.target=grpcs://ate-api.substrate.svc",
+		"--set", "erasure.substrate.audience=ate-api",
 	).Output()
 	require.NoError(t, err, "helm template: %s", stderrOf(err))
 
@@ -128,6 +145,8 @@ func startEnvtest(t *testing.T) *cluster {
 			anyFieldsCRD(modelGVK, "modelconfigs"),
 			anyFieldsCRD(serverGVK, "remotemcpservers"),
 			anyFieldsCRD(poolGVK, "workerpools"),
+			anyFieldsCRD(kustomizationGVK, "kustomizations"),
+			anyFieldsCRD(helmReleaseGVK, "helmreleases"),
 		},
 	}
 	cfg, err := env.Start()
@@ -189,7 +208,11 @@ func startEnvtest(t *testing.T) *cluster {
 	// ResourceQuota counts.
 	go recordQuotaUsage(ctx, admin)
 
-	c := &cluster{admin: admin, config: controller.Config{
+	log := &eventLog{}
+	sessions := &fakeSessions{log: log, byID: map[string]*fakeSession{}}
+	actors := &fakeActors{log: log, sessions: sessions, linger: map[string]int{}}
+	bucket := &fakeBucket{log: log, objects: map[string]int{}, fail: map[string]error{}}
+	c := &cluster{admin: admin, log: log, sessions: sessions, actors: actors, bucket: bucket, config: controller.Config{
 		PlatformNamespace: platformNS,
 		NetworkPolicies:   []string{workerPolicy},
 		NetworkPolicyGVK:  npGVK,
@@ -205,6 +228,11 @@ func startEnvtest(t *testing.T) *cluster {
 			corev1.ResourceConfigMaps: resource.MustParse(strconv.Itoa(configMapQuota)),
 			// The operator's own Agent copies count too.
 			"count/agents.api.kagent.dev": resource.MustParse("100"),
+		},
+		Erasure: controller.ErasureConfig{
+			Sessions: sessions, Actors: actors, Snapshots: bucket,
+			SnapshotDelay: snapshotDelay, Poll: 100 * time.Millisecond,
+			Kustomization: kustomizationGVK, HelmRelease: helmReleaseGVK, Agent: agentGVK,
 		},
 	}}
 

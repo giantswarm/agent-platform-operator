@@ -262,6 +262,7 @@ func TestOrganizationEnvtest(t *testing.T) {
 	})
 
 	curatedCases(t, c)
+	erasureCases(t, c)
 }
 
 // organization creates an AgentPlatformOrganization in a new parent namespace.

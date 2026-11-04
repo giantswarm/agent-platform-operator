@@ -65,11 +65,28 @@ With `curated.enabled` (it needs `snapshots.bucket`), the operator also keeps re
 
 A copy carries its source's `kagent.dev/` labels (`kagent.dev/discovery: disabled` on the muster server), and no other label of the source.
 
-**The worker replica rule**: the WorkerPool copy runs `spec.workers.replicas`, except 0 replicas while the organization namespace holds no ModelConfig (of any name) and while the organization is `Orphaned`.
+**The worker replica rule**: the WorkerPool copy runs `spec.workers.replicas`, except 0 replicas while the organization namespace holds no ModelConfig (of any name) and while the organization is `Orphaned`. A deleted organization runs `spec.workers.replicas` until its sessions are gone, whatever else holds, since kagent needs a worker to suspend an actor, and 0 after (see "Erasure").
 
 A copy follows its source: a change in `platformNamespace`, a move of the default mark, or a change of `spec.harnesses` re-copies it into every organization it concerns. A copy whose source is no longer curated for the organization goes. An edit of a copy is reverted. The copies carry `agent-platform.giantswarm.io/organization-object: curated`, which the admission policy that refuses edits to them selects, and `agent-platform.giantswarm.io/copied-from: <platformNamespace>/<name>`.
 
-The operator labels what it writes with `agent-platform.giantswarm.io/organization-object` and `app.kubernetes.io/managed-by: agent-platform-operator`. It never changes or deletes an object without that label.
+The operator labels what it writes with `agent-platform.giantswarm.io/organization-object` and `app.kubernetes.io/managed-by: agent-platform-operator`. It never changes or deletes an object without that label, except what the erasure deletes in a deleted organization's namespace.
+
+## Erasure
+
+Every AgentPlatformOrganization carries the finalizer `agent-platform.giantswarm.io/erasure`. When it is deleted, by itself or with its parent namespace, the operator erases it in this order, and removes the finalizer only after the last step:
+
+1. **Workloads**: it deletes the organization's Flux Kustomization and waits until it is gone, then deletes the HelmReleases left in the organization namespace (all of them where there is no Kustomization) and its Agents (the curated copies, and Agents written outside git), and waits until they are gone.
+2. **Sessions**: it lists every creator's sessions of the organization's Agents through the kagent controller (`erasure.kagent.target`) and deletes each, until none is left, then waits until Substrate's ate-api (`erasure.substrate.target`) holds no actor in the organization's atespace (the namespace's name).
+3. **Snapshots**: it deletes every object under `status.snapshotPrefix`, and again after `erasure.snapshotDelay` (default 5m, Substrate's default actor workflow deadline), for an upload that started before the last actor went.
+4. **Namespace**: it deletes the organization namespace and waits until it is gone.
+5. **OutsideObjects**: it deletes the organization's Flux ServiceAccount beside the installation's Flux source, and waits until it is gone.
+6. It removes the finalizer.
+
+While it erases, `Ready` is `False` with reason `Deleting`; `status.erasureStep` and the condition's message name the step, and the message names a failure. A failing step is retried with backoff; a step that waits looks again every `erasure.pollInterval`. An organization created again with the same parent and name gets a new UID, so a new namespace and snapshot prefix.
+
+The erasure finds the organization's Flux Kustomization and Flux ServiceAccount, wherever they are, by two labels: `agent-platform.giantswarm.io/organization-object: flux` and `agent-platform.giantswarm.io/organization-uid: <uid>`.
+
+The operator calls kagent and Substrate as its own ServiceAccount, with a projected token of each server's audience (`erasure.kagent.audience`, `erasure.substrate.audience`): kagent must admit it as a machine caller with cluster-wide `list` on `sessions.api.kagent.dev`, and ate-api must trust the token. It deletes snapshots with the AWS SDK's default credentials: on a management cluster, the IRSA role in `serviceAccount.annotations`. The agent-platform chart renders that role and the kagent grant.
 
 ## Development
 

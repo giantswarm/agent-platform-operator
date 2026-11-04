@@ -21,6 +21,10 @@ spec:
     - jsonPath: .status.conditions[?(@.type=="Ready")].status
       name: Ready
       type: string
+    - jsonPath: .status.erasureStep
+      name: Erasure
+      priority: 1
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -68,7 +72,8 @@ spec:
                       Replicas is the number of warm workers of the organization's WorkerPool
                       while the organization can use them: the pool runs 0 while the
                       organization namespace holds no ModelConfig and while the organization
-                      is Orphaned.
+                      is Orphaned. A deleted organization runs Replicas until its sessions
+                      are gone, so kagent can suspend its actors, and 0 after.
                     format: int32
                     minimum: 0
                     type: integer
@@ -78,7 +83,10 @@ spec:
             description: AgentPlatformOrganizationStatus is what the operator observed.
             properties:
               conditions:
-                description: 'Conditions: Ready, DefaultModelConfigured and Orphaned.'
+                description: |-
+                  Conditions: Ready, DefaultModelConfigured and Orphaned. While the
+                  organization is erased, Ready is False with reason Deleting and its
+                  message names the step.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -137,6 +145,18 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              erasureStep:
+                description: |-
+                  ErasureStep is the erasure step the operator is on once the
+                  organization is deleted: Workloads, Sessions, Snapshots, Namespace or
+                  OutsideObjects. Empty while the organization is not deleted.
+                enum:
+                - Workloads
+                - Sessions
+                - Snapshots
+                - Namespace
+                - OutsideObjects
+                type: string
               namespace:
                 description: |-
                   Namespace is the organization namespace, created from the generateName
@@ -146,6 +166,13 @@ spec:
                 description: |-
                   SnapshotPrefix is where the organization's worker snapshots live,
                   s3://<bucket>/<uid>. Empty when the operator has no snapshot bucket.
+                type: string
+              snapshotsErasedAt:
+                description: |-
+                  SnapshotsErasedAt is when the operator first emptied the snapshot
+                  prefix of the deleted organization; it empties it once more after the
+                  snapshot erase delay.
+                format: date-time
                 type: string
             type: object
         type: object

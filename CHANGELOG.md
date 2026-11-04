@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The curated Agents run on the organization's default ModelConfig, the one annotated `agent-platform.giantswarm.io/default-model-config: "true"`; the condition `DefaultModelConfigured` is `False` while none or more than one is marked.
 - An organization's WorkerPool runs `spec.workers.replicas` workers, and 0 while its namespace holds no ModelConfig or while it is `Orphaned`.
 - Every organization namespace gets the ResourceQuota `agent-platform-organization-objects` on object counts (`objectQuota`).
+- A deleted organization is erased, in order: its Flux Kustomization or HelmReleases and its Agents, every creator's sessions through kagent until Substrate holds no actor of it, its snapshot prefix twice (`erasure.snapshotDelay` apart), its namespace, then its Flux ServiceAccount. `Ready` stays `False` with reason `Deleting` and `status.erasureStep` names the step; a failing step is retried. The workers run until the sessions are gone and stop after. `curated.enabled` needs `erasure.kagent.target` and `erasure.substrate.target`.
 
 
 [Unreleased]: https://github.com/giantswarm/agent-platform-operator/tree/main
