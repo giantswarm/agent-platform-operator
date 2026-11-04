@@ -17,11 +17,23 @@
 //     RoleBinding to the tenant Flux ClusterRole;
 //   - a mirror of every RoleBinding of the parent namespace to the ClusterRole
 //     agent-platform:organizations-admin, with its User and Group subjects
-//     only, removed when the parent binding goes.
+//     only, removed when the parent binding goes;
+//   - read-only copies of the curated objects of the platform namespace
+//     (Config.Curated): the Harnesses the organization's spec.harnesses names,
+//     pointed at the organization's own pool and snapshot prefix with kagent's
+//     memory off; the curated WorkerPool with its ServiceAccount, scaled by
+//     the worker replica rule (workerReplicas); the Agents and AgentTemplates
+//     labelled agent-platform.giantswarm.io/curated=true, with the template's
+//     modelConfig set to the organization's default ModelConfig; and the
+//     RemoteMCPServers their tools name. A copy follows its source and the
+//     default mark, an edit of it is reverted, and it goes when its source is
+//     no longer curated for the organization;
+//   - the ResourceQuota on object counts (Config.ObjectQuota).
 //
-// The logic of the first three is agent-manager's tenant reconciler
-// (internal/tenants): it writes only objects it labels as its own and never
-// changes or deletes one it did not write.
+// The logic of the network policies, the OCIRepository, the Helm
+// ServiceAccount and the WorkerPool and Harness copies is agent-manager's
+// tenant reconciler (internal/tenants): it writes only objects it labels as
+// its own and never changes or deletes one it did not write.
 package controller
 
 import (
@@ -94,29 +106,44 @@ type Config struct {
 	HelmServiceAccount string
 	HelmClusterRole    string
 	// SnapshotBucket is the bucket of the snapshot prefix s3://<bucket>/<uid>;
-	// empty leaves the prefix empty.
+	// empty leaves the prefix empty. The curated copies need it.
 	SnapshotBucket string
+	// Curated is what the reconciler copies from the platform namespace; the
+	// zero value copies nothing.
+	Curated CuratedConfig
+	// ObjectQuota are the hard limits of the ResourceQuota on object counts
+	// in every organization namespace; empty keeps none.
+	ObjectQuota corev1.ResourceList
 }
 
 // CacheOptions limit what the manager caches: the organization namespaces,
-// the reconciler's own ServiceAccounts, every RoleBinding (a parent's
-// organizations-admin bindings carry no label to select them by) and, of the
-// network policies, the platform namespace's and the reconciler's copies.
+// the reconciler's own ServiceAccounts and ResourceQuotas, every RoleBinding
+// (a parent's organizations-admin bindings carry no label to select them by),
+// the metadata of every ModelConfig and, of the network policies and the
+// curated kinds, the platform namespace's and the reconciler's copies.
 //
-// The network policies are cached for their watch only. The reconciler reads
-// them, and the OCIRepository, as unstructured objects, which the client
-// reads from the API server (client.CacheOptions.Unstructured is off): the
-// operator starts on a cluster that does not serve the OCIRepository kind.
+// The network policies and the curated kinds are cached for their watch
+// only. The reconciler reads them, and the OCIRepository, as unstructured
+// objects, which the client reads from the API server
+// (client.CacheOptions.Unstructured is off): the operator starts on a cluster
+// that does not serve the OCIRepository kind.
 func CacheOptions(cfg Config, syncPeriod time.Duration) cache.Options {
 	byObject := map[client.Object]cache.ByObject{
 		&corev1.Namespace{}:      {Label: hasLabel(v1alpha1.OrganizationUIDLabel)},
 		&corev1.ServiceAccount{}: {Label: hasLabel(ObjectLabel)},
+		&corev1.ResourceQuota{}:  {Label: hasLabel(ObjectLabel)},
 	}
+	sourcesAndCopies := cache.ByObject{Namespaces: map[string]cache.Config{
+		cfg.PlatformNamespace: {},
+		cache.AllNamespaces:   {LabelSelector: hasLabel(ObjectLabel)},
+	}}
 	if !cfg.NetworkPolicyGVK.Empty() {
-		byObject[object(cfg.NetworkPolicyGVK)] = cache.ByObject{Namespaces: map[string]cache.Config{
-			cfg.PlatformNamespace: {},
-			cache.AllNamespaces:   {LabelSelector: hasLabel(ObjectLabel)},
-		}}
+		byObject[object(cfg.NetworkPolicyGVK)] = sourcesAndCopies
+	}
+	if cfg.Curated.Enabled() {
+		for _, gvk := range cfg.Curated.copied() {
+			byObject[object(gvk)] = sourcesAndCopies
+		}
 	}
 	return cache.Options{
 		SyncPeriod:       &syncPeriod,
@@ -148,12 +175,27 @@ func (r *OrganizationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&v1alpha1.AgentPlatformOrganization{}).
 		Watches(&corev1.Namespace{}, handler.EnqueueRequestsFromMapFunc(organizationOfLabels)).
 		Watches(&corev1.ServiceAccount{}, inOrganization, builder.WithPredicates(isOwn)).
+		Watches(&corev1.ResourceQuota{}, inOrganization, builder.WithPredicates(isOwn)).
 		// A parent's organizations-admin binding reconciles the parent's
 		// organizations; a binding in an organization namespace its own.
 		Watches(&rbacv1.RoleBinding{}, handler.EnqueueRequestsFromMapFunc(r.organizationsOfBinding))
+	// A status write changes neither the spec (the generation) nor the
+	// labels: nothing the reconciler copies or decides on.
+	specOrLabels := predicate.Or(predicate.GenerationChangedPredicate{}, predicate.LabelChangedPredicate{})
+	var copied []schema.GroupVersionKind
 	if !r.Config.NetworkPolicyGVK.Empty() {
-		specOrLabels := predicate.Or(predicate.GenerationChangedPredicate{}, predicate.LabelChangedPredicate{})
-		b = b.Watches(object(r.Config.NetworkPolicyGVK), handler.EnqueueRequestsFromMapFunc(r.organizationsOfPolicy), builder.WithPredicates(specOrLabels))
+		copied = append(copied, r.Config.NetworkPolicyGVK)
+	}
+	if r.Config.Curated.Enabled() {
+		copied = append(copied, r.Config.Curated.copied()...)
+		// Any ModelConfig of an organization namespace: its creation, its
+		// deletion and a move of the default mark.
+		mc := &metav1.PartialObjectMetadata{}
+		mc.SetGroupVersionKind(r.Config.Curated.modelConfig())
+		b = b.Watches(mc, inOrganization, builder.OnlyMetadata, builder.WithPredicates(predicate.AnnotationChangedPredicate{}))
+	}
+	for _, gvk := range copied {
+		b = b.Watches(object(gvk), handler.EnqueueRequestsFromMapFunc(r.organizationsOfCopy), builder.WithPredicates(specOrLabels))
 	}
 	return b.Complete(r)
 }
@@ -202,9 +244,9 @@ func (r *OrganizationReconciler) organizationsOfBinding(ctx context.Context, o c
 	return append(reqs, r.organizationOfNamespace(ctx, o)...)
 }
 
-// organizationsOfPolicy maps a platform network policy to every organization
-// and a copy to its own.
-func (r *OrganizationReconciler) organizationsOfPolicy(ctx context.Context, o client.Object) []reconcile.Request {
+// organizationsOfCopy maps an object of the platform namespace (a network
+// policy, a curated object) to every organization and a copy to its own.
+func (r *OrganizationReconciler) organizationsOfCopy(ctx context.Context, o client.Object) []reconcile.Request {
 	if o.GetNamespace() == r.Config.PlatformNamespace {
 		return r.organizationsOf(ctx, "")
 	}
@@ -257,7 +299,7 @@ func (r *OrganizationReconciler) reconcile(ctx context.Context, org *v1alpha1.Ag
 		errs = append(errs, r.ensureExists(ctx, ns.Name, r.Config.Chart.object(ns.Name)))
 	}
 	if sa := r.Config.HelmServiceAccount; sa != "" {
-		errs = append(errs, r.ensureServiceAccount(ctx, ns.Name, sa), r.ensureHelmRoleBinding(ctx, ns.Name))
+		errs = append(errs, r.ensureServiceAccount(ctx, ns.Name, sa, ScopeNamespace), r.ensureHelmRoleBinding(ctx, ns.Name))
 	}
 	if !r.Config.NetworkPolicyGVK.Empty() {
 		for _, name := range r.Config.NetworkPolicies {
@@ -265,6 +307,12 @@ func (r *OrganizationReconciler) reconcile(ctx context.Context, org *v1alpha1.Ag
 		}
 	}
 	errs = append(errs, r.mirrorAdmins(ctx, org.Namespace, ns.Name))
+	if r.Config.Curated.Enabled() {
+		errs = append(errs, r.keepCurated(ctx, org, ns.Name, status))
+	}
+	// Last: until the quota controller records its usage, the quota refuses
+	// every object it counts.
+	errs = append(errs, r.ensureObjectQuota(ctx, ns.Name))
 	return errors.Join(errs...)
 }
 

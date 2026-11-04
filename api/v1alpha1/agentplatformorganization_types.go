@@ -21,6 +21,17 @@ const (
 	// AgentPlatformOrganization. The operator finds the namespace by it, never
 	// by name.
 	OrganizationUIDLabel = "agent-platform.giantswarm.io/organization-uid"
+
+	// CuratedLabel, set to "true" on an Agent or AgentTemplate in the platform
+	// namespace, makes it curated: the operator copies it, read-only, into
+	// every organization namespace.
+	CuratedLabel = "agent-platform.giantswarm.io/curated"
+	// DefaultModelConfigAnnotation, set to "true" on a ModelConfig in an
+	// organization namespace, makes it the organization's default model
+	// (giantswarm-platform-manager#789): the one curated Agents run on. Exactly
+	// one marked ModelConfig is the default; none or more than one means there
+	// is none.
+	DefaultModelConfigAnnotation = "agent-platform.giantswarm.io/default-model-config"
 )
 
 // Condition types of an AgentPlatformOrganization.
@@ -28,8 +39,10 @@ const (
 	// ConditionReady is True when the organization namespace exists and holds
 	// every object the operator keeps there.
 	ConditionReady = "Ready"
-	// ConditionDefaultModelConfigured is False while the organization namespace
-	// holds no default ModelConfig, so curated Agents cannot run. Not set yet.
+	// ConditionDefaultModelConfigured is True while exactly one ModelConfig of
+	// the organization namespace carries DefaultModelConfigAnnotation, and
+	// False while none or more than one does, so curated Agents cannot run.
+	// Set only where the operator copies the curated objects.
 	ConditionDefaultModelConfigured = "DefaultModelConfigured"
 	// ConditionOrphaned is True when the object carries the installation
 	// Kustomization's ownership labels but is missing from that
@@ -52,7 +65,10 @@ type AgentPlatformOrganizationSpec struct {
 
 // Workers sizes the organization's WorkerPool.
 type Workers struct {
-	// Replicas is the number of warm workers of the organization's WorkerPool.
+	// Replicas is the number of warm workers of the organization's WorkerPool
+	// while the organization can use them: the pool runs 0 while the
+	// organization namespace holds no ModelConfig and while the organization
+	// is Orphaned.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	Replicas int32 `json:"replicas,omitempty"`

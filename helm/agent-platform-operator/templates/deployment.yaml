@@ -39,6 +39,22 @@ spec:
             {{- with .Values.snapshots.bucket }}
             - --snapshot-bucket={{ . }}
             {{- end }}
+            {{- if .Values.curated.enabled }}
+            {{- if not .Values.snapshots.bucket }}
+            {{- fail "curated.enabled needs snapshots.bucket: a Harness copy's snapshot location is s3://<bucket>/<uid>/<harness>" }}
+            {{- end }}
+            - --curated-copies
+            - --curated-worker-pool={{ required "curated.workerPool is required with curated.enabled" .Values.curated.workerPool }}
+            - --kagent-api-version={{ .Values.curated.kagentApiVersion }}
+            - --workerpool-api-version={{ .Values.curated.workerPoolApiVersion }}
+            {{- end }}
+            {{- $quota := list }}
+            {{- range $name, $count := .Values.objectQuota }}
+            {{- $quota = append $quota (printf "%s=%v" $name $count) }}
+            {{- end }}
+            {{- with $quota }}
+            - --object-quota={{ join "," . }}
+            {{- end }}
             - --sync-period={{ .Values.syncPeriod }}
             - --leader-election-namespace={{ .Release.Namespace }}
           ports:
