@@ -96,12 +96,19 @@ func (s *Sessions) List(ctx context.Context, namespace string) ([]string, error)
 	return nil, fmt.Errorf("kagent ListSessions: %w", grpcwire.ErrPageLimit)
 }
 
-// Delete deletes one session. The controller ends its runtime
-// asynchronously; a session already gone is no error.
+// Delete deletes one session; the controller ends its runtime
+// asynchronously.
+//
+// NotFound is an error, not "already gone": the session was just listed, and
+// kagent's session service reads a session to delete as the caller's own
+// (WHERE user_id = caller) unless the caller is its control plane, so it
+// answers NotFound for another creator's session. Until kagent authorizes a
+// delete of any creator's session (as it reviews all_creators for a listing),
+// the erasure stops at its Sessions step and says so.
 func (s *Sessions) Delete(ctx context.Context, id string) error {
 	_, err := s.conn.Invoke(ctx, methodDeleteSession, grpcwire.Message(nil).String(fieldDeleteID, id))
 	if status.Code(err) == codes.NotFound {
-		return nil
+		return fmt.Errorf("kagent DeleteSession %s: kagent found no session of the operator's own by that ID, though it listed it; kagent deletes another creator's session only for its control plane: %w", id, err)
 	}
 	if err != nil {
 		return fmt.Errorf("kagent DeleteSession %s: %w", id, err)

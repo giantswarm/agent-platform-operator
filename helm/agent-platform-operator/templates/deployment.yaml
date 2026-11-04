@@ -75,6 +75,11 @@ spec:
             {{- end }}
             - --sync-period={{ .Values.syncPeriod }}
             - --leader-election-namespace={{ .Release.Namespace }}
+          {{- with .Values.snapshots.region }}
+          env:
+            - name: AWS_REGION
+              value: {{ . | quote }}
+          {{- end }}
           ports:
             - name: metrics
               containerPort: 8080

@@ -4,8 +4,11 @@
 //
 // The operator calls three methods and reads a handful of fields; the
 // generated clients of kagent and Substrate come with their modules, which
-// need a newer Go than this repository's. The field numbers are those of the
-// services' .proto files, named in each caller.
+// need Go 1.27.3 (this repository is on 1.26). The field numbers are those of
+// the services' .proto files, named in each caller. Exit: once this
+// repository's Go reaches the modules' go directive, replace the callers with
+// the generated clients (kagent's go/api/gen, Substrate's
+// pkg/proto/ateapipb) and remove this package.
 package grpcwire
 
 import (
@@ -18,6 +21,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -89,9 +93,15 @@ func NewConn(conn *grpc.ClientConn, tokenFile string) *Conn {
 // Close closes the connection.
 func (c *Conn) Close() error { return c.conn.Close() }
 
+// CallTimeout bounds one call, so a server that stops answering never holds
+// the reconciler.
+const CallTimeout = 30 * time.Second
+
 // Invoke calls method with the encoded request and returns the encoded
 // response.
 func (c *Conn) Invoke(ctx context.Context, method string, req []byte) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, CallTimeout)
+	defer cancel()
 	token, err := os.ReadFile(c.tokenFile)
 	if err != nil {
 		return nil, fmt.Errorf("read the ServiceAccount token: %w", err)

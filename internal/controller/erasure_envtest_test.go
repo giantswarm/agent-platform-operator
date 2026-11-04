@@ -60,6 +60,8 @@ func erasureCases(t *testing.T, c *cluster) {
 		serviceAccount := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "agents-erase", Namespace: fluxNS}}
 		c.fluxObject(t, serviceAccount, org)
 		c.create(t, newObject(helmReleaseGVK, ns, "triage", nil, map[string]any{"chart": map[string]any{}}))
+		// An Agent written outside git, without the operator's label.
+		c.create(t, newObject(agentGVK, ns, "by-hand", nil, agentSpec("By hand.", nil)))
 		c.sessions.add(ns, "alice@example.com", "11111111-1111-1111-1111-111111111111")
 		c.sessions.add(ns, "bob@example.com", "22222222-2222-2222-2222-222222222222")
 		other := c.organization(t, "org-erase-other", "kept")
@@ -240,7 +242,9 @@ type fakeSession struct {
 	gone bool
 }
 
-// fakeSessions stands in for kagent's session API.
+// fakeSessions stands in for kagent's session API as the erasure needs it:
+// it deletes any creator's session for the operator. kagent's session service
+// does that only for its control plane today (see kagent.Sessions.Delete).
 type fakeSessions struct {
 	log  *eventLog
 	mu   sync.Mutex

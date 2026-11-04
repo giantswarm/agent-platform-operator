@@ -114,7 +114,7 @@
                 },
                 "snapshotDelay": {
                     "type": "string",
-                    "description": "How long after the first deletion of a deleted organization's snapshot prefix it is deleted again: at least Substrate's actor workflow upload that started before the organization's last actor went has ended."
+                    "description": "How long after the first deletion of a deleted organization's snapshot prefix it is deleted again. Keep it at least Substrate's actor workflow deadline, which ate-api sets to 5m by default, so an upload that started before the organization's last actor went has ended."
                 },
                 "substrate": {
                     "type": "object",
@@ -376,6 +376,10 @@
                 "bucket": {
                     "type": "string",
                     "description": "Bucket of the organizations' worker snapshots: an organization's `status.snapshotPrefix` is `s3://<bucket>/<uid>`. Empty leaves it empty."
+                },
+                "region": {
+                    "type": "string",
+                    "description": "AWS region of the bucket, the AWS_REGION of the operator; empty takes the one the pod's environment sets, if any."
                 }
             }
         },

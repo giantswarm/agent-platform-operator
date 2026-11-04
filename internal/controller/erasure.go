@@ -294,7 +294,12 @@ func (r *OrganizationReconciler) eraseSessions(ctx context.Context, ns string) (
 // and deletes it once more after the snapshot delay.
 func (r *OrganizationReconciler) eraseSnapshots(ctx context.Context, org *v1alpha1.AgentPlatformOrganization, status *v1alpha1.AgentPlatformOrganizationStatus) (*waiting, error) {
 	e := r.Config.Erasure
-	prefix := r.snapshotPrefix(org)
+	// The prefix the organization's Harnesses wrote to, also when the bucket
+	// flag changed since.
+	prefix := org.Status.SnapshotPrefix
+	if prefix == "" {
+		prefix = r.snapshotPrefix(org)
+	}
 	if e.Snapshots == nil || prefix == "" {
 		return nil, nil
 	}

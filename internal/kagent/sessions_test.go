@@ -106,7 +106,7 @@ func TestDelete(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "deletes the session"},
-		{name: "a session already gone is no error", err: status.Error(codes.NotFound, "Session not found")},
+		{name: "a listed session kagent does not find is an error", err: status.Error(codes.NotFound, "Session not found"), wantErr: true},
 		{name: "a refusal is an error", err: status.Error(codes.PermissionDenied, "denied"), wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

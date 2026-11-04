@@ -86,6 +86,10 @@ While it erases, `Ready` is `False` with reason `Deleting`; `status.erasureStep`
 
 The erasure finds the organization's Flux Kustomization and Flux ServiceAccount, wherever they are, by two labels: `agent-platform.giantswarm.io/organization-object: flux` and `agent-platform.giantswarm.io/organization-uid: <uid>`.
 
+The erasure keeps its progress in `status.erasureStep` and `status.snapshotsErasedAt`: install the chart so that its CRD is upgraded with it (Flux `upgrade.crds: CreateReplace`), or the API server drops those fields.
+
+kagent's session service deletes another creator's session only for its own control plane today, so the Sessions step fails on such a session, with kagent's answer in the condition, until kagent authorizes the delete for a caller granted `delete` on `sessions.api.kagent.dev` cluster-wide.
+
 The operator calls kagent and Substrate as its own ServiceAccount, with a projected token of each server's audience (`erasure.kagent.audience`, `erasure.substrate.audience`): kagent must admit it as a machine caller with cluster-wide `list` on `sessions.api.kagent.dev`, and ate-api must trust the token. It deletes snapshots with the AWS SDK's default credentials: on a management cluster, the IRSA role in `serviceAccount.annotations`. The agent-platform chart renders that role and the kagent grant.
 
 ## Development

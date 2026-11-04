@@ -12,12 +12,16 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
+
+// timeout bounds one DeletePrefix.
+const timeout = 5 * time.Minute
 
 // S3 deletes snapshots from S3.
 type S3 struct{ client *s3.Client }
@@ -37,6 +41,9 @@ func NewS3WithClient(client *s3.Client) *S3 { return &S3{client: client} }
 // DeletePrefix deletes every object under prefix, s3://<bucket>/<path>: the
 // objects whose keys start with <path>/.
 func (s *S3) DeletePrefix(ctx context.Context, prefix string) error {
+	// A bucket that stops answering never holds the reconciler.
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	bucket, keyPrefix, err := parse(prefix)
 	if err != nil {
 		return err
