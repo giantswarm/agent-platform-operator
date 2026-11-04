@@ -241,7 +241,8 @@ func (r *OrganizationReconciler) ensureHelmRoleBinding(ctx context.Context, ns s
 }
 
 // ensureRoleBinding creates want, or brings the reconciler's own binding of
-// the same scope back to it. A RoleBinding's roleRef cannot change, so the
+// the same scope back to it: its subjects and the copied-from annotation;
+// annotations of other writers are kept. A RoleBinding's roleRef cannot change, so the
 // reconciler's own binding to another role is replaced.
 func (r *OrganizationReconciler) ensureRoleBinding(ctx context.Context, want *rbacv1.RoleBinding) error {
 	ns, name := want.Namespace, want.Name
@@ -254,11 +255,19 @@ func (r *OrganizationReconciler) ensureRoleBinding(ctx context.Context, want *rb
 	case existing.Labels[ObjectLabel] != want.Labels[ObjectLabel]:
 		logf.FromContext(ctx).V(1).Info("leaving an object the reconciler did not write", "namespace", ns, "kind", "RoleBinding", "name", name)
 		return nil
-	case existing.RoleRef == want.RoleRef && reflect.DeepEqual(existing.Subjects, want.Subjects) && reflect.DeepEqual(existing.Annotations, want.Annotations):
+	case existing.RoleRef == want.RoleRef && reflect.DeepEqual(existing.Subjects, want.Subjects) && existing.Annotations[CopiedFromAnnotation] == want.Annotations[CopiedFromAnnotation]:
 		return nil
 	case existing.RoleRef == want.RoleRef:
 		existing.Subjects = want.Subjects
-		existing.Annotations = want.Annotations
+		// Only the reconciler's own annotation: another writer's stay.
+		if from := want.Annotations[CopiedFromAnnotation]; from != "" {
+			if existing.Annotations == nil {
+				existing.Annotations = map[string]string{}
+			}
+			existing.Annotations[CopiedFromAnnotation] = from
+		} else {
+			delete(existing.Annotations, CopiedFromAnnotation)
+		}
 		if err := r.Client.Update(ctx, existing, client.FieldOwner(fieldManager)); err != nil {
 			return fmt.Errorf("update RoleBinding %s/%s: %w", ns, name, err)
 		}

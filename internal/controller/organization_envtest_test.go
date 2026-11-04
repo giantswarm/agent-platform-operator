@@ -72,6 +72,25 @@ func TestOrganizationEnvtest(t *testing.T) {
 		assert.Equal(t, []rbacv1.Subject{{Kind: rbacv1.ServiceAccountKind, Name: helmSA, Namespace: ns.Name}}, rb.Subjects)
 	})
 
+	t.Run("another writer's annotation on the Helm RoleBinding stays", func(t *testing.T) {
+		org := c.organization(t, "org-notes", "notes")
+		ns := c.readyNamespace(t, org)
+		rb := &rbacv1.RoleBinding{}
+		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns.Name, Name: helmSA}, rb))
+		rb.Annotations = map[string]string{"example.com/note": "kept"}
+		require.NoError(t, c.admin.Update(t.Context(), rb))
+
+		// A spec change reconciles the organization once more; its Ready
+		// condition observes the new generation after that reconcile.
+		org = c.get(t, org)
+		org.Spec.Workers.Replicas = 2
+		require.NoError(t, c.admin.Update(t.Context(), org))
+		c.readyAt(t, org, org.Generation)
+
+		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns.Name, Name: helmSA}, rb))
+		assert.Equal(t, "kept", rb.Annotations["example.com/note"])
+	})
+
 	t.Run("a lost status finds the namespace by its organization-uid label", func(t *testing.T) {
 		org := c.organization(t, "org-lost", "billing")
 		ns := c.readyNamespace(t, org)
@@ -188,6 +207,18 @@ func (c *cluster) readyNamespace(t *testing.T, org *v1alpha1.AgentPlatformOrgani
 		assert.NoError(ct, c.admin.Get(t.Context(), client.ObjectKey{Name: got.Status.Namespace}, ns))
 	}, timeout, tick)
 	return ns
+}
+
+// readyAt waits until org's Ready condition is True for generation.
+func (c *cluster) readyAt(t *testing.T, org *v1alpha1.AgentPlatformOrganization, generation int64) {
+	t.Helper()
+	require.EventuallyWithT(t, func(ct *assert.CollectT) {
+		ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, v1alpha1.ConditionReady)
+		if assert.NotNil(ct, ready) {
+			assert.Equal(ct, metav1.ConditionTrue, ready.Status)
+			assert.Equal(ct, generation, ready.ObservedGeneration)
+		}
+	}, timeout, tick)
 }
 
 // get reads org as the admin.
