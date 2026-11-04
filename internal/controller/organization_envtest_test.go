@@ -27,6 +27,7 @@ const (
 	mirrorParent    = "org-mirror"
 	kindClusterRole = "ClusterRole"
 	adminsBinding   = "platform-team"
+	namesParent     = "org-names"
 )
 
 func TestOrganizationEnvtest(t *testing.T) {
@@ -144,14 +145,19 @@ func TestOrganizationEnvtest(t *testing.T) {
 		}, timeout, tick)
 	})
 
-	t.Run("the CRD refuses a name longer than 50 characters", func(t *testing.T) {
-		createNamespace(t, c.admin, "org-names")
-		long := &v1alpha1.AgentPlatformOrganization{ObjectMeta: metav1.ObjectMeta{Name: strings.Repeat("a", 51), Namespace: "org-names"}}
+	t.Run("the CRD refuses a name longer than 50 characters or with a dot", func(t *testing.T) {
+		createNamespace(t, c.admin, namesParent)
+		long := &v1alpha1.AgentPlatformOrganization{ObjectMeta: metav1.ObjectMeta{Name: strings.Repeat("a", 51), Namespace: namesParent}}
 		err := c.admin.Create(t.Context(), long)
 		require.True(t, apierrors.IsInvalid(err), "a 51-character name was not refused as invalid: %v", err)
 		assert.Contains(t, err.Error(), "at most 50 characters")
 
-		fifty := &v1alpha1.AgentPlatformOrganization{ObjectMeta: metav1.ObjectMeta{Name: strings.Repeat("a", 50), Namespace: "org-names"}}
+		dotted := &v1alpha1.AgentPlatformOrganization{ObjectMeta: metav1.ObjectMeta{Name: "team.payments", Namespace: namesParent}}
+		err = c.admin.Create(t.Context(), dotted)
+		require.True(t, apierrors.IsInvalid(err), "a name with a dot was not refused as invalid: %v", err)
+		assert.Contains(t, err.Error(), "holds no dot")
+
+		fifty := &v1alpha1.AgentPlatformOrganization{ObjectMeta: metav1.ObjectMeta{Name: strings.Repeat("a", 50), Namespace: namesParent}}
 		require.NoError(t, c.admin.Create(t.Context(), fifty))
 		c.readyNamespace(t, fifty)
 	})

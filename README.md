@@ -23,7 +23,7 @@ spec:
 - `spec.harnesses`: the curated Harnesses the organization gets.
 - `spec.workers.replicas`: the warm workers of the organization's WorkerPool.
 - The annotation `agent-platform.giantswarm.io/display-name` holds the name people see. It is not a spec field.
-- The name is at most 50 characters. The CRD refuses a longer name.
+- The name is at most 50 characters and holds no dot, because the organization namespace name `agents-<name>-…` must be a DNS label. The CRD refuses other names.
 
 The status holds:
 

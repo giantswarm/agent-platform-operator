@@ -89,6 +89,7 @@ type AgentPlatformOrganizationStatus struct {
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:validation:XValidation:rule="size(self.metadata.name) <= 50",message="the name of an AgentPlatformOrganization is at most 50 characters: the organization namespace is agents-<name>- plus 5 random characters"
+// +kubebuilder:validation:XValidation:rule="!self.metadata.name.contains('.')",message="the name of an AgentPlatformOrganization holds no dot: the organization namespace agents-<name>- is a DNS label"
 type AgentPlatformOrganization struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
