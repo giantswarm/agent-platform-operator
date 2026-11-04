@@ -4,13 +4,16 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"strings"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -38,6 +41,11 @@ func run() error {
 		cfg                     controller.Config
 		networkPolicyFlavor     string
 		networkPolicies         string
+		curatedCopies           bool
+		curatedWorkerPool       string
+		kagentAPIVersion        string
+		workerPoolAPIVersion    string
+		objectQuota             string
 		syncPeriod              time.Duration
 		metricsAddr, probeAddr  string
 		leaderElect             bool
@@ -54,6 +62,11 @@ func run() error {
 	flag.StringVar(&cfg.HelmServiceAccount, "helmrelease-service-account", "kagent-flux", "The ServiceAccount the organization's HelmReleases run as, kept in every organization namespace; empty keeps none")
 	flag.StringVar(&cfg.HelmClusterRole, "helm-cluster-role", "agent-platform-tenant-flux", "ClusterRole bound to --helmrelease-service-account in every organization namespace")
 	flag.StringVar(&cfg.SnapshotBucket, "snapshot-bucket", "", "Bucket of the organizations' worker snapshots: status.snapshotPrefix is s3://<bucket>/<uid>; empty leaves it empty")
+	flag.BoolVar(&curatedCopies, "curated-copies", false, "Copy the curated objects of --platform-namespace into every organization namespace: the Harnesses its spec.harnesses names, the WorkerPool --curated-worker-pool with its ServiceAccount, the Agents and AgentTemplates labelled "+v1alpha1.CuratedLabel+"=true and the RemoteMCPServers they name. Needs --snapshot-bucket")
+	flag.StringVar(&curatedWorkerPool, "curated-worker-pool", "kagent-default", "The curated WorkerPool in --platform-namespace every organization gets a copy of")
+	flag.StringVar(&kagentAPIVersion, "kagent-api-version", "api.kagent.dev/v1alpha3", "api.kagent.dev API version of the Agents, AgentTemplates, Harnesses, ModelConfigs and RemoteMCPServers")
+	flag.StringVar(&workerPoolAPIVersion, "workerpool-api-version", "ate.dev/v1alpha1", "ate.dev API version of the WorkerPool")
+	flag.StringVar(&objectQuota, "object-quota", "", "Comma-separated <resource>=<count> hard limits of the ResourceQuota "+controller.ObjectQuotaName+" kept in every organization namespace, for example configmaps=500,count/agents.api.kagent.dev=200; empty keeps none")
 	flag.DurationVar(&syncPeriod, "sync-period", 10*time.Minute, "How often every organization is reconciled without a change")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "Address the metrics endpoint binds to; 0 disables it")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "Address the health probes bind to")
@@ -70,6 +83,24 @@ func run() error {
 	}
 	cfg.NetworkPolicyGVK = gvk
 	cfg.NetworkPolicies = splitList(networkPolicies)
+	if cfg.ObjectQuota, err = parseQuota(objectQuota); err != nil {
+		return err
+	}
+	if curatedCopies {
+		if cfg.SnapshotBucket == "" {
+			return errors.New("--curated-copies needs --snapshot-bucket: a Harness copy's snapshot location is s3://<bucket>/<uid>/<harness>")
+		}
+		if curatedWorkerPool == "" {
+			return errors.New("--curated-copies needs --curated-worker-pool")
+		}
+		cfg.Curated.WorkerPool = curatedWorkerPool
+		if cfg.Curated.Kagent, err = schema.ParseGroupVersion(kagentAPIVersion); err != nil {
+			return fmt.Errorf("--kagent-api-version: %w", err)
+		}
+		if cfg.Curated.Substrate, err = schema.ParseGroupVersion(workerPoolAPIVersion); err != nil {
+			return fmt.Errorf("--workerpool-api-version: %w", err)
+		}
+	}
 
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
@@ -91,15 +122,25 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("manager: %w", err)
 	}
-	// The network policy kind is watched: a kind the API server does not
-	// serve would fail only later, as a watch that never syncs.
+	// The network policy kind and the curated kinds are watched: a kind the
+	// API server does not serve would fail only later, as a watch that never
+	// syncs.
+	watched := map[schema.GroupVersionKind]string{}
 	if !gvk.Empty() {
-		_, err := mgr.GetRESTMapper().RESTMapping(gvk.GroupKind(), gvk.Version)
+		watched[gvk] = "--network-policy-flavor " + networkPolicyFlavor
+	}
+	if cfg.Curated.Enabled() {
+		for _, k := range cfg.Curated.Kinds() {
+			watched[k] = "--curated-copies"
+		}
+	}
+	for k, by := range watched {
+		_, err := mgr.GetRESTMapper().RESTMapping(k.GroupKind(), k.Version)
 		switch {
 		case meta.IsNoMatchError(err):
-			return fmt.Errorf("--network-policy-flavor %s: the API server does not serve %s %s", networkPolicyFlavor, gvk.GroupVersion(), gvk.Kind)
+			return fmt.Errorf("%s: the API server does not serve %s %s", by, k.GroupVersion(), k.Kind)
 		case err != nil:
-			return fmt.Errorf("discovering %s: %w", gvk, err)
+			return fmt.Errorf("discovering %s: %w", k, err)
 		}
 	}
 	r := &controller.OrganizationReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Config: cfg}
@@ -126,6 +167,26 @@ func networkPolicyGVK(flavor string) (schema.GroupVersionKind, error) {
 		return schema.GroupVersionKind{Group: "cilium.io", Version: "v2", Kind: "CiliumNetworkPolicy"}, nil
 	}
 	return schema.GroupVersionKind{}, fmt.Errorf("--network-policy-flavor %q: kubernetes, cilium or empty", flavor)
+}
+
+// parseQuota reads <resource>=<count> pairs, comma-separated.
+func parseQuota(s string) (corev1.ResourceList, error) {
+	var out corev1.ResourceList
+	for _, pair := range splitList(s) {
+		name, count, ok := strings.Cut(pair, "=")
+		if !ok {
+			return nil, fmt.Errorf("--object-quota: %q is not <resource>=<count>", pair)
+		}
+		q, err := resource.ParseQuantity(strings.TrimSpace(count))
+		if err != nil {
+			return nil, fmt.Errorf("--object-quota: %s: %w", name, err)
+		}
+		if out == nil {
+			out = corev1.ResourceList{}
+		}
+		out[corev1.ResourceName(strings.TrimSpace(name))] = q
+	}
+	return out, nil
 }
 
 func splitList(s string) []string {

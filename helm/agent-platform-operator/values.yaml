@@ -55,10 +55,47 @@ snapshots:
   # `status.snapshotPrefix` is `s3://<bucket>/<uid>`. Empty leaves it empty.
   bucket: ""
 
+curated:
+  # -- Copy the curated objects of `platformNamespace`, read-only, into every
+  # organization namespace: the Harnesses an organization's `spec.harnesses`
+  # names (pointed at its own pool and snapshot prefix, kagent memory off),
+  # the WorkerPool `workerPool` with its ServiceAccount, the Agents and
+  # AgentTemplates labelled `agent-platform.giantswarm.io/curated: "true"`
+  # (their template's `modelConfig` set to the organization's default
+  # ModelConfig) and the RemoteMCPServers they name. Needs `snapshots.bucket`
+  # and an API server that serves `kagentApiVersion` and
+  # `workerPoolApiVersion`.
+  enabled: false
+  # -- The curated WorkerPool in `platformNamespace`.
+  workerPool: kagent-default
+  # -- api.kagent.dev API version of the Agents, AgentTemplates, Harnesses,
+  # ModelConfigs and RemoteMCPServers.
+  kagentApiVersion: api.kagent.dev/v1alpha3
+  # -- ate.dev API version of the WorkerPool.
+  workerPoolApiVersion: ate.dev/v1alpha1
+
+# @schema additionalProperties: true
+# -- Hard limits of the ResourceQuota `agent-platform-organization-objects`
+# kept in every organization namespace, as `<resource>: <count>`: object
+# counts, so one organization cannot flood the API server. A key set to
+# `null` drops its limit; no key keeps no ResourceQuota.
+# @default -- object counts of the kinds an organization writes
+objectQuota:
+  configmaps: "500"
+  secrets: "1000"
+  services: "100"
+  serviceaccounts: "100"
+  count/rolebindings.rbac.authorization.k8s.io: "200"
+  count/agents.api.kagent.dev: "200"
+  count/agenttemplates.api.kagent.dev: "200"
+  count/modelconfigs.api.kagent.dev: "100"
+  count/remotemcpservers.api.kagent.dev: "200"
+  count/helmreleases.helm.toolkit.fluxcd.io: "200"
+
 # -- How often every organization is reconciled without a change. A change to
 # an organization, its namespace, its objects there, a parent's
-# organizations-admin RoleBinding or a copied network policy reconciles it at
-# once.
+# organizations-admin RoleBinding, a copied network policy, a curated object
+# or a ModelConfig in its namespace reconciles it at once.
 syncPeriod: 10m
 
 # -- Container resources.

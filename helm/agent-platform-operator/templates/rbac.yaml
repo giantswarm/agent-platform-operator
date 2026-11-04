@@ -3,7 +3,10 @@ The operator's own permissions.
 
 RBAC cannot select namespaces by label, so the ClusterRole lets the
 ServiceAccount create namespaces and write RoleBindings, ServiceAccounts,
-OCIRepositories and network policies in every namespace. The
+OCIRepositories, network policies and ResourceQuotas in every namespace, and
+with curated.enabled write and delete Agents, AgentTemplates, Harnesses,
+RemoteMCPServers and WorkerPools in every namespace, the platform namespace's
+curated sources included. The
 ValidatingAdmissionPolicy that narrows these writes to organization namespaces
 (and namespace creation to agents-* namespaces carrying the organization
 labels) is rendered by the agent-platform chart, not here.
@@ -50,6 +53,25 @@ rules:
   - apiGroups: ["source.toolkit.fluxcd.io"]
     resources: ["ocirepositories"]
     verbs: ["get", "create"]
+  # The ResourceQuota on object counts in every organization namespace.
+  - apiGroups: [""]
+    resources: ["resourcequotas"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
+  {{- if .Values.curated.enabled }}
+  # The curated copies: read in platformNamespace, written in the
+  # organization namespaces, deleted there when no longer curated.
+  - apiGroups: ["api.kagent.dev"]
+    resources: ["agents", "agenttemplates", "harnesses", "remotemcpservers"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
+  - apiGroups: ["ate.dev"]
+    resources: ["workerpools"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
+  # The ModelConfigs of the organization namespaces: whether one exists (the
+  # worker replica rule) and which is marked as the default.
+  - apiGroups: ["api.kagent.dev"]
+    resources: ["modelconfigs"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
   {{- with $netpol.resource }}
   # The network policies: read in platformNamespace, written in the
   # organization namespaces.

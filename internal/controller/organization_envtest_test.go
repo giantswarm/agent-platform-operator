@@ -260,15 +260,24 @@ func TestOrganizationEnvtest(t *testing.T) {
 		require.NoError(t, c.admin.Create(t.Context(), fifty))
 		c.readyNamespace(t, fifty)
 	})
+
+	curatedCases(t, c)
 }
 
 // organization creates an AgentPlatformOrganization in a new parent namespace.
 func (c *cluster) organization(t *testing.T, parent, name string) *v1alpha1.AgentPlatformOrganization {
 	t.Helper()
+	return c.organizationWith(t, parent, name, v1alpha1.AgentPlatformOrganizationSpec{Workers: v1alpha1.Workers{Replicas: 1}})
+}
+
+// organizationWith creates an AgentPlatformOrganization of spec in a new
+// parent namespace.
+func (c *cluster) organizationWith(t *testing.T, parent, name string, spec v1alpha1.AgentPlatformOrganizationSpec) *v1alpha1.AgentPlatformOrganization {
+	t.Helper()
 	createNamespace(t, c.admin, parent)
 	org := &v1alpha1.AgentPlatformOrganization{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: parent},
-		Spec:       v1alpha1.AgentPlatformOrganizationSpec{Workers: v1alpha1.Workers{Replicas: 1}},
+		Spec:       spec,
 	}
 	require.NoError(t, c.admin.Create(t.Context(), org))
 	return org

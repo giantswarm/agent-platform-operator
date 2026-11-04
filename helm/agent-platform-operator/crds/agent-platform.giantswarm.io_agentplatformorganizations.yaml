@@ -64,8 +64,11 @@ spec:
                 description: Workers sizes the organization's WorkerPool.
                 properties:
                   replicas:
-                    description: Replicas is the number of warm workers of the organization's
-                      WorkerPool.
+                    description: |-
+                      Replicas is the number of warm workers of the organization's WorkerPool
+                      while the organization can use them: the pool runs 0 while the
+                      organization namespace holds no ModelConfig and while the organization
+                      is Orphaned.
                     format: int32
                     minimum: 0
                     type: integer

@@ -41,7 +41,7 @@ func (c ChartSource) object(ns string) *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": c.APIVersion,
 		"kind":       "OCIRepository",
-		"metadata":   map[string]any{"name": c.Name(), "namespace": ns},
+		"metadata":   map[string]any{fieldName: c.Name(), "namespace": ns},
 		"spec": map[string]any{
 			"interval": c.Interval,
 			"url":      c.URL,
@@ -64,13 +64,13 @@ func ownLabels(scope string) map[string]string {
 	return map[string]string{ObjectLabel: scope, managedByLabel: managedByValue}
 }
 
-// stamp marks obj as the reconciler's own, in ns.
-func stamp(obj *unstructured.Unstructured, ns, from string) map[string]string {
+// stamp marks obj as the reconciler's own, of scope, in ns.
+func stamp(obj *unstructured.Unstructured, ns, scope, from string) map[string]string {
 	l := obj.GetLabels()
 	if l == nil {
 		l = map[string]string{}
 	}
-	for k, v := range ownLabels(ScopeNamespace) {
+	for k, v := range ownLabels(scope) {
 		l[k] = v
 	}
 	obj.SetLabels(l)
@@ -100,15 +100,11 @@ func (r *OrganizationReconciler) create(ctx context.Context, obj client.Object, 
 // copyObject copies a platform object of gvk into ns. A missing source makes
 // the organization not Ready; its creation reconciles the organization again.
 func (r *OrganizationReconciler) copyObject(ctx context.Context, gvk schema.GroupVersionKind, name, ns string) error {
-	src := object(gvk)
-	err := r.Client.Get(ctx, client.ObjectKey{Namespace: r.Config.PlatformNamespace, Name: name}, src)
-	if apierrors.IsNotFound(err) {
-		return &notReadyError{reason: reasonSourceMissing, message: fmt.Sprintf("the platform %s %s/%s to copy is missing", gvk.Kind, r.Config.PlatformNamespace, name)}
-	}
+	src, err := r.platformObject(ctx, gvk, name)
 	if err != nil {
-		return fmt.Errorf("get %s %s/%s: %w", gvk.Kind, r.Config.PlatformNamespace, name, err)
+		return err
 	}
-	return r.ensure(ctx, ns, copyOf(src, ns), src.GetNamespace()+"/"+src.GetName())
+	return r.ensureScoped(ctx, ns, ScopeNamespace, copyOf(src, ns), objectRef(src), contains)
 }
 
 // copyOf is src's spec under the same name in ns, with no metadata of src's.
@@ -116,7 +112,7 @@ func copyOf(src *unstructured.Unstructured, ns string) *unstructured.Unstructure
 	obj := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": src.GetAPIVersion(),
 		"kind":       src.GetKind(),
-		"metadata":   map[string]any{"name": src.GetName(), "namespace": ns},
+		"metadata":   map[string]any{fieldName: src.GetName(), "namespace": ns},
 	}}
 	if spec, ok := src.Object["spec"]; ok {
 		obj.Object["spec"] = runtime.DeepCopyJSONValue(spec)
@@ -124,11 +120,13 @@ func copyOf(src *unstructured.Unstructured, ns string) *unstructured.Unstructure
 	return obj
 }
 
-// ensure creates obj, or brings the reconciler's own copy back to it when its
-// spec does not contain obj's or its labels differ. An object of that name
-// the reconciler did not write is left alone.
-func (r *OrganizationReconciler) ensure(ctx context.Context, ns string, obj *unstructured.Unstructured, from string) error {
-	want := stamp(obj, ns, from)
+// ensureScoped creates obj as the reconciler's own of scope, or brings its
+// own copy back to it when same(copy's spec, obj's spec) is false or its
+// labels differ. An object of that name the reconciler did not write is left
+// alone; for a curated copy that makes the organization not Ready, since the
+// name is the curated object's.
+func (r *OrganizationReconciler) ensureScoped(ctx context.Context, ns, scope string, obj *unstructured.Unstructured, from string, same func(have, want any) bool) error {
+	want := stamp(obj, ns, scope, from)
 	kind := obj.GetKind()
 	existing := object(obj.GroupVersionKind())
 	err := r.Client.Get(ctx, client.ObjectKeyFromObject(obj), existing)
@@ -138,11 +136,14 @@ func (r *OrganizationReconciler) ensure(ctx context.Context, ns string, obj *uns
 	if err != nil {
 		return fmt.Errorf("get %s %s/%s: %w", kind, ns, obj.GetName(), err)
 	}
-	if existing.GetLabels()[ObjectLabel] != ScopeNamespace {
+	if existing.GetLabels()[ObjectLabel] != scope {
+		if scope == ScopeCurated {
+			return &notReadyError{reason: reasonNameTaken, message: fmt.Sprintf("the %s %s/%s is not the operator's copy of %s, so the operator cannot write it", kind, ns, obj.GetName(), from)}
+		}
 		logf.FromContext(ctx).V(1).Info("leaving an object the reconciler did not write", "namespace", ns, "kind", kind, "name", obj.GetName())
 		return nil
 	}
-	if contains(existing.Object["spec"], obj.Object["spec"]) && subset(existing.GetLabels(), want) {
+	if same(existing.Object["spec"], obj.Object["spec"]) && subset(existing.GetLabels(), want) {
 		return nil
 	}
 	existing.Object["spec"] = obj.Object["spec"]
@@ -162,7 +163,7 @@ func (r *OrganizationReconciler) ensure(ctx context.Context, ns string, obj *uns
 // it after: the agent chart's source moves to another range only through a
 // migration, as in agent-manager.
 func (r *OrganizationReconciler) ensureExists(ctx context.Context, ns string, obj *unstructured.Unstructured) error {
-	stamp(obj, ns, "")
+	stamp(obj, ns, ScopeNamespace, "")
 	err := r.Client.Get(ctx, client.ObjectKeyFromObject(obj), object(obj.GroupVersionKind()))
 	if err == nil {
 		return nil
@@ -215,9 +216,10 @@ func subset(have, want map[string]string) bool {
 
 // ---- typed objects ----------------------------------------------------------
 
-// ensureServiceAccount creates the ServiceAccount; one that exists is kept as
-// it is (a ServiceAccount has nothing to drift).
-func (r *OrganizationReconciler) ensureServiceAccount(ctx context.Context, ns, name string) error {
+// ensureServiceAccount creates the ServiceAccount, the reconciler's own of
+// scope; one that exists is kept as it is (a ServiceAccount has nothing to
+// drift).
+func (r *OrganizationReconciler) ensureServiceAccount(ctx context.Context, ns, name, scope string) error {
 	err := r.Client.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &corev1.ServiceAccount{})
 	if err == nil {
 		return nil
@@ -225,7 +227,7 @@ func (r *OrganizationReconciler) ensureServiceAccount(ctx context.Context, ns, n
 	if !apierrors.IsNotFound(err) {
 		return fmt.Errorf("get ServiceAccount %s/%s: %w", ns, name, err)
 	}
-	return r.create(ctx, &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, Labels: ownLabels(ScopeNamespace)}}, "ServiceAccount")
+	return r.create(ctx, &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, Labels: ownLabels(scope)}}, "ServiceAccount")
 }
 
 // ensureHelmRoleBinding binds the Helm ClusterRole to the Helm
