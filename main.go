@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -89,6 +90,17 @@ func run() error {
 	})
 	if err != nil {
 		return fmt.Errorf("manager: %w", err)
+	}
+	// The network policy kind is watched: a kind the API server does not
+	// serve would fail only later, as a watch that never syncs.
+	if !gvk.Empty() {
+		_, err := mgr.GetRESTMapper().RESTMapping(gvk.GroupKind(), gvk.Version)
+		switch {
+		case meta.IsNoMatchError(err):
+			return fmt.Errorf("--network-policy-flavor %s: the API server does not serve %s %s", networkPolicyFlavor, gvk.GroupVersion(), gvk.Kind)
+		case err != nil:
+			return fmt.Errorf("discovering %s: %w", gvk, err)
+		}
 	}
 	r := &controller.OrganizationReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Config: cfg}
 	if err := r.SetupWithManager(mgr); err != nil {
