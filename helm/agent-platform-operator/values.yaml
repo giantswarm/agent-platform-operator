@@ -74,12 +74,13 @@ curated:
   # -- ate.dev API version of the WorkerPool.
   workerPoolApiVersion: ate.dev/v1alpha1
 
+# @schema additionalProperties: true
 # -- Hard limits of the ResourceQuota `agent-platform-organization-objects`
 # kept in every organization namespace, as `<resource>: <count>`: object
 # counts, so one organization cannot flood the API server. A key set to
 # `null` drops its limit; no key keeps no ResourceQuota.
 # @default -- object counts of the kinds an organization writes
-objectQuota:  # @schema additionalProperties: true
+objectQuota:
   configmaps: "500"
   secrets: "1000"
   services: "100"
