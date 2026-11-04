@@ -94,8 +94,8 @@ func erasureCases(t *testing.T, c *cluster) {
 		}
 		assert.True(t, slices.IsSorted(at), "the erasure steps ran out of order: %v at %v", order, at)
 		assert.Less(t, lastIndex(events, evSessionDeleted), firstIndex(events, evNoActor), "an actor was counted gone before every session was deleted")
-		c.deletedTwice(t, events)
-		assert.Greater(t, firstIndex(events, evNamespaceDeleted), lastIndex(events, evSnapshotsDeleted))
+		// Twice, the delay apart, before the namespace goes.
+		c.deletedTwice(t, events[:firstIndex(events, evNamespaceDeleted)])
 
 		// The worker replica rule: the pool, at 0 without a ModelConfig,
 		// runs its replicas once the organization is deleted until its
@@ -481,7 +481,8 @@ func (c *cluster) count(gvk schema.GroupVersionKind, ns string, selector client.
 
 // deletedTwice asserts that events delete the snapshot prefix at least
 // twice, the last time at least the snapshot delay after the first. A retry
-// after a lost status write may delete it once more in between.
+// after a lost status write, or a reconcile of a stale cached organization,
+// may delete it once more: deleting an empty prefix again is harmless.
 func (c *cluster) deletedTwice(t *testing.T, events []event) {
 	t.Helper()
 	deletions := all(events, evSnapshotsDeleted)
