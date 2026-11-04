@@ -221,6 +221,29 @@ func TestOrganizationEnvtest(t *testing.T) {
 		}, timeout, tick)
 	})
 
+	t.Run("a parent binding whose name the organization namespace already holds is reported", func(t *testing.T) {
+		org := c.organization(t, "org-taken", "taken")
+		c.readyNamespace(t, org)
+		// The Helm RoleBinding holds the name kagent-flux in the
+		// organization namespace.
+		taken := &rbacv1.RoleBinding{
+			ObjectMeta: metav1.ObjectMeta{Name: helmSA, Namespace: "org-taken"},
+			RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: kindClusterRole, Name: controller.OrganizationsAdminClusterRole},
+			Subjects:   []rbacv1.Subject{{Kind: rbacv1.UserKind, APIGroup: rbacv1.GroupName, Name: "carol@example.com"}},
+		}
+		require.NoError(t, c.admin.Create(t.Context(), taken))
+		require.EventuallyWithT(t, func(ct *assert.CollectT) {
+			ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, v1alpha1.ConditionReady)
+			if assert.NotNil(ct, ready) {
+				assert.Equal(ct, metav1.ConditionFalse, ready.Status)
+				assert.Equal(ct, "NameTaken", ready.Reason)
+			}
+		}, timeout, tick)
+
+		require.NoError(t, c.admin.Delete(t.Context(), taken))
+		c.readyNamespace(t, org)
+	})
+
 	t.Run("the CRD refuses a name longer than 50 characters or with a dot", func(t *testing.T) {
 		createNamespace(t, c.admin, namesParent)
 		long := &v1alpha1.AgentPlatformOrganization{ObjectMeta: metav1.ObjectMeta{Name: strings.Repeat("a", 51), Namespace: namesParent}}

@@ -252,8 +252,9 @@ func (r *OrganizationReconciler) ensureRoleBinding(ctx context.Context, want *rb
 	case err != nil:
 		return fmt.Errorf("get RoleBinding %s/%s: %w", ns, name, err)
 	case existing.Labels[ObjectLabel] != want.Labels[ObjectLabel]:
-		logf.FromContext(ctx).V(1).Info("leaving an object the reconciler did not write", "namespace", ns, "kind", "RoleBinding", "name", name)
-		return nil
+		// Another object holds the name: it is left as it is, and the
+		// organization is not Ready until the name is free.
+		return &notReadyError{reason: reasonNameTaken, message: fmt.Sprintf("the RoleBinding %s/%s is not the operator's %s binding, so the operator cannot write it", ns, name, want.Labels[ObjectLabel])}
 	case existing.RoleRef == want.RoleRef && reflect.DeepEqual(existing.Subjects, want.Subjects) && existing.Annotations[CopiedFromAnnotation] == want.Annotations[CopiedFromAnnotation]:
 		return nil
 	case existing.RoleRef == want.RoleRef:

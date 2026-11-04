@@ -75,6 +75,7 @@ const (
 	reasonReconcileFailed      = "ReconcileFailed"
 	reasonNamespaceTerminating = "NamespaceTerminating"
 	reasonSourceMissing        = "SourceMissing"
+	reasonNameTaken            = "NameTaken"
 )
 
 // Config is what the reconciler keeps and where it copies it from.
@@ -143,7 +144,7 @@ func (r *OrganizationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&corev1.Namespace{}, handler.EnqueueRequestsFromMapFunc(organizationOfLabels)).
 		Watches(&corev1.ServiceAccount{}, inOrganization, builder.WithPredicates(isOwn)).
 		// A parent's organizations-admin binding reconciles the parent's
-		// organizations; a mirror its own.
+		// organizations; a binding in an organization namespace its own.
 		Watches(&rbacv1.RoleBinding{}, handler.EnqueueRequestsFromMapFunc(r.organizationsOfBinding))
 	if !r.Config.NetworkPolicyGVK.Empty() {
 		specOrLabels := predicate.Or(predicate.GenerationChangedPredicate{}, predicate.LabelChangedPredicate{})
@@ -191,10 +192,9 @@ func (r *OrganizationReconciler) organizationsOfBinding(ctx context.Context, o c
 	if rb, ok := o.(*rbacv1.RoleBinding); ok && isOrganizationsAdmin(rb.RoleRef) {
 		reqs = r.organizationsOf(ctx, rb.Namespace)
 	}
-	if _, ok := o.GetLabels()[ObjectLabel]; ok {
-		reqs = append(reqs, r.organizationOfNamespace(ctx, o)...)
-	}
-	return reqs
+	// Any binding in an organization namespace: the reconciler's own, or
+	// one that holds a name the reconciler needs.
+	return append(reqs, r.organizationOfNamespace(ctx, o)...)
 }
 
 // organizationsOfPolicy maps a platform network policy to every organization
