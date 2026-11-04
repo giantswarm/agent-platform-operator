@@ -1,0 +1,337 @@
+package controller
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"path"
+	"reflect"
+	"strings"
+
+	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
+)
+
+// ChartSource is the agent chart's OCIRepository, as agent-manager composes
+// it (agents.BuildOCIRepository): an organization's HelmReleases reference it
+// by the chart's name, the last segment of URL.
+type ChartSource struct {
+	URL          string
+	Semver       string
+	SemverFilter string
+	Interval     string
+	APIVersion   string
+}
+
+// Name is the OCIRepository's name: the chart's.
+func (c ChartSource) Name() string { return path.Base(c.URL) }
+
+func (c ChartSource) object(ns string) *unstructured.Unstructured {
+	ref := map[string]any{"semver": c.Semver}
+	if c.SemverFilter != "" {
+		ref["semverFilter"] = c.SemverFilter
+	}
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": c.APIVersion,
+		"kind":       "OCIRepository",
+		"metadata":   map[string]any{"name": c.Name(), "namespace": ns},
+		"spec": map[string]any{
+			"interval": c.Interval,
+			"url":      c.URL,
+			"ref":      ref,
+		},
+	}}
+}
+
+// ---- unstructured objects -------------------------------------------------
+
+// object is an empty object of gvk.
+func object(gvk schema.GroupVersionKind) *unstructured.Unstructured {
+	u := &unstructured.Unstructured{}
+	u.SetGroupVersionKind(gvk)
+	return u
+}
+
+// ownLabels are the labels of what the reconciler writes.
+func ownLabels(scope string) map[string]string {
+	return map[string]string{ObjectLabel: scope, managedByLabel: managedByValue}
+}
+
+// stamp marks obj as the reconciler's own, in ns.
+func stamp(obj *unstructured.Unstructured, ns, from string) map[string]string {
+	l := obj.GetLabels()
+	if l == nil {
+		l = map[string]string{}
+	}
+	for k, v := range ownLabels(ScopeNamespace) {
+		l[k] = v
+	}
+	obj.SetLabels(l)
+	if from != "" {
+		obj.SetAnnotations(map[string]string{CopiedFromAnnotation: from})
+	}
+	obj.SetNamespace(ns)
+	return l
+}
+
+// create writes obj. An object of that name that exists already is left as
+// it is: it is another writer's, or the reconciler's own that the read did
+// not see yet, whose event reconciles the organization again.
+func (r *OrganizationReconciler) create(ctx context.Context, obj client.Object, kind string) error {
+	err := r.Client.Create(ctx, obj, client.FieldOwner(fieldManager))
+	switch {
+	case apierrors.IsAlreadyExists(err):
+		logf.FromContext(ctx).V(1).Info("leaving an object the reconciler did not write", "namespace", obj.GetNamespace(), "kind", kind, "name", obj.GetName())
+		return nil
+	case err != nil:
+		return fmt.Errorf("create %s %s/%s: %w", kind, obj.GetNamespace(), obj.GetName(), err)
+	}
+	logf.FromContext(ctx).Info("organization object created", "namespace", obj.GetNamespace(), "kind", kind, "name", obj.GetName())
+	return nil
+}
+
+// copyObject copies a platform object of gvk into ns; a missing source is
+// logged and skipped.
+func (r *OrganizationReconciler) copyObject(ctx context.Context, gvk schema.GroupVersionKind, name, ns string) error {
+	src := object(gvk)
+	err := r.Client.Get(ctx, client.ObjectKey{Namespace: r.Config.PlatformNamespace, Name: name}, src)
+	if apierrors.IsNotFound(err) {
+		logf.FromContext(ctx).Info("a platform object to copy is missing", "kind", gvk.Kind, "name", name, "platformNamespace", r.Config.PlatformNamespace, "namespace", ns)
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("get %s %s/%s: %w", gvk.Kind, r.Config.PlatformNamespace, name, err)
+	}
+	return r.ensure(ctx, ns, copyOf(src, ns), src.GetNamespace()+"/"+src.GetName())
+}
+
+// copyOf is src's spec under the same name in ns, with no metadata of src's.
+func copyOf(src *unstructured.Unstructured, ns string) *unstructured.Unstructured {
+	obj := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": src.GetAPIVersion(),
+		"kind":       src.GetKind(),
+		"metadata":   map[string]any{"name": src.GetName(), "namespace": ns},
+	}}
+	if spec, ok := src.Object["spec"]; ok {
+		obj.Object["spec"] = runtime.DeepCopyJSONValue(spec)
+	}
+	return obj
+}
+
+// ensure creates obj, or brings the reconciler's own copy back to it when its
+// spec does not contain obj's or its labels differ. An object of that name
+// the reconciler did not write is left alone.
+func (r *OrganizationReconciler) ensure(ctx context.Context, ns string, obj *unstructured.Unstructured, from string) error {
+	want := stamp(obj, ns, from)
+	kind := obj.GetKind()
+	existing := object(obj.GroupVersionKind())
+	err := r.Client.Get(ctx, client.ObjectKeyFromObject(obj), existing)
+	if apierrors.IsNotFound(err) {
+		return r.create(ctx, obj, kind)
+	}
+	if err != nil {
+		return fmt.Errorf("get %s %s/%s: %w", kind, ns, obj.GetName(), err)
+	}
+	if existing.GetLabels()[ObjectLabel] != ScopeNamespace {
+		logf.FromContext(ctx).V(1).Info("leaving an object the reconciler did not write", "namespace", ns, "kind", kind, "name", obj.GetName())
+		return nil
+	}
+	if contains(existing.Object["spec"], obj.Object["spec"]) && subset(existing.GetLabels(), want) {
+		return nil
+	}
+	existing.Object["spec"] = obj.Object["spec"]
+	merged := existing.GetLabels()
+	for k, v := range want {
+		merged[k] = v
+	}
+	existing.SetLabels(merged)
+	if err := r.Client.Update(ctx, existing, client.FieldOwner(fieldManager)); err != nil {
+		return fmt.Errorf("update %s %s/%s: %w", kind, ns, obj.GetName(), err)
+	}
+	logf.FromContext(ctx).Info("organization object updated", "namespace", ns, "kind", kind, "name", obj.GetName())
+	return nil
+}
+
+// ensureExists creates obj when nothing of its name exists and never changes
+// it after: the agent chart's source moves to another range only through a
+// migration, as in agent-manager.
+func (r *OrganizationReconciler) ensureExists(ctx context.Context, ns string, obj *unstructured.Unstructured) error {
+	stamp(obj, ns, "")
+	err := r.Client.Get(ctx, client.ObjectKeyFromObject(obj), object(obj.GroupVersionKind()))
+	if err == nil {
+		return nil
+	}
+	if !apierrors.IsNotFound(err) {
+		return fmt.Errorf("get %s %s/%s: %w", obj.GetKind(), ns, obj.GetName(), err)
+	}
+	return r.create(ctx, obj, obj.GetKind())
+}
+
+// contains reports whether every field of want is in have with the same
+// value: the API server adds defaults to what was written, which is no drift.
+func contains(have, want any) bool {
+	switch w := want.(type) {
+	case map[string]any:
+		h, ok := have.(map[string]any)
+		if !ok {
+			return false
+		}
+		for k, v := range w {
+			if !contains(h[k], v) {
+				return false
+			}
+		}
+		return true
+	case []any:
+		h, ok := have.([]any)
+		if !ok || len(h) != len(w) {
+			return false
+		}
+		for i := range w {
+			if !contains(h[i], w[i]) {
+				return false
+			}
+		}
+		return true
+	default:
+		return reflect.DeepEqual(have, want)
+	}
+}
+
+func subset(have, want map[string]string) bool {
+	for k, v := range want {
+		if have[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+// ---- typed objects ----------------------------------------------------------
+
+// ensureServiceAccount creates the ServiceAccount; one that exists is kept as
+// it is (a ServiceAccount has nothing to drift).
+func (r *OrganizationReconciler) ensureServiceAccount(ctx context.Context, ns, name string) error {
+	err := r.Client.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &corev1.ServiceAccount{})
+	if err == nil {
+		return nil
+	}
+	if !apierrors.IsNotFound(err) {
+		return fmt.Errorf("get ServiceAccount %s/%s: %w", ns, name, err)
+	}
+	return r.create(ctx, &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, Labels: ownLabels(ScopeNamespace)}}, "ServiceAccount")
+}
+
+// ensureHelmRoleBinding binds the Helm ClusterRole to the Helm
+// ServiceAccount in ns.
+func (r *OrganizationReconciler) ensureHelmRoleBinding(ctx context.Context, ns string) error {
+	name := r.Config.HelmServiceAccount
+	return r.ensureRoleBinding(ctx, &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, Labels: ownLabels(ScopeNamespace)},
+		RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: r.Config.HelmClusterRole},
+		Subjects:   []rbacv1.Subject{{Kind: rbacv1.ServiceAccountKind, Name: name, Namespace: ns}},
+	})
+}
+
+// ensureRoleBinding creates want, or brings the reconciler's own binding of
+// the same scope back to it. A RoleBinding's roleRef cannot change, so the
+// reconciler's own binding to another role is replaced.
+func (r *OrganizationReconciler) ensureRoleBinding(ctx context.Context, want *rbacv1.RoleBinding) error {
+	ns, name := want.Namespace, want.Name
+	existing := &rbacv1.RoleBinding{}
+	err := r.Client.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, existing)
+	switch {
+	case apierrors.IsNotFound(err):
+	case err != nil:
+		return fmt.Errorf("get RoleBinding %s/%s: %w", ns, name, err)
+	case existing.Labels[ObjectLabel] != want.Labels[ObjectLabel]:
+		logf.FromContext(ctx).V(1).Info("leaving an object the reconciler did not write", "namespace", ns, "kind", "RoleBinding", "name", name)
+		return nil
+	case existing.RoleRef == want.RoleRef && reflect.DeepEqual(existing.Subjects, want.Subjects) && reflect.DeepEqual(existing.Annotations, want.Annotations):
+		return nil
+	case existing.RoleRef == want.RoleRef:
+		existing.Subjects = want.Subjects
+		existing.Annotations = want.Annotations
+		if err := r.Client.Update(ctx, existing, client.FieldOwner(fieldManager)); err != nil {
+			return fmt.Errorf("update RoleBinding %s/%s: %w", ns, name, err)
+		}
+		logf.FromContext(ctx).Info("organization object updated", "namespace", ns, "kind", "RoleBinding", "name", name)
+		return nil
+	default:
+		if err := r.Client.Delete(ctx, existing); client.IgnoreNotFound(err) != nil {
+			return fmt.Errorf("replace RoleBinding %s/%s: %w", ns, name, err)
+		}
+	}
+	return r.create(ctx, want, "RoleBinding")
+}
+
+// mirrorAdmins keeps in ns a mirror of every organizations-admin RoleBinding
+// of parent: the same name and roleRef, with the User and Group subjects
+// whose names do not start with system:. ServiceAccounts are never mirrored,
+// so the parent's automation cannot bind itself into every organization, and
+// system: names are the API server's own identities. A mirror whose parent
+// binding is gone, or left without subjects, is deleted.
+func (r *OrganizationReconciler) mirrorAdmins(ctx context.Context, parent, ns string) error {
+	parents := &rbacv1.RoleBindingList{}
+	if err := r.Client.List(ctx, parents, client.InNamespace(parent)); err != nil {
+		return fmt.Errorf("list RoleBindings in %s: %w", parent, err)
+	}
+	want := map[string]*rbacv1.RoleBinding{}
+	for i := range parents.Items {
+		pb := &parents.Items[i]
+		if !isOrganizationsAdmin(pb.RoleRef) || pb.DeletionTimestamp != nil {
+			continue
+		}
+		subjects := mirroredSubjects(pb.Subjects)
+		if len(subjects) == 0 {
+			continue
+		}
+		want[pb.Name] = &rbacv1.RoleBinding{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: pb.Name, Namespace: ns,
+				Labels:      ownLabels(ScopeAdminMirror),
+				Annotations: map[string]string{CopiedFromAnnotation: parent + "/" + pb.Name},
+			},
+			RoleRef:  pb.RoleRef,
+			Subjects: subjects,
+		}
+	}
+	var errs []error
+	mirrors := &rbacv1.RoleBindingList{}
+	if err := r.Client.List(ctx, mirrors, client.InNamespace(ns), client.MatchingLabels{ObjectLabel: ScopeAdminMirror}); err != nil {
+		errs = append(errs, fmt.Errorf("list RoleBindings in %s: %w", ns, err))
+	}
+	for i := range mirrors.Items {
+		m := &mirrors.Items[i]
+		if _, ok := want[m.Name]; ok {
+			continue
+		}
+		if err := r.Client.Delete(ctx, m); client.IgnoreNotFound(err) != nil {
+			errs = append(errs, fmt.Errorf("delete RoleBinding %s/%s: %w", ns, m.Name, err))
+			continue
+		}
+		logf.FromContext(ctx).Info("organization object deleted", "namespace", ns, "kind", "RoleBinding", "name", m.Name)
+	}
+	for _, rb := range want {
+		errs = append(errs, r.ensureRoleBinding(ctx, rb))
+	}
+	return errors.Join(errs...)
+}
+
+func mirroredSubjects(in []rbacv1.Subject) []rbacv1.Subject {
+	var out []rbacv1.Subject
+	for _, s := range in {
+		if (s.Kind != rbacv1.UserKind && s.Kind != rbacv1.GroupKind) || strings.HasPrefix(s.Name, "system:") {
+			continue
+		}
+		out = append(out, rbacv1.Subject{Kind: s.Kind, APIGroup: rbacv1.GroupName, Name: s.Name})
+	}
+	return out
+}
