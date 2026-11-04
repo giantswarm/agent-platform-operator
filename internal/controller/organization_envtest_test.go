@@ -54,7 +54,7 @@ func TestOrganizationEnvtest(t *testing.T) {
 
 		policy := &networkingv1.NetworkPolicy{}
 		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns.Name, Name: workerPolicy}, policy))
-		assert.Equal(t, map[string]string{"app": "substrate-worker"}, policy.Spec.PodSelector.MatchLabels)
+		assert.Equal(t, map[string]string{appLabel: workerApp}, policy.Spec.PodSelector.MatchLabels)
 		assert.Equal(t, platformNS+"/"+workerPolicy, policy.Annotations[controller.CopiedFromAnnotation])
 
 		oci := &unstructured.Unstructured{}
@@ -111,6 +111,41 @@ func TestOrganizationEnvtest(t *testing.T) {
 		require.NoError(t, c.admin.Create(t.Context(), source))
 		ns := c.readyNamespace(t, org)
 		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns.Name, Name: workerPolicy}, &networkingv1.NetworkPolicy{}))
+	})
+
+	t.Run("a changed network policy copy is restored", func(t *testing.T) {
+		org := c.organization(t, "org-drift", "drift")
+		ns := c.readyNamespace(t, org)
+		policy := &networkingv1.NetworkPolicy{}
+		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns.Name, Name: workerPolicy}, policy))
+		policy.Spec.PodSelector.MatchLabels = map[string]string{appLabel: "something-else"}
+		require.NoError(t, c.admin.Update(t.Context(), policy))
+
+		require.EventuallyWithT(t, func(ct *assert.CollectT) {
+			got := &networkingv1.NetworkPolicy{}
+			if assert.NoError(ct, c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns.Name, Name: workerPolicy}, got)) {
+				assert.Equal(ct, map[string]string{appLabel: workerApp}, got.Spec.PodSelector.MatchLabels)
+			}
+		}, timeout, tick)
+	})
+
+	t.Run("a terminating organization namespace makes the organization not Ready", func(t *testing.T) {
+		org := c.organization(t, "org-terminating", "terminating")
+		ns := c.readyNamespace(t, org)
+		// envtest runs no namespace controller: the namespace stays
+		// terminating.
+		require.NoError(t, c.admin.Delete(t.Context(), ns))
+
+		require.EventuallyWithT(t, func(ct *assert.CollectT) {
+			got := c.get(ct, org)
+			ready := meta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionReady)
+			if assert.NotNil(ct, ready) {
+				assert.Equal(ct, metav1.ConditionFalse, ready.Status)
+				assert.Equal(ct, "NamespaceTerminating", ready.Reason)
+			}
+			assert.Equal(ct, ns.Name, got.Status.Namespace)
+		}, timeout, tick)
+		assert.Len(t, c.namespacesOf(t, org), 1, "a terminating namespace was replaced while it still exists")
 	})
 
 	t.Run("a lost status finds the namespace by its organization-uid label", func(t *testing.T) {

@@ -39,6 +39,8 @@ const (
 	helmSA           = "kagent-flux"
 	helmClusterRole  = "agent-platform-tenant-flux"
 	snapshotBucket   = "agent-snapshots"
+	appLabel         = "app"
+	workerApp        = "substrate-worker"
 )
 
 var (
@@ -129,7 +131,7 @@ func startEnvtest(t *testing.T) *cluster {
 		"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy",
 		"metadata": map[string]any{"name": workerPolicy, "namespace": platformNS},
 		"spec": map[string]any{
-			"podSelector": map[string]any{"matchLabels": map[string]any{"app": "substrate-worker"}},
+			"podSelector": map[string]any{"matchLabels": map[string]any{appLabel: workerApp}},
 			"policyTypes": []any{"Ingress"},
 		},
 	}}
