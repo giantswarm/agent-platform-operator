@@ -103,7 +103,8 @@ func (s *Sessions) List(ctx context.Context, namespace string) ([]string, error)
 // kagent's session service reads a session to delete as the caller's own
 // (WHERE user_id = caller) unless the caller is its control plane, so it
 // answers NotFound for another creator's session. Until kagent authorizes a
-// delete of any creator's session (as it reviews all_creators for a listing),
+// delete of any creator's session for a machine caller with cluster-wide
+// `delete` on sessions (giantswarm/kagent-extensions#27, in the kagent line),
 // the erasure stops at its Sessions step and says so.
 func (s *Sessions) Delete(ctx context.Context, id string) error {
 	_, err := s.conn.Invoke(ctx, methodDeleteSession, grpcwire.Message(nil).String(fieldDeleteID, id))
