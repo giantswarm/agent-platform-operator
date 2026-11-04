@@ -231,7 +231,7 @@ func startEnvtest(t *testing.T) *cluster {
 		},
 		Erasure: controller.ErasureConfig{
 			Sessions: sessions, Actors: actors, Snapshots: bucket,
-			SnapshotDelay: snapshotDelay, Poll: 100 * time.Millisecond,
+			FluxNamespace: fluxNS, SnapshotDelay: snapshotDelay, Poll: 100 * time.Millisecond,
 			Kustomization: kustomizationGVK, HelmRelease: helmReleaseGVK, Agent: agentGVK,
 		},
 	}}

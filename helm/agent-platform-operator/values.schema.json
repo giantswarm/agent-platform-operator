@@ -86,6 +86,10 @@
             "type": "object",
             "additionalProperties": false,
             "properties": {
+                "fluxNamespace": {
+                    "type": "string",
+                    "description": "The namespace of the installation's Flux source, where an organization's Flux Kustomization and Flux ServiceAccount live, labelled agent-platform.giantswarm.io/organization-uid with its UID: the erasure deletes them there. The same as the agent-platform chart's agentPlatformOrganizations.fluxNamespace. Empty: there are none."
+                },
                 "helmReleaseApiVersion": {
                     "type": "string",
                     "description": "helm.toolkit.fluxcd.io API version of the organizations' HelmReleases."

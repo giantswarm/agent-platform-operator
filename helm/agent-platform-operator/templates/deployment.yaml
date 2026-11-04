@@ -60,6 +60,9 @@ spec:
             {{- end }}
             - --flux-kustomization-api-version={{ .Values.erasure.kustomizationApiVersion }}
             - --flux-helmrelease-api-version={{ .Values.erasure.helmReleaseApiVersion }}
+            {{- with .Values.erasure.fluxNamespace }}
+            - --flux-namespace={{ . }}
+            {{- end }}
             - --snapshot-erase-delay={{ .Values.erasure.snapshotDelay }}
             - --erasure-poll-interval={{ .Values.erasure.pollInterval }}
             {{- with .Values.erasure.kagent.target }}

@@ -84,6 +84,7 @@ func run() error {
 	flag.StringVar(&substrateAPI.Target, "substrate-target", "", "Substrate's ate-api, grpcs://host[:port], which the erasure asks for a deleted organization's actors; empty skips the wait. Needed with --curated-copies")
 	flag.StringVar(&substrateAPI.CAFile, "substrate-ca-file", "", "CA bundle of --substrate-target; empty uses the system roots")
 	flag.StringVar(&substrateAPI.TokenFile, "substrate-token-file", "/var/run/secrets/agent-platform-operator/substrate/token", "Projected ServiceAccount token of an audience ate-api trusts, sent to --substrate-target")
+	flag.StringVar(&cfg.Erasure.FluxNamespace, "flux-namespace", "", "Namespace of the installation's Flux source, where an organization's Flux Kustomization and Flux ServiceAccount live, labelled "+v1alpha1.OrganizationUIDLabel+"=<its UID>; the erasure deletes them there. Empty: there are none")
 	flag.DurationVar(&cfg.Erasure.SnapshotDelay, "snapshot-erase-delay", 5*time.Minute, "How long after the first deletion of a deleted organization's snapshot prefix it is deleted again: at least Substrate's --actor-workflow-deadline (5m by default), so an upload that started before the last actor went has ended")
 	flag.DurationVar(&cfg.Erasure.Poll, "erasure-poll-interval", 10*time.Second, "How often an erasure step that waits for something to be gone looks again")
 	flag.DurationVar(&syncPeriod, "sync-period", 10*time.Minute, "How often every organization is reconciled without a change")

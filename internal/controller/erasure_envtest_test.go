@@ -20,7 +20,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/giantswarm/agent-platform-operator/api/v1alpha1"
-	"github.com/giantswarm/agent-platform-operator/internal/controller"
 )
 
 const (
@@ -59,6 +58,13 @@ func erasureCases(t *testing.T, c *cluster) {
 		kustomization := c.fluxObject(t, newObject(kustomizationGVK, fluxNS, "agents-erase", nil, map[string]any{"path": "./organizations/erase"}), org)
 		serviceAccount := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "agents-erase", Namespace: fluxNS}}
 		c.fluxObject(t, serviceAccount, org)
+		// The UID label outside the Flux namespace names nothing the
+		// operator created: it stays.
+		elsewhere := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{
+			Name: "labelled-elsewhere", Namespace: "org-erase",
+			Labels: map[string]string{v1alpha1.OrganizationUIDLabel: string(org.UID)},
+		}}
+		c.create(t, elsewhere)
 		c.create(t, newObject(helmReleaseGVK, ns, "triage", nil, map[string]any{"chart": map[string]any{}}))
 		// An Agent written outside git, without the operator's label.
 		c.create(t, newObject(agentGVK, ns, "by-hand", nil, agentSpec("By hand.", nil)))
@@ -82,6 +88,7 @@ func erasureCases(t *testing.T, c *cluster) {
 		assert.Equal(t, []string{"33333333-3333-3333-3333-333333333333"}, c.sessions.left(otherNS))
 		assert.Zero(t, c.bucket.objects[prefix])
 		assert.Empty(t, c.namespacesOf(t, org))
+		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKeyFromObject(elsewhere), &corev1.ServiceAccount{}), "a ServiceAccount labelled with the organization's UID outside the Flux namespace was deleted")
 		assert.Equal(t, 0, *observed.workloadsAtSessions, "Kustomizations, HelmReleases or Agents of the organization were left when its sessions were listed")
 
 		// Each step in order: the Kustomization, the sessions, no actor left,
@@ -380,7 +387,7 @@ func (c *cluster) observeErasure(t *testing.T, org *v1alpha1.AgentPlatformOrgani
 			return
 		}
 		once.Do(func() {
-			n := c.count(kustomizationGVK, "", client.MatchingLabels{v1alpha1.OrganizationUIDLabel: string(org.UID)}) +
+			n := c.count(kustomizationGVK, fluxNS, client.MatchingLabels{v1alpha1.OrganizationUIDLabel: string(org.UID)}) +
 				c.count(helmReleaseGVK, ns, nil) + c.count(agentGVK, ns, nil)
 			seen.workloadsAtSessions = &n
 		})
@@ -434,11 +441,11 @@ func (c *cluster) observeErasure(t *testing.T, org *v1alpha1.AgentPlatformOrgani
 }
 
 // fluxObject creates obj as the organization's Flux object (labelled with
-// ScopeFlux and the organization's UID) in fluxNS, held by holdFinalizer.
+// the organization's UID) in fluxNS, held by holdFinalizer.
 func (c *cluster) fluxObject(t *testing.T, obj client.Object, org *v1alpha1.AgentPlatformOrganization) client.Object {
 	t.Helper()
 	createNamespace(t, c.admin, fluxNS)
-	obj.SetLabels(map[string]string{controller.ObjectLabel: controller.ScopeFlux, v1alpha1.OrganizationUIDLabel: string(org.UID)})
+	obj.SetLabels(map[string]string{v1alpha1.OrganizationUIDLabel: string(org.UID)})
 	obj.SetFinalizers([]string{holdFinalizer})
 	c.create(t, obj)
 	return obj

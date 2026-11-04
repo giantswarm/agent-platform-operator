@@ -23,15 +23,7 @@ import (
 	"github.com/giantswarm/agent-platform-operator/api/v1alpha1"
 )
 
-const (
-	// ScopeFlux marks, as the value of ObjectLabel, an organization's Flux
-	// Kustomization and Flux ServiceAccount beside the installation's Flux
-	// source; v1alpha1.OrganizationUIDLabel names the organization. The
-	// erasure deletes what carries both labels.
-	ScopeFlux = "flux"
-
-	reasonDeleting = "Deleting"
-)
+const reasonDeleting = "Deleting"
 
 // Sessions is kagent's session API, as the operator's identity.
 type Sessions interface {
@@ -71,6 +63,14 @@ type ErasureConfig struct {
 	// Poll is how often a step that waits for something to be gone looks
 	// again.
 	Poll time.Duration
+	// FluxNamespace is the namespace of the installation's Flux source, where
+	// an organization's Flux Kustomization and Flux ServiceAccount live,
+	// labelled v1alpha1.OrganizationUIDLabel with its UID (the label the
+	// agent-platform chart's admission policy holds the operator's writes
+	// there to). Empty: the installation has none, and the erasure deletes
+	// none. Only that namespace is searched: the label elsewhere names
+	// nothing the operator created.
+	FluxNamespace string
 	// Kustomization, HelmRelease and Agent are the served kinds the first
 	// step deletes; an empty or unserved one has nothing to delete.
 	Kustomization schema.GroupVersionKind
@@ -106,6 +106,14 @@ func sessionsGone(step string) bool {
 // after the poll interval. Ready stays False with reason Deleting, and its
 // message names the step.
 func (r *OrganizationReconciler) erase(ctx context.Context, org *v1alpha1.AgentPlatformOrganization) (reconcile.Result, error) {
+	// The progress is in the status: read it from the API server, so a
+	// reconcile of a stale cached copy never runs a step it has passed (the
+	// workers back up after the sessions went, the prefix deleted again).
+	fresh := &v1alpha1.AgentPlatformOrganization{}
+	if err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(org), fresh); err != nil {
+		return reconcile.Result{}, client.IgnoreNotFound(err)
+	}
+	org = fresh
 	if !controllerutil.ContainsFinalizer(org, v1alpha1.Finalizer) {
 		return reconcile.Result{}, nil
 	}
@@ -237,9 +245,11 @@ func (r *OrganizationReconciler) scaleWorkers(ctx context.Context, org *v1alpha1
 // they are gone.
 func (r *OrganizationReconciler) eraseWorkloads(ctx context.Context, org *v1alpha1.AgentPlatformOrganization, ns string) (*waiting, error) {
 	e := r.Config.Erasure
-	left, err := r.deleteAll(ctx, e.Kustomization, "", fluxLabels(org))
-	if err != nil || len(left) > 0 {
-		return r.waitFor(left), err
+	if e.FluxNamespace != "" {
+		left, err := r.deleteAll(ctx, e.Kustomization, e.FluxNamespace, fluxLabels(org))
+		if err != nil || len(left) > 0 {
+			return r.waitFor(left), err
+		}
 	}
 	if ns == "" {
 		return nil, nil
@@ -343,8 +353,12 @@ func (r *OrganizationReconciler) eraseNamespace(ctx context.Context, org *v1alph
 // eraseOutsideObjects deletes the organization's Flux ServiceAccount beside
 // the installation's Flux source and waits until it is gone.
 func (r *OrganizationReconciler) eraseOutsideObjects(ctx context.Context, org *v1alpha1.AgentPlatformOrganization) (*waiting, error) {
+	ns := r.Config.Erasure.FluxNamespace
+	if ns == "" {
+		return nil, nil
+	}
 	list := &corev1.ServiceAccountList{}
-	if err := r.APIReader.List(ctx, list, fluxLabels(org)); err != nil {
+	if err := r.APIReader.List(ctx, list, client.InNamespace(ns), fluxLabels(org)); err != nil {
 		return nil, fmt.Errorf("list the organization's Flux ServiceAccounts: %w", err)
 	}
 	var left []string
@@ -404,8 +418,8 @@ func (r *OrganizationReconciler) waitFor(left []string) *waiting {
 	return &waiting{message: "waiting until these are gone: " + strings.Join(left, ", "), after: r.Config.Erasure.Poll}
 }
 
-// fluxLabels select the organization's Flux Kustomization and Flux
-// ServiceAccount.
+// fluxLabels select, in the Flux namespace, the organization's Flux
+// Kustomization and Flux ServiceAccount: those labelled with its UID.
 func fluxLabels(org *v1alpha1.AgentPlatformOrganization) client.MatchingLabels {
-	return client.MatchingLabels{ObjectLabel: ScopeFlux, v1alpha1.OrganizationUIDLabel: string(org.UID)}
+	return client.MatchingLabels{v1alpha1.OrganizationUIDLabel: string(org.UID)}
 }

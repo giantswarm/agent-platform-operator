@@ -103,6 +103,12 @@ serviceAccount:
   annotations: {}
 
 erasure:
+  # -- The namespace of the installation's Flux source, where an
+  # organization's Flux Kustomization and Flux ServiceAccount live, labelled
+  # agent-platform.giantswarm.io/organization-uid with its UID: the erasure
+  # deletes them there. The same as the agent-platform chart's
+  # agentPlatformOrganizations.fluxNamespace. Empty: there are none.
+  fluxNamespace: ""
   # -- How long after the first deletion of a deleted organization's
   # snapshot prefix it is deleted again. Keep it at least Substrate's actor
   # workflow deadline, which ate-api sets to 5m by default, so an upload that

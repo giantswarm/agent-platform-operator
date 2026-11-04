@@ -11,7 +11,8 @@ namespaces, ServiceAccounts, Flux Kustomizations, HelmReleases and Agents in
 every namespace too. The ValidatingAdmissionPolicy that narrows these writes
 to organization namespaces (and namespace creation to agents-* namespaces
 carrying the organization labels, and the Kustomizations and ServiceAccounts
-beside the installation's Flux source to those labelled as an organization's)
+in the installation's Flux namespace to those labelled
+agent-platform.giantswarm.io/organization-uid)
 is rendered by the agent-platform chart, not here.
 
 The operator binds two ClusterRoles and nothing else: `bind` on those names,

@@ -84,7 +84,7 @@ Every AgentPlatformOrganization carries the finalizer `agent-platform.giantswarm
 
 While it erases, `Ready` is `False` with reason `Deleting`; `status.erasureStep` and the condition's message name the step, and the message names a failure. A failing step is retried with backoff; a step that waits looks again every `erasure.pollInterval`. An organization created again with the same parent and name gets a new UID, so a new namespace and snapshot prefix.
 
-The erasure finds the organization's Flux Kustomization and Flux ServiceAccount, wherever they are, by two labels: `agent-platform.giantswarm.io/organization-object: flux` and `agent-platform.giantswarm.io/organization-uid: <uid>`.
+The erasure finds the organization's Flux Kustomization and Flux ServiceAccount in the namespace of the installation's Flux source (`erasure.fluxNamespace`, the agent-platform chart's `agentPlatformOrganizations.fluxNamespace`) by the label `agent-platform.giantswarm.io/organization-uid: <uid>`, the label the agent-platform chart's admission policy holds the operator's writes there to. It looks nowhere else: the label in another namespace names nothing the operator created. Without `erasure.fluxNamespace` there are none.
 
 The erasure keeps its progress in `status.erasureStep` and `status.snapshotsErasedAt`: install the chart so that its CRD is upgraded with it (Flux `upgrade.crds: CreateReplace`), or the API server drops those fields.
 
