@@ -97,14 +97,13 @@ func (r *OrganizationReconciler) create(ctx context.Context, obj client.Object, 
 	return nil
 }
 
-// copyObject copies a platform object of gvk into ns; a missing source is
-// logged and skipped.
+// copyObject copies a platform object of gvk into ns. A missing source makes
+// the organization not Ready; its creation reconciles the organization again.
 func (r *OrganizationReconciler) copyObject(ctx context.Context, gvk schema.GroupVersionKind, name, ns string) error {
 	src := object(gvk)
 	err := r.Client.Get(ctx, client.ObjectKey{Namespace: r.Config.PlatformNamespace, Name: name}, src)
 	if apierrors.IsNotFound(err) {
-		logf.FromContext(ctx).Info("a platform object to copy is missing", "kind", gvk.Kind, "name", name, "platformNamespace", r.Config.PlatformNamespace, "namespace", ns)
-		return nil
+		return &notReadyError{reason: reasonSourceMissing, message: fmt.Sprintf("the platform %s %s/%s to copy is missing", gvk.Kind, r.Config.PlatformNamespace, name)}
 	}
 	if err != nil {
 		return fmt.Errorf("get %s %s/%s: %w", gvk.Kind, r.Config.PlatformNamespace, name, err)

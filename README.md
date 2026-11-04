@@ -29,7 +29,7 @@ The status holds:
 
 - `namespace`: the organization namespace.
 - `snapshotPrefix`: `s3://<bucket>/<uid>`, where the organization's worker snapshots live. It is empty when the operator has no bucket (`snapshots.bucket`).
-- `conditions`, each with `observedGeneration`. `Ready` is `True` when the namespace exists and holds every object below. `DefaultModelConfigured` and `Orphaned` are declared in the API; the operator does not set them yet.
+- `conditions`, each with `observedGeneration`. `Ready` is `True` when the namespace exists and holds every object below. It is `False` with reason `SourceMissing` while a network policy to copy is missing from `platformNamespace`, `NamespaceTerminating` while the organization namespace is terminating, and `ReconcileFailed` when a write fails. `DefaultModelConfigured` and `Orphaned` are declared in the API; the operator does not set them yet.
 
 ## The organization namespace
 

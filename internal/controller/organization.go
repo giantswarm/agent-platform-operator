@@ -74,6 +74,7 @@ const (
 	reasonReconciled           = "Reconciled"
 	reasonReconcileFailed      = "ReconcileFailed"
 	reasonNamespaceTerminating = "NamespaceTerminating"
+	reasonSourceMissing        = "SourceMissing"
 )
 
 // Config is what the reconciler keeps and where it copies it from.
@@ -226,14 +227,20 @@ func (r *OrganizationReconciler) Reconcile(ctx context.Context, req reconcile.Re
 
 	err := r.reconcile(ctx, org, status)
 	ready := metav1.Condition{Type: v1alpha1.ConditionReady, Status: metav1.ConditionTrue, Reason: reasonReconciled, ObservedGeneration: org.Generation}
-	var terminating *namespaceTerminatingError
+	failed, notReady := split(err)
+	err = errors.Join(failed...)
 	switch {
-	case errors.As(err, &terminating):
-		ready.Status, ready.Reason, ready.Message = metav1.ConditionFalse, reasonNamespaceTerminating, err.Error()
-		// The namespace's deletion event reconciles the organization again.
-		err = nil
 	case err != nil:
 		ready.Status, ready.Reason, ready.Message = metav1.ConditionFalse, reasonReconcileFailed, err.Error()
+	case len(notReady) > 0:
+		// Not an error to retry: the event that changes the cause (the
+		// namespace's deletion, the source's creation) reconciles the
+		// organization again.
+		messages := make([]string, 0, len(notReady))
+		for _, nr := range notReady {
+			messages = append(messages, nr.message)
+		}
+		ready.Status, ready.Reason, ready.Message = metav1.ConditionFalse, notReady[0].reason, strings.Join(messages, "; ")
 	}
 	meta.SetStatusCondition(&status.Conditions, ready)
 	if !equality.Semantic.DeepEqual(&org.Status, status) {
@@ -254,7 +261,7 @@ func (r *OrganizationReconciler) reconcile(ctx context.Context, org *v1alpha1.Ag
 	}
 	status.Namespace = ns.Name
 	if ns.DeletionTimestamp != nil || ns.Status.Phase == corev1.NamespaceTerminating {
-		return &namespaceTerminatingError{name: ns.Name}
+		return &notReadyError{reason: reasonNamespaceTerminating, message: fmt.Sprintf("the organization namespace %s is terminating", ns.Name)}
 	}
 	var errs []error
 	if r.Config.Chart.URL != "" {
@@ -272,10 +279,30 @@ func (r *OrganizationReconciler) reconcile(ctx context.Context, org *v1alpha1.Ag
 	return errors.Join(errs...)
 }
 
-type namespaceTerminatingError struct{ name string }
+// notReadyError is a cause of Ready=False that a retry does not change: the
+// reconcile has done what it can.
+type notReadyError struct{ reason, message string }
 
-func (e *namespaceTerminatingError) Error() string {
-	return fmt.Sprintf("the organization namespace %s is terminating", e.name)
+func (e *notReadyError) Error() string { return e.message }
+
+// split sorts the errors joined in err into failures to retry and causes of
+// Ready=False.
+func split(err error) (failed []error, notReady []*notReadyError) {
+	if err == nil {
+		return nil, nil
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, e := range joined.Unwrap() {
+			f, n := split(e)
+			failed, notReady = append(failed, f...), append(notReady, n...)
+		}
+		return failed, notReady
+	}
+	var nr *notReadyError
+	if errors.As(err, &nr) {
+		return nil, []*notReadyError{nr}
+	}
+	return []error{err}, nil
 }
 
 // namespace is the organization namespace: the one labelled with the

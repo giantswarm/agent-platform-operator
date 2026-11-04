@@ -91,6 +91,28 @@ func TestOrganizationEnvtest(t *testing.T) {
 		assert.Equal(t, "kept", rb.Annotations["example.com/note"])
 	})
 
+	t.Run("a missing platform network policy makes the organization not Ready", func(t *testing.T) {
+		source := &networkingv1.NetworkPolicy{}
+		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKey{Namespace: platformNS, Name: workerPolicy}, source))
+		require.NoError(t, c.admin.Delete(t.Context(), source))
+
+		org := c.organization(t, "org-nopolicy", "nopolicy")
+		require.EventuallyWithT(t, func(ct *assert.CollectT) {
+			ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, v1alpha1.ConditionReady)
+			if assert.NotNil(ct, ready) {
+				assert.Equal(ct, metav1.ConditionFalse, ready.Status)
+				assert.Equal(ct, "SourceMissing", ready.Reason)
+				assert.Contains(ct, ready.Message, platformNS+"/"+workerPolicy)
+			}
+		}, timeout, tick)
+
+		// The source's creation reconciles the organization again.
+		source.ResourceVersion, source.UID, source.CreationTimestamp = "", "", metav1.Time{}
+		require.NoError(t, c.admin.Create(t.Context(), source))
+		ns := c.readyNamespace(t, org)
+		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns.Name, Name: workerPolicy}, &networkingv1.NetworkPolicy{}))
+	})
+
 	t.Run("a lost status finds the namespace by its organization-uid label", func(t *testing.T) {
 		org := c.organization(t, "org-lost", "billing")
 		ns := c.readyNamespace(t, org)
