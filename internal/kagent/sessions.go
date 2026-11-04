@@ -3,8 +3,8 @@
 //
 // The controller authenticates the ServiceAccount's projected token (its
 // machine audience) and reviews a listing of every creator's sessions as a
-// cluster-wide `list` on sessions.api.kagent.dev, which the agent-platform
-// chart grants the operator. The messages are those of kagent's
+// cluster-wide `list` on sessions.api.kagent.dev; the agent-platform chart
+// grants the operator `list` and `delete` there. The messages are those of kagent's
 // proto/kagent/api/v1alpha1/{sessions,common}.proto.
 package kagent
 
@@ -108,7 +108,7 @@ func (s *Sessions) List(ctx context.Context, namespace string) ([]string, error)
 func (s *Sessions) Delete(ctx context.Context, id string) error {
 	_, err := s.conn.Invoke(ctx, methodDeleteSession, grpcwire.Message(nil).String(fieldDeleteID, id))
 	if status.Code(err) == codes.NotFound {
-		return fmt.Errorf("kagent DeleteSession %s: kagent found no session of the operator's own by that ID, though it listed it; kagent deletes another creator's session only for its control plane: %w", id, err)
+		return fmt.Errorf("kagent DeleteSession %s: listed but not found: deleted meanwhile, or kagent refuses another creator's session to this caller: %w", id, err)
 	}
 	if err != nil {
 		return fmt.Errorf("kagent DeleteSession %s: %w", id, err)
