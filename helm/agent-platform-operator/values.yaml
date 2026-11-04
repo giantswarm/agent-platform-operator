@@ -6,7 +6,86 @@
 #   https://docs.giantswarm.io/tutorials/fleet-management/app-platform/app-configuration/#basic-values-merging-example
 #
 image:
+  # -- Image repository, below `registry.domain`.
   name: "giantswarm/agent-platform-operator"
+  # -- Image tag. Defaults to the chart appVersion.
   tag: ""
 registry:
+  # -- Image registry.
   domain: gsoci.azurecr.io
+
+# -- The platform namespace (kagent's) the network policies are copied from.
+platformNamespace: kagent
+
+networkPolicy:
+  # -- Kind of the network policies copied into every organization namespace:
+  # `kubernetes` (NetworkPolicy) or `cilium` (CiliumNetworkPolicy). Empty
+  # copies none.
+  flavor: ""
+  # -- Names of the network policies in `platformNamespace` copied into every
+  # organization namespace (the platform's worker policy,
+  # `substrate-workers` with Cilium, `substrate-workers-ingress` with
+  # Kubernetes network policies).
+  names: []  # @schema item: string
+
+agentChart:
+  # -- OCI URL of the agent chart. The OCIRepository kept in every
+  # organization namespace is named after its last segment (`agent`); the
+  # organization's HelmReleases reference it by that name. Empty keeps none.
+  ociUrl: oci://gsoci.azurecr.io/charts/giantswarm/agent
+  # -- Semver range the OCIRepository tracks.
+  semver: "2.x"
+  # -- Regular expression the chart's tags must match before the range is
+  # evaluated (the OCIRepository's `ref.semverFilter`); empty filters nothing.
+  semverFilter: ""
+  # -- OCIRepository.spec.interval.
+  interval: 30m
+  # -- source.toolkit.fluxcd.io API version of the OCIRepository.
+  ociRepositoryApiVersion: source.toolkit.fluxcd.io/v1
+
+# -- The ServiceAccount the organization's HelmReleases run as
+# (`spec.serviceAccountName`, which helm-controller impersonates), kept in
+# every organization namespace and bound there to the ClusterRole
+# `agent-platform-tenant-flux`. The same name as agent-manager's
+# `flux.helmReleaseServiceAccount`. Empty keeps none.
+helmReleaseServiceAccount: kagent-flux
+
+snapshots:
+  # -- Bucket of the organizations' worker snapshots: an organization's
+  # `status.snapshotPrefix` is `s3://<bucket>/<uid>`. Empty leaves it empty.
+  bucket: ""
+
+# -- How often every organization is reconciled without a change. A change to
+# an organization, its namespace, its objects there, a parent's
+# organizations-admin RoleBinding or a copied network policy reconciles it at
+# once.
+syncPeriod: 10m
+
+# -- Container resources.
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 256Mi
+
+# -- Pod security context.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Container security context.
+securityContext:
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  capabilities:
+    drop:
+      - ALL
+  seccompProfile:
+    type: RuntimeDefault

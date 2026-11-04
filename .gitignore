@@ -1,0 +1,3 @@
+# The binaries make and the Dockerfile build.
+/agent-platform-operator
+/agent-platform-operator-*

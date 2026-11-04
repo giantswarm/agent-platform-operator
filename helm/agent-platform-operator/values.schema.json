@@ -3,6 +3,32 @@
     "type": "object",
     "additionalProperties": false,
     "properties": {
+        "agentChart": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "interval": {
+                    "type": "string",
+                    "description": "OCIRepository.spec.interval."
+                },
+                "ociRepositoryApiVersion": {
+                    "type": "string",
+                    "description": "source.toolkit.fluxcd.io API version of the OCIRepository."
+                },
+                "ociUrl": {
+                    "type": "string",
+                    "description": "OCI URL of the agent chart. The OCIRepository kept in every organization namespace is named after its last segment (`agent`); the organization's HelmReleases reference it by that name. Empty keeps none."
+                },
+                "semver": {
+                    "type": "string",
+                    "description": "Semver range the OCIRepository tracks."
+                },
+                "semverFilter": {
+                    "type": "string",
+                    "description": "Regular expression the chart's tags must match before the range is evaluated (the OCIRepository's `ref.semverFilter`); empty filters nothing."
+                }
+            }
+        },
         "baseDomain": {
             "type": "string"
         },
@@ -58,20 +84,72 @@
             "type": "object",
             "additionalProperties": true
         },
+        "helmReleaseServiceAccount": {
+            "type": "string",
+            "description": "The ServiceAccount the organization's HelmReleases run as (`spec.serviceAccountName`, which helm-controller impersonates), kept in every organization namespace and bound there to the ClusterRole `agent-platform-tenant-flux`. The same name as agent-manager's `flux.helmReleaseServiceAccount`. Empty keeps none."
+        },
         "image": {
             "type": "object",
             "additionalProperties": false,
             "properties": {
                 "name": {
-                    "type": "string"
+                    "type": "string",
+                    "description": "Image repository, below `registry.domain`."
                 },
                 "tag": {
-                    "type": "string"
+                    "type": "string",
+                    "description": "Image tag. Defaults to the chart appVersion."
                 }
             }
         },
         "managementCluster": {
             "type": "string"
+        },
+        "networkPolicy": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "flavor": {
+                    "type": "string",
+                    "description": "Kind of the network policies copied into every organization namespace: `kubernetes` (NetworkPolicy) or `cilium` (CiliumNetworkPolicy). Empty copies none."
+                },
+                "names": {
+                    "type": "array",
+                    "description": "Names of the network policies in `platformNamespace` copied into every organization namespace (the platform's worker policy, `substrate-workers` with Cilium, `substrate-workers-ingress` with Kubernetes network policies).",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
+        "platformNamespace": {
+            "type": "string",
+            "description": "The platform namespace (kagent's) the network policies are copied from."
+        },
+        "podSecurityContext": {
+            "type": "object",
+            "description": "Pod security context.",
+            "additionalProperties": false,
+            "properties": {
+                "runAsGroup": {
+                    "type": "integer"
+                },
+                "runAsNonRoot": {
+                    "type": "boolean"
+                },
+                "runAsUser": {
+                    "type": "integer"
+                },
+                "seccompProfile": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "type": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
         },
         "provider": {
             "type": "string"
@@ -81,12 +159,98 @@
             "additionalProperties": false,
             "properties": {
                 "domain": {
-                    "type": "string"
+                    "type": "string",
+                    "description": "Image registry."
+                }
+            }
+        },
+        "resources": {
+            "type": "object",
+            "description": "Container resources.",
+            "additionalProperties": false,
+            "properties": {
+                "limits": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "memory": {
+                            "type": "string"
+                        }
+                    }
+                },
+                "requests": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "cpu": {
+                            "type": "string"
+                        },
+                        "memory": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "securityContext": {
+            "type": "object",
+            "description": "Container security context.",
+            "additionalProperties": false,
+            "properties": {
+                "allowPrivilegeEscalation": {
+                    "type": "boolean"
+                },
+                "capabilities": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "drop": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                },
+                "readOnlyRootFilesystem": {
+                    "type": "boolean"
+                },
+                "runAsGroup": {
+                    "type": "integer"
+                },
+                "runAsNonRoot": {
+                    "type": "boolean"
+                },
+                "runAsUser": {
+                    "type": "integer"
+                },
+                "seccompProfile": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "type": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "snapshots": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "bucket": {
+                    "type": "string",
+                    "description": "Bucket of the organizations' worker snapshots: an organization's `status.snapshotPrefix` is `s3://<bucket>/<uid>`. Empty leaves it empty."
                 }
             }
         },
         "subscriptionID": {
             "type": "string"
+        },
+        "syncPeriod": {
+            "type": "string",
+            "description": "How often every organization is reconciled without a change. A change to an organization, its namespace, its objects there, a parent's organizations-admin RoleBinding or a copied network policy reconciles it at once."
         }
     }
 }

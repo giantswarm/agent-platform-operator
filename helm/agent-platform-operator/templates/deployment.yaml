@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "labels.common" . | nindent 4 }}
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      {{- include "labels.selector" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "labels.common" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "name" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.registry.domain }}/{{ .Values.image.name }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          args:
+            - --platform-namespace={{ .Values.platformNamespace }}
+            {{- if include "networkPolicyResource" . }}
+            - --network-policy-flavor={{ .Values.networkPolicy.flavor }}
+            - --network-policies={{ join "," .Values.networkPolicy.names }}
+            {{- end }}
+            - --agent-chart-oci-url={{ .Values.agentChart.ociUrl }}
+            - --agent-chart-semver={{ .Values.agentChart.semver }}
+            {{- with .Values.agentChart.semverFilter }}
+            - --agent-chart-semver-filter={{ . }}
+            {{- end }}
+            - --ocirepository-interval={{ .Values.agentChart.interval }}
+            - --flux-ocirepository-api-version={{ .Values.agentChart.ociRepositoryApiVersion }}
+            - --helmrelease-service-account={{ .Values.helmReleaseServiceAccount }}
+            {{- with .Values.snapshots.bucket }}
+            - --snapshot-bucket={{ . }}
+            {{- end }}
+            - --sync-period={{ .Values.syncPeriod }}
+            - --leader-election-namespace={{ .Release.Namespace }}
+          ports:
+            - name: metrics
+              containerPort: 8080
+            - name: probes
+              containerPort: 8081
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: probes
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: probes
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}

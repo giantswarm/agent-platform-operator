@@ -1,0 +1,111 @@
+{{- /*
+The operator's own permissions.
+
+RBAC cannot select namespaces by label, so the ClusterRole lets the
+ServiceAccount create namespaces and write RoleBindings, ServiceAccounts,
+OCIRepositories and network policies in every namespace. The
+ValidatingAdmissionPolicy that narrows these writes to organization namespaces
+(and namespace creation to agents-* namespaces carrying the organization
+labels) is rendered by the agent-platform chart, not here.
+
+The operator binds two ClusterRoles and nothing else: `bind` on those names,
+no `escalate`, no cluster-admin. agent-platform:organizations-admin for the
+mirrored bindings of a parent namespace, agent-platform-tenant-flux for the
+organization's Helm ServiceAccount. `bind` on
+agent-platform:organization-flux comes with the organization's Flux
+ServiceAccount (commit mode), the first code that binds it.
+*/}}
+{{- $netpol := include "networkPolicyResource" . | default "{}" | fromJson }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "name" . }}
+  labels:
+    {{- include "labels.common" . | nindent 4 }}
+rules:
+  - apiGroups: ["agent-platform.giantswarm.io"]
+    resources: ["agentplatformorganizations"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["agent-platform.giantswarm.io"]
+    resources: ["agentplatformorganizations/status"]
+    verbs: ["get", "update", "patch"]
+  # The organization namespaces: created from generateName, found by label.
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch", "create"]
+  # The parents' organizations-admin bindings are read; the mirrors and the
+  # Helm ServiceAccount's binding are written.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["rolebindings"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles"]
+    resourceNames:
+      - "agent-platform:organizations-admin"
+      - "agent-platform-tenant-flux"
+    verbs: ["bind"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["get", "list", "watch", "create"]
+  - apiGroups: ["source.toolkit.fluxcd.io"]
+    resources: ["ocirepositories"]
+    verbs: ["get", "create"]
+  {{- with $netpol.resource }}
+  # The network policies: read in platformNamespace, written in the
+  # organization namespaces.
+  - apiGroups: [{{ $netpol.group | quote }}]
+    resources: [{{ . | quote }}]
+    verbs: ["get", "list", "watch", "create", "update"]
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "name" . }}
+  labels:
+    {{- include "labels.common" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "name" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "name" . }}
+    namespace: {{ .Release.Namespace }}
+---
+# The leader Lease of the operator's replicas, and the events leader election
+# records, in the release namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "name" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "labels.common" . | nindent 4 }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    resourceNames: ["agent-platform-operator"]
+    verbs: ["get", "update"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "name" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "labels.common" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "name" . }}-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "name" . }}
+    namespace: {{ .Release.Namespace }}

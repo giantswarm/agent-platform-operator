@@ -36,3 +36,20 @@ Selector labels
 app.kubernetes.io/name: {{ include "name" . | quote }}
 app.kubernetes.io/instance: {{ .Release.Name | quote }}
 {{- end -}}
+
+{{/*
+The network policy resource the operator copies, as {"group": ..., "resource": ...};
+empty without a flavor or without names.
+*/}}
+{{- define "networkPolicyResource" -}}
+{{- $flavor := .Values.networkPolicy.flavor -}}
+{{- if and $flavor .Values.networkPolicy.names -}}
+{{- if eq $flavor "kubernetes" -}}
+{{- dict "group" "networking.k8s.io" "resource" "networkpolicies" | toJson -}}
+{{- else if eq $flavor "cilium" -}}
+{{- dict "group" "cilium.io" "resource" "ciliumnetworkpolicies" | toJson -}}
+{{- else -}}
+{{- fail (printf "networkPolicy.flavor %q: kubernetes, cilium or empty" $flavor) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
