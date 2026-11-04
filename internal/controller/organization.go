@@ -102,6 +102,11 @@ type Config struct {
 // the reconciler's own ServiceAccounts, every RoleBinding (a parent's
 // organizations-admin bindings carry no label to select them by) and, of the
 // network policies, the platform namespace's and the reconciler's copies.
+//
+// The network policies are cached for their watch only. The reconciler reads
+// them, and the OCIRepository, as unstructured objects, which the client
+// reads from the API server (client.CacheOptions.Unstructured is off): the
+// operator starts on a cluster that does not serve the OCIRepository kind.
 func CacheOptions(cfg Config, syncPeriod time.Duration) cache.Options {
 	byObject := map[client.Object]cache.ByObject{
 		&corev1.Namespace{}:      {Label: hasLabel(v1alpha1.OrganizationUIDLabel)},
