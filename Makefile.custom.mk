@@ -10,6 +10,7 @@ ENVTEST_K8S_VERSION ?= 1.35.x
 .PHONY: generate
 generate: ## Regenerate the API's deepcopy code and the CRD in the chart's crds/ from api/v1alpha1.
 	$(CONTROLLER_GEN) object paths=./api/...
+	go run golang.org/x/tools/cmd/goimports@v0.39.0 -local github.com/giantswarm/agent-platform-operator -w api/v1alpha1/zz_generated.deepcopy.go
 	$(CONTROLLER_GEN) crd paths=./api/... output:crd:artifacts:config=$(CHART)/crds
 
 .PHONY: build-linux-amd64
