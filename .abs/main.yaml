@@ -1,0 +1,5 @@
+replace-chart-version-with-git: true
+generate-metadata: true
+chart-dir: ./helm/agent-platform-operator
+destination: ./build
+helm-template-extra-values: ./helm/agent-platform-operator/ci/ci-values.yaml
