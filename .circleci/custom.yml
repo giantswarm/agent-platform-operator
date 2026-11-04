@@ -1,0 +1,36 @@
+# Repo-owned additions to the generated .circleci/workflows.yml. The setup
+# workflow in config.yml deep-merges this file into it at pipeline runtime;
+# devctl never touches it.
+#
+#   - test-envtest: `make test-envtest`, the Go tests that need a real
+#     kube-apiserver (the AgentPlatformOrganization reconciler, run as the
+#     chart's ServiceAccount under the chart's RBAC). The go-build job's
+#     `make test` skips them without KUBEBUILDER_ASSETS; this job downloads
+#     the kube-apiserver and etcd with setup-envtest, at the version
+#     ENVTEST_K8S_VERSION in Makefile.custom.mk pins. The architect image
+#     carries Go and helm.
+version: 2.1
+
+jobs:
+  test-envtest:
+    executor: architect/architect
+    resource_class: medium
+    steps:
+      - checkout
+      - architect/tools-info
+      - architect/go-cache-restore
+      - run:
+          name: Run envtest-backed tests
+          command: make test-envtest
+      - architect/go-cache-save
+
+workflows:
+  build:
+    jobs:
+    - test-envtest:
+        context: architect
+        requires:
+          - go-build
+        filters:
+          tags:
+            only: /^v.*/
