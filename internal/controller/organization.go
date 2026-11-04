@@ -30,6 +30,12 @@
 //     no longer curated for the organization;
 //   - the ResourceQuota on object counts (Config.ObjectQuota).
 //
+// Every organization carries the finalizer v1alpha1.Finalizer. A deleted
+// organization is erased in order (erase): its Flux Kustomization or
+// HelmReleases and its Agents; its sessions through kagent, until Substrate
+// holds no actor of it; its snapshot prefix, twice; its namespace; its Flux
+// ServiceAccount; then the finalizer goes.
+//
 // The logic of the network policies, the OCIRepository, the Helm
 // ServiceAccount and the WorkerPool and Harness copies is agent-manager's
 // tenant reconciler (internal/tenants): it writes only objects it labels as
@@ -56,6 +62,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -116,6 +123,8 @@ type Config struct {
 	// ObjectQuota are the hard limits of the ResourceQuota on object counts
 	// in every organization namespace; empty keeps none.
 	ObjectQuota corev1.ResourceList
+	// Erasure is how a deleted organization is erased.
+	Erasure ErasureConfig
 }
 
 // CacheOptions limit what the manager caches: the organization namespaces,
@@ -279,7 +288,16 @@ func (r *OrganizationReconciler) Reconcile(ctx context.Context, req reconcile.Re
 		return reconcile.Result{}, client.IgnoreNotFound(err)
 	}
 	if org.DeletionTimestamp != nil {
-		return reconcile.Result{}, nil
+		return r.erase(ctx, org)
+	}
+	// The finalizer comes first: an organization deleted from here on is
+	// erased.
+	if !controllerutil.ContainsFinalizer(org, v1alpha1.Finalizer) {
+		patch := client.MergeFromWithOptions(org.DeepCopy(), client.MergeFromWithOptimisticLock{})
+		controllerutil.AddFinalizer(org, v1alpha1.Finalizer)
+		if err := r.Client.Patch(ctx, org, patch, client.FieldOwner(fieldManager)); err != nil {
+			return reconcile.Result{}, fmt.Errorf("add the finalizer: %w", err)
+		}
 	}
 	status := org.Status.DeepCopy()
 	status.SnapshotPrefix = r.snapshotPrefix(org)

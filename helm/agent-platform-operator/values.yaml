@@ -54,6 +54,9 @@ snapshots:
   # -- Bucket of the organizations' worker snapshots: an organization's
   # `status.snapshotPrefix` is `s3://<bucket>/<uid>`. Empty leaves it empty.
   bucket: ""
+  # -- AWS region of the bucket, the AWS_REGION of the operator; empty takes
+  # the one the pod's environment sets, if any.
+  region: ""
 
 curated:
   # -- Copy the curated objects of `platformNamespace`, read-only, into every
@@ -62,9 +65,9 @@ curated:
   # the WorkerPool `workerPool` with its ServiceAccount, the Agents and
   # AgentTemplates labelled `agent-platform.giantswarm.io/curated: "true"`
   # (their template's `modelConfig` set to the organization's default
-  # ModelConfig) and the RemoteMCPServers they name. Needs `snapshots.bucket`
-  # and an API server that serves `kagentApiVersion` and
-  # `workerPoolApiVersion`.
+  # ModelConfig) and the RemoteMCPServers they name. Needs `snapshots.bucket`,
+  # `erasure.kagent.target`, `erasure.substrate.target` and an API server
+  # that serves `kagentApiVersion` and `workerPoolApiVersion`.
   enabled: false
   # -- The curated WorkerPool in `platformNamespace`.
   workerPool: kagent-default
@@ -91,6 +94,57 @@ objectQuota:
   count/modelconfigs.api.kagent.dev: "100"
   count/remotemcpservers.api.kagent.dev: "200"
   count/helmreleases.helm.toolkit.fluxcd.io: "200"
+
+serviceAccount:
+  # @schema additionalProperties: true
+  # -- Annotations of the operator's ServiceAccount, for example
+  # `eks.amazonaws.com/role-arn`: the IRSA role the erasure deletes snapshots
+  # under the organizations' prefixes of `snapshots.bucket` with.
+  annotations: {}
+
+erasure:
+  # -- The namespace of the installation's Flux source, where an
+  # organization's Flux Kustomization and Flux ServiceAccount live, labelled
+  # agent-platform.giantswarm.io/organization-uid with its UID: the erasure
+  # deletes them there. The same as the agent-platform chart's
+  # agentPlatformOrganizations.fluxNamespace. Empty: there are none.
+  fluxNamespace: ""
+  # -- How long after the first deletion of a deleted organization's
+  # snapshot prefix it is deleted again. Keep it at least Substrate's actor
+  # workflow deadline, which ate-api sets to 5m by default, so an upload that
+  # started before the organization's last actor went has ended.
+  snapshotDelay: 5m
+  # -- How often an erasure step that waits for something to be gone looks
+  # again.
+  pollInterval: 10s
+  # -- kustomize.toolkit.fluxcd.io API version of the organizations' Flux
+  # Kustomizations.
+  kustomizationApiVersion: kustomize.toolkit.fluxcd.io/v1
+  # -- helm.toolkit.fluxcd.io API version of the organizations' HelmReleases.
+  helmReleaseApiVersion: helm.toolkit.fluxcd.io/v2
+  kagent:
+    # -- The kagent controller's gRPC API (`grpc://host:port` or
+    # `grpcs://host[:port]`), through which the erasure deletes a deleted
+    # organization's sessions, as the operator's ServiceAccount. Empty skips
+    # them; required with `curated.enabled`.
+    target: ""
+    # -- The audience of the ServiceAccount token sent to kagent: the
+    # controller's machine audience.
+    audience: kagent
+  substrate:
+    # -- Substrate's ate-api (`grpcs://host[:port]`), which the erasure asks
+    # until a deleted organization has no actor left. Empty skips the wait;
+    # required with `curated.enabled`.
+    target: ""
+    # -- The audience of the ServiceAccount token sent to ate-api: one its
+    # Kubernetes JWT provider accepts.
+    audience: ""
+    caConfigMap:
+      # -- ConfigMap holding the CA bundle ate-api's serving certificate is
+      # verified with; empty uses the system roots.
+      name: ""
+      # -- Key of the CA bundle in the ConfigMap.
+      key: ca.crt
 
 # -- How often every organization is reconciled without a change. A change to
 # an organization, its namespace, its objects there, a parent's

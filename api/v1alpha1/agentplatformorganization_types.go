@@ -32,6 +32,33 @@ const (
 	// one marked ModelConfig is the default; none or more than one means there
 	// is none.
 	DefaultModelConfigAnnotation = "agent-platform.giantswarm.io/default-model-config"
+
+	// Finalizer is on every AgentPlatformOrganization: the operator removes it
+	// once the deleted organization is erased.
+	Finalizer = "agent-platform.giantswarm.io/erasure"
+)
+
+// Erasure steps of a deleted AgentPlatformOrganization, in order
+// (status.erasureStep). The last step, the finalizer's removal, leaves no
+// object to carry it.
+const (
+	// ErasureWorkloads deletes the organization's Flux Kustomization, or its
+	// HelmReleases where it has none, and its Agents, and waits until they
+	// are gone.
+	ErasureWorkloads = "Workloads"
+	// ErasureSessions deletes every session of the organization's agents
+	// through kagent and waits until Substrate holds no actor of the
+	// organization.
+	ErasureSessions = "Sessions"
+	// ErasureSnapshots empties the organization's snapshot prefix, and again
+	// after the snapshot erase delay.
+	ErasureSnapshots = "Snapshots"
+	// ErasureNamespace deletes the organization namespace and waits until it
+	// is gone.
+	ErasureNamespace = "Namespace"
+	// ErasureOutsideObjects deletes what the operator created for the
+	// organization outside its namespace: the Flux ServiceAccount.
+	ErasureOutsideObjects = "OutsideObjects"
 )
 
 // Condition types of an AgentPlatformOrganization.
@@ -68,7 +95,8 @@ type Workers struct {
 	// Replicas is the number of warm workers of the organization's WorkerPool
 	// while the organization can use them: the pool runs 0 while the
 	// organization namespace holds no ModelConfig and while the organization
-	// is Orphaned.
+	// is Orphaned. A deleted organization runs Replicas until its sessions
+	// are gone, so kagent can suspend its actors, and 0 after.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	Replicas int32 `json:"replicas,omitempty"`
@@ -86,7 +114,22 @@ type AgentPlatformOrganizationStatus struct {
 	// +optional
 	SnapshotPrefix string `json:"snapshotPrefix,omitempty"`
 
-	// Conditions: Ready, DefaultModelConfigured and Orphaned.
+	// ErasureStep is the erasure step the operator is on once the
+	// organization is deleted: Workloads, Sessions, Snapshots, Namespace or
+	// OutsideObjects. Empty while the organization is not deleted.
+	// +optional
+	// +kubebuilder:validation:Enum=Workloads;Sessions;Snapshots;Namespace;OutsideObjects
+	ErasureStep string `json:"erasureStep,omitempty"`
+
+	// SnapshotsErasedAt is when the operator first emptied the snapshot
+	// prefix of the deleted organization; it empties it once more after the
+	// snapshot erase delay.
+	// +optional
+	SnapshotsErasedAt *metav1.MicroTime `json:"snapshotsErasedAt,omitempty"`
+
+	// Conditions: Ready, DefaultModelConfigured and Orphaned. While the
+	// organization is erased, Ready is False with reason Deleting and its
+	// message names the step.
 	// +optional
 	// +listType=map
 	// +listMapKey=type
@@ -103,6 +146,7 @@ type AgentPlatformOrganizationStatus struct {
 // +kubebuilder:resource:scope=Namespaced
 // +kubebuilder:printcolumn:name="Organization namespace",type=string,JSONPath=`.status.namespace`
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
+// +kubebuilder:printcolumn:name="Erasure",type=string,JSONPath=`.status.erasureStep`,priority=1
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:validation:XValidation:rule="size(self.metadata.name) <= 50",message="the name of an AgentPlatformOrganization is at most 50 characters: the organization namespace is agents-<name>- plus 5 random characters"
 // +kubebuilder:validation:XValidation:rule="!self.metadata.name.contains('.')",message="the name of an AgentPlatformOrganization holds no dot: the organization namespace agents-<name>- is a DNS label"

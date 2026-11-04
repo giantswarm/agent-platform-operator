@@ -6,10 +6,14 @@ ServiceAccount create namespaces and write RoleBindings, ServiceAccounts,
 OCIRepositories, network policies and ResourceQuotas in every namespace, and
 with curated.enabled write and delete Agents, AgentTemplates, Harnesses,
 RemoteMCPServers and WorkerPools in every namespace, the platform namespace's
-curated sources included. The
-ValidatingAdmissionPolicy that narrows these writes to organization namespaces
-(and namespace creation to agents-* namespaces carrying the organization
-labels) is rendered by the agent-platform chart, not here.
+curated sources included. The erasure of a deleted organization deletes
+namespaces, ServiceAccounts, Flux Kustomizations, HelmReleases and Agents in
+every namespace too. The ValidatingAdmissionPolicy that narrows these writes
+to organization namespaces (and namespace creation to agents-* namespaces
+carrying the organization labels, and the Kustomizations and ServiceAccounts
+in the installation's Flux namespace to those labelled
+agent-platform.giantswarm.io/organization-uid)
+is rendered by the agent-platform chart, not here.
 
 The operator binds two ClusterRoles and nothing else: `bind` on those names,
 no `escalate`, no cluster-admin. agent-platform:organizations-admin for the
@@ -26,16 +30,18 @@ metadata:
   labels:
     {{- include "labels.common" . | nindent 4 }}
 rules:
+  # The finalizer that holds a deleted organization until it is erased.
   - apiGroups: ["agent-platform.giantswarm.io"]
     resources: ["agentplatformorganizations"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["get", "list", "watch", "update", "patch"]
   - apiGroups: ["agent-platform.giantswarm.io"]
     resources: ["agentplatformorganizations/status"]
     verbs: ["get", "update", "patch"]
-  # The organization namespaces: created from generateName, found by label.
+  # The organization namespaces: created from generateName, found by label,
+  # deleted by the erasure.
   - apiGroups: [""]
     resources: ["namespaces"]
-    verbs: ["get", "list", "watch", "create"]
+    verbs: ["get", "list", "watch", "create", "delete"]
   # The parents' organizations-admin bindings are read; the mirrors and the
   # Helm ServiceAccount's binding are written.
   - apiGroups: ["rbac.authorization.k8s.io"]
@@ -47,12 +53,25 @@ rules:
       - "agent-platform:organizations-admin"
       - "agent-platform-tenant-flux"
     verbs: ["bind"]
+  # The Helm and worker ServiceAccounts; the erasure deletes the
+  # organization's Flux ServiceAccount beside the installation's Flux source.
   - apiGroups: [""]
     resources: ["serviceaccounts"]
-    verbs: ["get", "list", "watch", "create"]
+    verbs: ["get", "list", "watch", "create", "delete"]
   - apiGroups: ["source.toolkit.fluxcd.io"]
     resources: ["ocirepositories"]
     verbs: ["get", "create"]
+  # The erasure deletes the organization's Flux Kustomization, the
+  # HelmReleases and the Agents of its namespace.
+  - apiGroups: ["kustomize.toolkit.fluxcd.io"]
+    resources: ["kustomizations"]
+    verbs: ["list", "delete"]
+  - apiGroups: ["helm.toolkit.fluxcd.io"]
+    resources: ["helmreleases"]
+    verbs: ["list", "delete"]
+  - apiGroups: ["api.kagent.dev"]
+    resources: ["agents"]
+    verbs: ["list", "delete"]
   # The ResourceQuota on object counts in every organization namespace.
   - apiGroups: [""]
     resources: ["resourcequotas"]
