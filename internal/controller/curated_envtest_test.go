@@ -36,6 +36,8 @@ func curatedCases(t *testing.T, c *cluster) {
 		assert.False(t, memory, "kagent memory is on in the Harness copy")
 		threshold, _, _ := unstructured.NestedInt64(harness.Object, "spec", "kagent", "compaction", "tokenThreshold")
 		assert.EqualValues(t, 1000, threshold, "the compaction settings were not copied")
+		_, summarizer, _ := unstructured.NestedMap(harness.Object, "spec", "kagent", "compaction", "summarizer", "modelConfigRef")
+		assert.False(t, summarizer, "the Harness copy names the platform's summarizer ModelConfig")
 		assert.Equal(t, controller.ScopeCurated, harness.GetLabels()[controller.ObjectLabel])
 		assert.Equal(t, platformNS+"/"+curatedHarness, harness.GetAnnotations()[controller.CopiedFromAnnotation])
 
@@ -52,6 +54,8 @@ func curatedCases(t *testing.T, c *cluster) {
 		c.eventually(t, templateGVK, ns, curatedTemplate, nil)
 		server := c.eventually(t, serverGVK, ns, musterServer, nil)
 		assert.Equal(t, "https://muster.example.com/mcp", str(server, "spec", "url"))
+		assert.Equal(t, "disabled", server.GetLabels()[discoveryLabel], "the copy runs kagent's tool discovery against muster")
+		assert.NotContains(t, server.GetLabels(), "app.kubernetes.io/name")
 		c.absent(t, agentGVK, ns, platformAgent)
 
 		// A field added to a copy is removed, a changed one restored.

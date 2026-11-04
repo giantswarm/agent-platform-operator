@@ -59,6 +59,9 @@ const (
 	workerImage      = "gsoci.azurecr.io/giantswarm/substrate-worker:1.0.0"
 	harnessImage     = "gsoci.azurecr.io/giantswarm/kagent/golang-adk@sha256:aaaa"
 
+	// discoveryLabel is the label kagent reads to skip a RemoteMCPServer's
+	// tool discovery.
+	discoveryLabel = "kagent.dev/discovery"
 	// promptField is an agent template's system prompt field.
 	promptField = "systemPrompt"
 	// agentPrompt is the curated Agent's system prompt.
@@ -244,7 +247,7 @@ func curatedSources() []*unstructured.Unstructured {
 			"workload": map[string]any{"image": harnessImage},
 			"kagent": map[string]any{
 				"memory":     map[string]any{"modelConfigRef": nameRef("embeddings"), "ttlDays": int64(15)},
-				"compaction": map[string]any{"tokenThreshold": int64(1000)},
+				"compaction": map[string]any{"tokenThreshold": int64(1000), "summarizer": map[string]any{"modelConfigRef": nameRef(platformModel)}},
 			},
 			"substrate": map[string]any{
 				"workerPoolRef":  nameRef("platform-pool"),
@@ -260,7 +263,7 @@ func curatedSources() []*unstructured.Unstructured {
 		obj(agentGVK, curatedAgent, curatedLabels, agentSpec(agentPrompt, map[string]any{"modelConfig": nameRef(platformModel), "tools": tools})),
 		obj(agentGVK, platformAgent, nil, agentSpec("Platform only.", nil)),
 		obj(templateGVK, curatedTemplate, curatedLabels, templateSpec("Triage.", map[string]any{"modelConfig": nameRef(platformModel), "tools": tools})),
-		obj(serverGVK, musterServer, nil, map[string]any{"url": "https://muster.example.com/mcp", "description": "muster"}),
+		obj(serverGVK, musterServer, map[string]string{discoveryLabel: "disabled", "app.kubernetes.io/name": "agent"}, map[string]any{"url": "https://muster.example.com/mcp", "description": "muster"}),
 	}
 }
 

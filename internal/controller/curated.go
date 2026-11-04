@@ -34,6 +34,10 @@ const (
 
 	// fieldName is the name field of an object's metadata and of a reference.
 	fieldName = "name"
+	// kagentLabelPrefix starts the labels kagent reads from an object's
+	// metadata (kagent.dev/discovery on a RemoteMCPServer, say): a copy
+	// carries its source's.
+	kagentLabelPrefix = "kagent.dev/"
 
 	reasonDefaultModelConfigMarked = "DefaultModelConfigMarked"
 	reasonNoDefaultModelConfig     = "NoDefaultModelConfig"
@@ -91,9 +95,12 @@ func (c *curated) kept(gvk schema.GroupVersionKind, name string) {
 	c.keep[gvk][name] = true
 }
 
-// keepCurated keeps the curated copies in ns, sets the organization's
-// DefaultModelConfigured condition in status, and removes the copies whose
-// source is no longer curated for the organization.
+// keepCurated keeps the curated copies in ns. It follows a curated Agent's
+// templateRef and the RemoteMCPServers the templates' tools name, not a
+// subAgent's template or the ConfigMaps systemPromptFrom, outputSchemaFrom
+// and promptTemplate name: the v1 curated set uses none of them. It sets the
+// organization's DefaultModelConfigured condition in status, and removes the
+// copies whose source is no longer curated for the organization.
 func (r *OrganizationReconciler) keepCurated(ctx context.Context, org *v1alpha1.AgentPlatformOrganization, ns string, status *v1alpha1.AgentPlatformOrganizationStatus) error {
 	c := r.Config.Curated
 	models, err := r.modelConfigs(ctx, ns)
@@ -139,9 +146,10 @@ func (r *OrganizationReconciler) keepCurated(ctx context.Context, org *v1alpha1.
 			if tmpl, ok := spec["template"].(map[string]any); ok {
 				setModelConfig(tmpl, defaultModel)
 			}
-			// An inline harness runs where a Harness copy would.
+			// An inline harness runs where a Harness copy would, under a
+			// prefix no Harness name reaches.
 			if h, ok := spec["harness"].(map[string]any); ok {
-				return rewriteHarness(h, c.WorkerPool, prefix+"/"+src.GetName())
+				return rewriteHarness(h, c.WorkerPool, prefix+"/agents/"+src.GetName())
 			}
 			return nil
 		}))
@@ -288,6 +296,13 @@ func (r *OrganizationReconciler) copyCurated(ctx context.Context, ns string, gvk
 // rewrite, exactly, so an edit of the copy is reverted.
 func (r *OrganizationReconciler) ensureCurated(ctx context.Context, ns string, src *unstructured.Unstructured, rewrite func(spec map[string]any) error) error {
 	obj := copyOf(src, ns)
+	labels := map[string]string{}
+	for k, v := range src.GetLabels() {
+		if strings.HasPrefix(k, kagentLabelPrefix) {
+			labels[k] = v
+		}
+	}
+	obj.SetLabels(labels)
 	if rewrite != nil {
 		spec, _ := obj.Object["spec"].(map[string]any)
 		if spec == nil {
@@ -346,7 +361,9 @@ func (r *OrganizationReconciler) pruneCurated(ctx context.Context, ns string, k 
 }
 
 // rewriteHarness points a Harness spec at the organization's own pool and
-// snapshot location, and turns kagent's memory off.
+// snapshot location, turns kagent's memory off and leaves the compaction
+// summarizer on the agent's own model: no platform ModelConfig is in an
+// organization namespace.
 func rewriteHarness(spec map[string]any, pool, location string) error {
 	if err := unstructured.SetNestedField(spec, pool, "substrate", "workerPoolRef", fieldName); err != nil {
 		return err
@@ -355,6 +372,7 @@ func rewriteHarness(spec map[string]any, pool, location string) error {
 		return err
 	}
 	unstructured.RemoveNestedField(spec, "kagent", "memory")
+	unstructured.RemoveNestedField(spec, "kagent", "compaction", "summarizer", "modelConfigRef")
 	return nil
 }
 

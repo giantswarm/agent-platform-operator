@@ -58,10 +58,12 @@ In the namespace the operator keeps, from the first reconcile on:
 
 With `curated.enabled` (it needs `snapshots.bucket`), the operator also keeps read-only copies of the curated objects of `platformNamespace` in every organization namespace:
 
-- the Harnesses `spec.harnesses` names, with `substrate.workerPoolRef` set to the organization's pool, `substrate.snapshotPolicy.location` set to `s3://<bucket>/<uid>/<harness>` and `kagent.memory` removed;
+- the Harnesses `spec.harnesses` names, with `substrate.workerPoolRef` set to the organization's pool, `substrate.snapshotPolicy.location` set to `s3://<bucket>/<uid>/<harness>` `kagent.memory` removed, and no compaction summarizer model (compaction uses the agent's own model);
 - the WorkerPool `curated.workerPool` with the ServiceAccount its workers run as, and the placement labels `kagent.dev/worker-pool-name` and `kagent.dev/worker-pool-namespace`;
 - the Agents and AgentTemplates labelled `agent-platform.giantswarm.io/curated: "true"` (and an AgentTemplate a curated Agent's `templateRef` names), with the template's `modelConfig` set to the organization's default ModelConfig, or removed while there is none;
 - the RemoteMCPServers the tools of those templates name: the muster server the curated Agents reach their tools through.
+
+A copy carries its source's `kagent.dev/` labels (`kagent.dev/discovery: disabled` on the muster server), and no other label of the source.
 
 **The worker replica rule**: the WorkerPool copy runs `spec.workers.replicas`, except 0 replicas while the organization namespace holds no ModelConfig (of any name) and while the organization is `Orphaned`.
 

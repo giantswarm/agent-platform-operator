@@ -3,7 +3,10 @@ The operator's own permissions.
 
 RBAC cannot select namespaces by label, so the ClusterRole lets the
 ServiceAccount create namespaces and write RoleBindings, ServiceAccounts,
-OCIRepositories and network policies in every namespace. The
+OCIRepositories, network policies and ResourceQuotas in every namespace, and
+with curated.enabled write and delete Agents, AgentTemplates, Harnesses,
+RemoteMCPServers and WorkerPools in every namespace, the platform namespace's
+curated sources included. The
 ValidatingAdmissionPolicy that narrows these writes to organization namespaces
 (and namespace creation to agents-* namespaces carrying the organization
 labels) is rendered by the agent-platform chart, not here.

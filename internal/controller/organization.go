@@ -40,6 +40,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 
@@ -55,6 +56,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
@@ -175,7 +177,9 @@ func (r *OrganizationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&v1alpha1.AgentPlatformOrganization{}).
 		Watches(&corev1.Namespace{}, handler.EnqueueRequestsFromMapFunc(organizationOfLabels)).
 		Watches(&corev1.ServiceAccount{}, inOrganization, builder.WithPredicates(isOwn)).
-		Watches(&corev1.ResourceQuota{}, inOrganization, builder.WithPredicates(isOwn)).
+		// The quota's own changes, not the usage the quota controller
+		// records with every object it counts.
+		Watches(&corev1.ResourceQuota{}, inOrganization, builder.WithPredicates(isOwn, quotaChanged)).
 		// A parent's organizations-admin binding reconciles the parent's
 		// organizations; a binding in an organization namespace its own.
 		Watches(&rbacv1.RoleBinding{}, handler.EnqueueRequestsFromMapFunc(r.organizationsOfBinding))
@@ -199,6 +203,14 @@ func (r *OrganizationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 	return b.Complete(r)
 }
+
+// quotaChanged passes a ResourceQuota event but an update that changes
+// neither its spec nor its labels.
+var quotaChanged = predicate.Funcs{UpdateFunc: func(e event.UpdateEvent) bool {
+	o, ok := e.ObjectOld.(*corev1.ResourceQuota)
+	n, ok2 := e.ObjectNew.(*corev1.ResourceQuota)
+	return !ok || !ok2 || !equality.Semantic.DeepEqual(o.Spec, n.Spec) || !maps.Equal(o.Labels, n.Labels)
+}}
 
 // organizationOfLabels maps an organization namespace to its organization.
 func organizationOfLabels(_ context.Context, o client.Object) []reconcile.Request {
