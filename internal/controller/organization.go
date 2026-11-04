@@ -230,23 +230,7 @@ func (r *OrganizationReconciler) Reconcile(ctx context.Context, req reconcile.Re
 	status := org.Status.DeepCopy()
 	status.SnapshotPrefix = r.snapshotPrefix(org)
 
-	err := r.reconcile(ctx, org, status)
-	ready := metav1.Condition{Type: v1alpha1.ConditionReady, Status: metav1.ConditionTrue, Reason: reasonReconciled, ObservedGeneration: org.Generation}
-	failed, notReady := split(err)
-	err = errors.Join(failed...)
-	switch {
-	case err != nil:
-		ready.Status, ready.Reason, ready.Message = metav1.ConditionFalse, reasonReconcileFailed, err.Error()
-	case len(notReady) > 0:
-		// Not an error to retry: the event that changes the cause (the
-		// namespace's deletion, the source's creation) reconciles the
-		// organization again.
-		messages := make([]string, 0, len(notReady))
-		for _, nr := range notReady {
-			messages = append(messages, nr.message)
-		}
-		ready.Status, ready.Reason, ready.Message = metav1.ConditionFalse, notReady[0].reason, strings.Join(messages, "; ")
-	}
+	ready, err := readyCondition(r.reconcile(ctx, org, status), org.Generation)
 	meta.SetStatusCondition(&status.Conditions, ready)
 	if !equality.Semantic.DeepEqual(&org.Status, status) {
 		org.Status = *status
@@ -290,8 +274,39 @@ type notReadyError struct{ reason, message string }
 
 func (e *notReadyError) Error() string { return e.message }
 
+// readyCondition is the Ready condition a reconcile that returned err leaves,
+// and the error to retry: the failures in err, without its causes of
+// Ready=False. A failure makes the reason ReconcileFailed; the message names
+// the failures and then the causes of Ready=False, so a cause stays visible
+// while a failure lasts.
+func readyCondition(err error, generation int64) (metav1.Condition, error) {
+	ready := metav1.Condition{Type: v1alpha1.ConditionReady, Status: metav1.ConditionTrue, Reason: reasonReconciled, ObservedGeneration: generation}
+	failed, notReady := split(err)
+	err = errors.Join(failed...)
+	messages := make([]string, 0, 1+len(notReady))
+	if err != nil {
+		messages = append(messages, err.Error())
+	}
+	for _, nr := range notReady {
+		messages = append(messages, nr.message)
+	}
+	switch {
+	case err != nil:
+		ready.Status, ready.Reason = metav1.ConditionFalse, reasonReconcileFailed
+	case len(notReady) > 0:
+		// Not an error to retry: the event that changes the cause (the
+		// namespace's deletion, the source's creation) reconciles the
+		// organization again.
+		ready.Status, ready.Reason = metav1.ConditionFalse, notReady[0].reason
+	}
+	ready.Message = strings.Join(messages, "; ")
+	return ready, err
+}
+
 // split sorts the errors joined in err into failures to retry and causes of
-// Ready=False.
+// Ready=False. Only a *notReadyError itself is a cause of Ready=False: an
+// error that wraps one (fmt.Errorf with %w) is a failure, because it can wrap
+// a failure too, and a failure must never be lost to a cause.
 func split(err error) (failed []error, notReady []*notReadyError) {
 	if err == nil {
 		return nil, nil
@@ -303,8 +318,7 @@ func split(err error) (failed []error, notReady []*notReadyError) {
 		}
 		return failed, notReady
 	}
-	var nr *notReadyError
-	if errors.As(err, &nr) {
+	if nr, ok := err.(*notReadyError); ok { //nolint:errorlint // a wrapped cause is a failure, see above
 		return nil, []*notReadyError{nr}
 	}
 	return []error{err}, nil
