@@ -86,20 +86,15 @@ func curatedCases(t *testing.T, c *cluster) {
 		c.eventuallyAbsent(t, harnessGVK, ns, curatedHarness)
 	})
 
-	t.Run("the pool runs no workers without a ModelConfig or while the organization is Orphaned", func(t *testing.T) {
+	// The Orphaned part of the rule is in fluxCases: the condition is the
+	// operator's own, set from the installation Kustomization's inventory.
+	t.Run("the pool runs no workers without a ModelConfig", func(t *testing.T) {
 		org := c.organizationWith(t, "org-workers", "workers", v1alpha1.AgentPlatformOrganizationSpec{Workers: v1alpha1.Workers{Replicas: 3}})
 		ns := c.readyNamespace(t, org).Name
 		c.replicas(t, ns, 0)
 
 		c.modelConfig(t, ns, "anthropic", false)
 		c.replicas(t, ns, 3)
-
-		require.EventuallyWithT(t, func(ct *assert.CollectT) {
-			got := c.get(ct, org)
-			meta.SetStatusCondition(&got.Status.Conditions, metav1.Condition{Type: v1alpha1.ConditionOrphaned, Status: metav1.ConditionTrue, Reason: "MissingFromGit"})
-			assert.NoError(ct, c.admin.Status().Update(t.Context(), got))
-		}, timeout, tick)
-		c.replicas(t, ns, 0)
 	})
 
 	t.Run("the curated Agents run on the one ModelConfig marked as the default", func(t *testing.T) {

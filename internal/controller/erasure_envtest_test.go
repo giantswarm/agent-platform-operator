@@ -55,9 +55,9 @@ func erasureCases(t *testing.T, c *cluster) {
 		// No ModelConfig: the live pool runs 0 workers.
 		c.replicas(t, ns, 0)
 
-		kustomization := c.fluxObject(t, newObject(kustomizationGVK, fluxNS, "agents-erase", nil, map[string]any{"path": "./organizations/erase"}), org)
-		serviceAccount := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "agents-erase", Namespace: fluxNS}}
-		c.fluxObject(t, serviceAccount, org)
+		// The operator's own Flux objects (commit mode), held until the
+		// observer records their deletion.
+		kustomization, serviceAccount := c.holdFluxObjects(t, ns)
 		// The UID label outside the Flux namespace names nothing the
 		// operator created: it stays.
 		elsewhere := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{
@@ -440,15 +440,26 @@ func (c *cluster) observeErasure(t *testing.T, org *v1alpha1.AgentPlatformOrgani
 	return seen
 }
 
-// fluxObject creates obj as the organization's Flux object (labelled with
-// the organization's UID) in fluxNS, held by holdFinalizer.
-func (c *cluster) fluxObject(t *testing.T, obj client.Object, org *v1alpha1.AgentPlatformOrganization) client.Object {
+// holdFluxObjects waits for the Kustomization and the Flux ServiceAccount the
+// operator keeps in fluxNS for the organization of namespace ns, and holds
+// both with holdFinalizer.
+func (c *cluster) holdFluxObjects(t *testing.T, ns string) (client.Object, client.Object) {
 	t.Helper()
-	createNamespace(t, c.admin, fluxNS)
-	obj.SetLabels(map[string]string{v1alpha1.OrganizationUIDLabel: string(org.UID)})
-	obj.SetFinalizers([]string{holdFinalizer})
-	c.create(t, obj)
-	return obj
+	kustomization := c.eventually(t, kustomizationGVK, fluxNS, ns, nil)
+	serviceAccount := &corev1.ServiceAccount{}
+	require.EventuallyWithT(t, func(ct *assert.CollectT) {
+		assert.NoError(ct, c.admin.Get(t.Context(), client.ObjectKey{Namespace: fluxNS, Name: ns}, serviceAccount))
+	}, timeout, tick)
+	for _, o := range []client.Object{kustomization, serviceAccount} {
+		require.EventuallyWithT(t, func(ct *assert.CollectT) {
+			got := o.DeepCopyObject().(client.Object)
+			if assert.NoError(ct, c.admin.Get(t.Context(), client.ObjectKeyFromObject(o), got)) {
+				got.SetFinalizers(append(got.GetFinalizers(), holdFinalizer))
+				assert.NoError(ct, c.admin.Update(t.Context(), got))
+			}
+		}, timeout, tick)
+	}
+	return kustomization, serviceAccount
 }
 
 func (c *cluster) create(t *testing.T, obj client.Object) {

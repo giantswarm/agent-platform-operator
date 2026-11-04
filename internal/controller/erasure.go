@@ -63,19 +63,11 @@ type ErasureConfig struct {
 	// Poll is how often a step that waits for something to be gone looks
 	// again.
 	Poll time.Duration
-	// FluxNamespace is the namespace of the installation's Flux source, where
-	// an organization's Flux Kustomization and Flux ServiceAccount live,
-	// labelled v1alpha1.OrganizationUIDLabel with its UID (the label the
-	// agent-platform chart's admission policy holds the operator's writes
-	// there to). Empty: the installation has none, and the erasure deletes
-	// none. Only that namespace is searched: the label elsewhere names
-	// nothing the operator created.
-	FluxNamespace string
-	// Kustomization, HelmRelease and Agent are the served kinds the first
-	// step deletes; an empty or unserved one has nothing to delete.
-	Kustomization schema.GroupVersionKind
-	HelmRelease   schema.GroupVersionKind
-	Agent         schema.GroupVersionKind
+	// HelmRelease and Agent are the served kinds the first step deletes after
+	// the organization's Kustomization (FluxConfig.Kustomization); an empty
+	// or unserved one has nothing to delete.
+	HelmRelease schema.GroupVersionKind
+	Agent       schema.GroupVersionKind
 }
 
 // erasureSteps are the steps of the erasure, in order; the finalizer's
@@ -244,9 +236,11 @@ func (r *OrganizationReconciler) scaleWorkers(ctx context.Context, org *v1alpha1
 // of them where there is no Kustomization) and its Agents, and waits until
 // they are gone.
 func (r *OrganizationReconciler) eraseWorkloads(ctx context.Context, org *v1alpha1.AgentPlatformOrganization, ns string) (*waiting, error) {
-	e := r.Config.Erasure
-	if e.FluxNamespace != "" {
-		left, err := r.deleteAll(ctx, e.Kustomization, e.FluxNamespace, fluxLabels(org))
+	e, f := r.Config.Erasure, r.Config.Flux
+	// The organization's Flux objects are searched in the Flux namespace
+	// only: the UID label elsewhere names nothing the operator created.
+	if f.Namespace != "" {
+		left, err := r.deleteAll(ctx, f.Kustomization, f.Namespace, fluxLabels(org))
 		if err != nil || len(left) > 0 {
 			return r.waitFor(left), err
 		}
@@ -353,7 +347,7 @@ func (r *OrganizationReconciler) eraseNamespace(ctx context.Context, org *v1alph
 // eraseOutsideObjects deletes the organization's Flux ServiceAccount beside
 // the installation's Flux source and waits until it is gone.
 func (r *OrganizationReconciler) eraseOutsideObjects(ctx context.Context, org *v1alpha1.AgentPlatformOrganization) (*waiting, error) {
-	ns := r.Config.Erasure.FluxNamespace
+	ns := r.Config.Flux.Namespace
 	if ns == "" {
 		return nil, nil
 	}

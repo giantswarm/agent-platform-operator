@@ -31,7 +31,7 @@ The status holds:
 - `snapshotPrefix`: `s3://<bucket>/<uid>`, where the organization's worker snapshots live. It is empty when the operator has no bucket (`snapshots.bucket`).
 - `conditions`, each with `observedGeneration`. `Ready` is `True` when the namespace exists and holds every object below. It is `False` with reason `SourceMissing` while a network policy to copy is missing from `platformNamespace`, `NamespaceTerminating` while the organization namespace is terminating, `NameTaken` while an object the operator did not write holds the name of a RoleBinding, a curated copy or the ResourceQuota it keeps (a mirror keeps the parent binding's name), and `ReconcileFailed` when a write fails. `SourceMissing` also covers a curated object to copy.
   - `DefaultModelConfigured` (set with `curated.enabled`) is `True` while exactly one ModelConfig in the organization namespace carries the annotation `agent-platform.giantswarm.io/default-model-config: "true"` (giantswarm-platform-manager#789). It is `False` with reason `NoDefaultModelConfig` when none does and `SeveralDefaultModelConfigs` when more than one does: the curated Agents then have no model.
-  - `Orphaned` is declared in the API; the operator does not set it yet. The worker replica rule reads it.
+  - `Orphaned` (set with `commitMode.installationKustomization.name`) is `True` while the organization carries the ownership labels of the installation's Kustomization (`kustomize.toolkit.fluxcd.io/name` and `/namespace`) but is missing from that Kustomization's `status.inventory`: its file is gone from git. The reason is `DeleteMerged` when the organization carries `agent-platform.giantswarm.io/delete-pull-request` (agent-manager's delete pull request merged), and `MissingFromGit` otherwise (a git mistake). It is `False` with reason `InInventory` while the organization is in the inventory, and absent on an organization without those labels (applied without git). While the operator cannot read the inventory, the condition stays as it was. The worker replica rule reads it.
 
 ## The organization namespace
 
@@ -52,7 +52,17 @@ In the namespace the operator keeps, from the first reconcile on:
 - the Helm ServiceAccount `helmReleaseServiceAccount`, which the organization's HelmReleases run as, with a RoleBinding to the ClusterRole `agent-platform-tenant-flux`;
 - a mirror of every RoleBinding in the parent namespace to the ClusterRole `agent-platform:organizations-admin`: the same name and roleRef, with the `User` and `Group` subjects only. The operator skips ServiceAccount subjects and subjects whose name starts with `system:`. The mirror goes when the parent binding goes.
 
-- the ResourceQuota `agent-platform-organization-objects` on object counts (`objectQuota`), so one organization cannot flood the API server with objects.
+- the ResourceQuota `agent-platform-organization-objects` on object counts (`objectQuota`), so one organization cannot flood the API server with objects;
+- in commit mode, the RoleBinding `organization-flux` that binds the organization's Flux ServiceAccount to `commitMode.clusterRole` (`agent-platform:organization-flux`).
+
+## Commit mode
+
+With `commitMode.sourceRef.name` (it needs `erasure.fluxNamespace`), an organization's contents (agents, models, connectors, egress, members) come from git. The operator keeps, for each organization, beside the installation's Flux source in `erasure.fluxNamespace`:
+
+- a ServiceAccount, the organization's Flux ServiceAccount, bound only in the organization namespace, by the RoleBinding `organization-flux`;
+- a Kustomization that applies the organization's path (`commitMode.path`, `{parent}` and `{name}` replaced) from the source `commitMode.sourceRef`, decrypted with the SOPS key `commitMode.decryptionSecret`, into the organization namespace (`targetNamespace`) as that ServiceAccount (`serviceAccountName`, which Flux impersonates). A merged file that writes outside the organization namespace is refused. The Kustomization prunes (`prune: true`), waits on deletion until what it applied is gone (`deletionPolicy: WaitForTermination`) and is never suspended (`suspend: false`). An edit of it is reverted.
+
+Both are named after the organization namespace (`agents-payments-x7k2q`), so every organization Kustomization starts with `agents-`. Both carry `agent-platform.giantswarm.io/organization-uid: <uid>` and `agent-platform.giantswarm.io/organization-object: flux`. The erasure deletes the Kustomization first and the ServiceAccount last. Keep `commitMode.path` outside what the installation's Kustomization applies, or the installation's identity applies the organization's files too. No controller-wide Flux multi-tenancy flag is needed.
 
 ## Curated copies
 

@@ -36,6 +36,18 @@ const (
 	// Finalizer is on every AgentPlatformOrganization: the operator removes it
 	// once the deleted organization is erased.
 	Finalizer = "agent-platform.giantswarm.io/erasure"
+
+	// DeletePullRequestAnnotation is on an AgentPlatformOrganization whose
+	// delete pull request (the one removing its file and its content path from
+	// git) agent-manager opened: the pull request's URL. Once the file is gone
+	// from git, the organization is Orphaned with reason DeleteMerged.
+	DeletePullRequestAnnotation = "agent-platform.giantswarm.io/delete-pull-request"
+
+	// FluxNameLabel and FluxNamespaceLabel are the ownership labels Flux's
+	// kustomize-controller puts on what a Kustomization applies: the
+	// Kustomization's name and namespace.
+	FluxNameLabel      = "kustomize.toolkit.fluxcd.io/name"
+	FluxNamespaceLabel = "kustomize.toolkit.fluxcd.io/namespace"
 )
 
 // Erasure steps of a deleted AgentPlatformOrganization, in order
@@ -74,8 +86,22 @@ const (
 	// ConditionOrphaned is True when the object carries the installation
 	// Kustomization's ownership labels but is missing from that
 	// Kustomization's inventory: its file is gone from git. Its reason is
-	// DeleteMerged or MissingFromGit. Not set yet.
+	// DeleteMerged or MissingFromGit. It is False while the object is in the
+	// inventory, and absent on an object without the ownership labels (one
+	// applied without git).
 	ConditionOrphaned = "Orphaned"
+)
+
+// Reasons of the Orphaned condition.
+const (
+	// ReasonDeleteMerged: the organization's file is gone from git and it
+	// carries DeletePullRequestAnnotation, so its delete pull request merged.
+	ReasonDeleteMerged = "DeleteMerged"
+	// ReasonMissingFromGit: the organization's file is gone from git without
+	// a delete pull request, a git mistake.
+	ReasonMissingFromGit = "MissingFromGit"
+	// ReasonInInventory: the organization's file is in git.
+	ReasonInInventory = "InInventory"
 )
 
 // AgentPlatformOrganizationSpec is what the organization gets.

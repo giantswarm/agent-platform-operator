@@ -262,6 +262,7 @@ func TestOrganizationEnvtest(t *testing.T) {
 	})
 
 	curatedCases(t, c)
+	fluxCases(t, c)
 	erasureCases(t, c)
 }
 

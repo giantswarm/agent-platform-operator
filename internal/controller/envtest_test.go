@@ -23,6 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
@@ -74,6 +75,15 @@ const (
 	// snapshotDelay is the erasure's delay between the two deletions of a
 	// snapshot prefix.
 	snapshotDelay = 2 * time.Second
+
+	// Commit mode: the installation's Flux source, SOPS key and
+	// Kustomization in fluxNS, and the ClusterRole an organization's Flux
+	// ServiceAccount is bound to.
+	fluxSource          = "management-clusters-fleet"
+	sopsSecret          = "sops-keys"
+	installationKS      = "flux"
+	organizationFluxCR  = "agent-platform:organization-flux"
+	organizationPathFmt = "./agent-platform/organizations/{parent}/{name}"
 )
 
 var (
@@ -99,6 +109,8 @@ var (
 type cluster struct {
 	// admin is a client with every right.
 	admin client.Client
+	// rest is the API server's admin config, to impersonate others with.
+	rest *rest.Config
 	// config is the reconciler's Config.
 	config controller.Config
 	// log records, in order, what the erasure did through the fakes of
@@ -112,8 +124,8 @@ type cluster struct {
 
 // startEnvtest starts the API server, installs the chart's CRD and applies
 // its RBAC (templates/rbac.yaml), creates the platform namespace with the
-// worker network policy, and runs the reconciler as the chart's
-// ServiceAccount. Skipped without envtest binaries: run via
+// worker network policy and the Flux namespace, and runs the reconciler, in
+// commit mode, as the chart's ServiceAccount. Skipped without envtest binaries: run via
 // `make test-envtest`, which resolves KUBEBUILDER_ASSETS with setup-envtest
 // (and needs helm).
 func startEnvtest(t *testing.T) *cluster {
@@ -187,14 +199,15 @@ func startEnvtest(t *testing.T) *cluster {
 
 	// The ClusterRoles the operator binds grant what the operator does not
 	// hold itself, so only `bind` lets it write the bindings.
-	for _, name := range []string{controller.OrganizationsAdminClusterRole, helmClusterRole} {
+	for _, name := range []string{controller.OrganizationsAdminClusterRole, helmClusterRole, organizationFluxCR} {
 		require.NoError(t, admin.Create(ctx, &rbacv1.ClusterRole{
 			ObjectMeta: metav1.ObjectMeta{Name: name},
-			Rules:      []rbacv1.PolicyRule{{APIGroups: []string{""}, Resources: []string{"secrets"}, Verbs: []string{"get", "list"}}},
+			Rules:      []rbacv1.PolicyRule{{APIGroups: []string{""}, Resources: []string{"secrets"}, Verbs: []string{"get", "list", "create"}}},
 		}))
 	}
 
 	createNamespace(t, admin, platformNS)
+	createNamespace(t, admin, fluxNS)
 	policy := newObject(npGVK, platformNS, workerPolicy, nil, map[string]any{
 		"podSelector": map[string]any{"matchLabels": map[string]any{appLabel: workerApp}},
 		"policyTypes": []any{"Ingress"},
@@ -212,7 +225,7 @@ func startEnvtest(t *testing.T) *cluster {
 	sessions := &fakeSessions{log: log, byID: map[string]*fakeSession{}}
 	actors := &fakeActors{log: log, sessions: sessions, linger: map[string]int{}}
 	bucket := &fakeBucket{log: log, objects: map[string]int{}, fail: map[string]error{}}
-	c := &cluster{admin: admin, log: log, sessions: sessions, actors: actors, bucket: bucket, config: controller.Config{
+	c := &cluster{admin: admin, rest: cfg, log: log, sessions: sessions, actors: actors, bucket: bucket, config: controller.Config{
 		PlatformNamespace: platformNS,
 		NetworkPolicies:   []string{workerPolicy},
 		NetworkPolicyGVK:  npGVK,
@@ -231,8 +244,14 @@ func startEnvtest(t *testing.T) *cluster {
 		},
 		Erasure: controller.ErasureConfig{
 			Sessions: sessions, Actors: actors, Snapshots: bucket,
-			FluxNamespace: fluxNS, SnapshotDelay: snapshotDelay, Poll: 100 * time.Millisecond,
-			Kustomization: kustomizationGVK, HelmRelease: helmReleaseGVK, Agent: agentGVK,
+			SnapshotDelay: snapshotDelay, Poll: 100 * time.Millisecond,
+			HelmRelease: helmReleaseGVK, Agent: agentGVK,
+		},
+		Flux: controller.FluxConfig{
+			Namespace: fluxNS, Kustomization: kustomizationGVK,
+			SourceKind: "GitRepository", SourceName: fluxSource, DecryptionSecret: sopsSecret,
+			Path: organizationPathFmt, Interval: "10m", ClusterRole: organizationFluxCR,
+			Installation: types.NamespacedName{Namespace: fluxNS, Name: installationKS},
 		},
 	}}
 
@@ -325,7 +344,10 @@ func agentSpec(prompt string, fields map[string]any) map[string]any {
 }
 
 // nameRef is a reference to an object by name.
-func nameRef(name string) map[string]any { return map[string]any{"name": name} }
+func nameRef(name string) map[string]any { return map[string]any{nameField: name} }
+
+// nameField is the name field of a reference.
+const nameField = "name"
 
 // recordQuotaUsage does what kube-controller-manager's quota controller does
 // for a new ResourceQuota until ctx ends: it records the hard limits and the

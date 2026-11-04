@@ -28,7 +28,18 @@
 //     RemoteMCPServers their tools name. A copy follows its source and the
 //     default mark, an edit of it is reverted, and it goes when its source is
 //     no longer curated for the organization;
-//   - the ResourceQuota on object counts (Config.ObjectQuota).
+//   - the ResourceQuota on object counts (Config.ObjectQuota);
+//   - in commit mode (Config.Flux), the organization's Flux ServiceAccount
+//     and Kustomization in the Flux namespace, both named after the
+//     organization namespace and labelled with the organization's UID, and
+//     the RoleBinding organization-flux in the organization namespace, the
+//     ServiceAccount's only one. The Kustomization applies the
+//     organization's path in git into its namespace as that ServiceAccount.
+//
+// With the installation's Kustomization configured, the reconciler sets the
+// Orphaned condition of an organization that Kustomization applied: True
+// while the organization is missing from its inventory (its file is gone from
+// git), with reason DeleteMerged or MissingFromGit.
 //
 // Every organization carries the finalizer v1alpha1.Finalizer. A deleted
 // organization is erased in order (erase): its Flux Kustomization or
@@ -125,10 +136,13 @@ type Config struct {
 	ObjectQuota corev1.ResourceList
 	// Erasure is how a deleted organization is erased.
 	Erasure ErasureConfig
+	// Flux is commit mode; the zero value keeps nothing in git's name.
+	Flux FluxConfig
 }
 
 // CacheOptions limit what the manager caches: the organization namespaces,
-// the reconciler's own ServiceAccounts and ResourceQuotas, every RoleBinding
+// the reconciler's own ServiceAccounts, ResourceQuotas and, in the Flux
+// namespace, Kustomizations, the installation's Kustomization, every RoleBinding
 // (a parent's organizations-admin bindings carry no label to select them by),
 // the metadata of every ModelConfig and, of the network policies and the
 // curated kinds, the platform namespace's and the reconciler's copies.
@@ -155,6 +169,17 @@ func CacheOptions(cfg Config, syncPeriod time.Duration) cache.Options {
 		for _, gvk := range cfg.Curated.copied() {
 			byObject[object(gvk)] = sourcesAndCopies
 		}
+	}
+	if f := cfg.Flux; f.watched() {
+		// The organizations' Kustomizations and the installation's.
+		namespaces := map[string]cache.Config{}
+		if f.commitMode() {
+			namespaces[f.Namespace] = cache.Config{LabelSelector: hasLabel(ObjectLabel)}
+		}
+		if f.orphans() {
+			namespaces[f.Installation.Namespace] = cache.Config{}
+		}
+		byObject[object(f.Kustomization)] = cache.ByObject{Namespaces: namespaces}
 	}
 	return cache.Options{
 		SyncPeriod:       &syncPeriod,
@@ -185,7 +210,9 @@ func (r *OrganizationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Named("agentplatformorganization").
 		For(&v1alpha1.AgentPlatformOrganization{}).
 		Watches(&corev1.Namespace{}, handler.EnqueueRequestsFromMapFunc(organizationOfLabels)).
-		Watches(&corev1.ServiceAccount{}, inOrganization, builder.WithPredicates(isOwn)).
+		// A ServiceAccount in an organization namespace, or an organization's
+		// Flux ServiceAccount, which carries the organization's labels.
+		Watches(&corev1.ServiceAccount{}, handler.EnqueueRequestsFromMapFunc(r.organizationOfObject), builder.WithPredicates(isOwn)).
 		// The quota's own changes, not the usage the quota controller
 		// records with every object it counts.
 		Watches(&corev1.ResourceQuota{}, inOrganization, builder.WithPredicates(isOwn, quotaChanged)).
@@ -206,6 +233,9 @@ func (r *OrganizationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		mc := &metav1.PartialObjectMetadata{}
 		mc.SetGroupVersionKind(r.Config.Curated.modelConfig())
 		b = b.Watches(mc, inOrganization, builder.OnlyMetadata, builder.WithPredicates(predicate.AnnotationChangedPredicate{}))
+	}
+	if r.Config.Flux.watched() {
+		b = b.Watches(object(r.Config.Flux.Kustomization), handler.EnqueueRequestsFromMapFunc(r.organizationsOfKustomization), builder.WithPredicates(r.kustomizationChanged()))
 	}
 	for _, gvk := range copied {
 		b = b.Watches(object(gvk), handler.EnqueueRequestsFromMapFunc(r.organizationsOfCopy), builder.WithPredicates(specOrLabels))
@@ -238,6 +268,16 @@ func (r *OrganizationReconciler) organizationOfNamespace(ctx context.Context, o 
 		return nil
 	}
 	return organizationOfLabels(ctx, ns)
+}
+
+// organizationOfObject maps an object that carries the organization labels
+// (an organization's object in the Flux namespace) to its organization, and
+// any other to the organization of its namespace.
+func (r *OrganizationReconciler) organizationOfObject(ctx context.Context, o client.Object) []reconcile.Request {
+	if reqs := organizationOfLabels(ctx, o); len(reqs) > 0 {
+		return reqs
+	}
+	return r.organizationOfNamespace(ctx, o)
 }
 
 // organizationsOf maps to every organization in namespace (every organization
@@ -278,7 +318,7 @@ func (r *OrganizationReconciler) organizationsOfCopy(ctx context.Context, o clie
 }
 
 func isOrganizationsAdmin(ref rbacv1.RoleRef) bool {
-	return ref.APIGroup == rbacv1.GroupName && ref.Kind == "ClusterRole" && ref.Name == OrganizationsAdminClusterRole
+	return ref.APIGroup == rbacv1.GroupName && ref.Kind == kindClusterRole && ref.Name == OrganizationsAdminClusterRole
 }
 
 // Reconcile keeps one organization.
@@ -301,8 +341,10 @@ func (r *OrganizationReconciler) Reconcile(ctx context.Context, req reconcile.Re
 	}
 	status := org.Status.DeepCopy()
 	status.SnapshotPrefix = r.snapshotPrefix(org)
+	// First: the worker replica rule reads it.
+	orphanedErr := r.setOrphaned(ctx, org, status)
 
-	ready, err := readyCondition(r.reconcile(ctx, org, status), org.Generation)
+	ready, err := readyCondition(errors.Join(orphanedErr, r.reconcile(ctx, org, status)), org.Generation)
 	meta.SetStatusCondition(&status.Conditions, ready)
 	if !equality.Semantic.DeepEqual(&org.Status, status) {
 		org.Status = *status
@@ -337,6 +379,9 @@ func (r *OrganizationReconciler) reconcile(ctx context.Context, org *v1alpha1.Ag
 		}
 	}
 	errs = append(errs, r.mirrorAdmins(ctx, org.Namespace, ns.Name))
+	if r.Config.Flux.commitMode() {
+		errs = append(errs, r.keepFlux(ctx, org, ns.Name))
+	}
 	if r.Config.Curated.Enabled() {
 		errs = append(errs, r.keepCurated(ctx, org, ns.Name, status))
 	}

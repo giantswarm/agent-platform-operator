@@ -40,8 +40,8 @@ func (c ChartSource) object(ns string) *unstructured.Unstructured {
 	}
 	return &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": c.APIVersion,
-		"kind":       "OCIRepository",
-		"metadata":   map[string]any{fieldName: c.Name(), "namespace": ns},
+		fieldKind:    "OCIRepository",
+		"metadata":   map[string]any{fieldName: c.Name(), fieldNamespace: ns},
 		"spec": map[string]any{
 			"interval": c.Interval,
 			"url":      c.URL,
@@ -236,7 +236,7 @@ func (r *OrganizationReconciler) ensureHelmRoleBinding(ctx context.Context, ns s
 	name := r.Config.HelmServiceAccount
 	return r.ensureRoleBinding(ctx, &rbacv1.RoleBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, Labels: ownLabels(ScopeNamespace)},
-		RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: r.Config.HelmClusterRole},
+		RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: kindClusterRole, Name: r.Config.HelmClusterRole},
 		Subjects:   []rbacv1.Subject{{Kind: rbacv1.ServiceAccountKind, Name: name, Namespace: ns}},
 	})
 }
