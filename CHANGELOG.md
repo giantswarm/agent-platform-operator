@@ -24,6 +24,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- The default ModelConfig annotation is `agent-platform.giantswarm.io/is-default-model-config: "true"`, after Kubernetes' `ingressclass.kubernetes.io/is-default-class`; the release candidates' `agent-platform.giantswarm.io/default-model-config` no longer marks a default.
+- **Breaking**: the default ModelConfig annotation is `agent-platform.giantswarm.io/is-default-model-config: "true"`, after Kubernetes' `ingressclass.kubernetes.io/is-default-class`; the release candidates' `agent-platform.giantswarm.io/default-model-config` no longer marks a default. Before upgrading, annotate the default ModelConfig of each organization namespace with the new key, or mark it again through an agent-manager on the new key.
 
 [Unreleased]: https://github.com/giantswarm/agent-platform-operator/tree/main
