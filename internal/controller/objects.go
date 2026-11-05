@@ -342,6 +342,12 @@ func (r *OrganizationReconciler) mirrorAdmins(ctx context.Context, parent, ns st
 			errs = append(errs, &notReadyError{reason: reasonNameTaken, message: fmt.Sprintf("the RoleBinding %s/%s has the name the operator keeps for the organization's Flux binding, so it is not mirrored; rename it", parent, pb.Name)})
 			continue
 		}
+		if r.boundClusterRole(pb.Name) {
+			// The name of a ServiceAccount binding: the mirror would take it
+			// and leave that ServiceAccount without its ClusterRole here.
+			errs = append(errs, &notReadyError{reason: reasonNameTaken, message: fmt.Sprintf("the RoleBinding %s/%s has the name the operator keeps for its binding of the ClusterRole %s, so it is not mirrored; rename it", parent, pb.Name, pb.Name)})
+			continue
+		}
 		subjects := mirroredSubjects(pb.Subjects)
 		if len(subjects) == 0 {
 			continue

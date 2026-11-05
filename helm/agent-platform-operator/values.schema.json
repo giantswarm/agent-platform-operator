@@ -444,6 +444,42 @@
                 }
             }
         },
+        "serviceAccountBindings": {
+            "type": "array",
+            "description": "ClusterRoles bound to a ServiceAccount of another namespace in every organization namespace, such as Substrate's credential providers' Secret readers, which read the Secret an actor's credential names there. Each ClusterRole is bound by a RoleBinding named after it (listed once, not the Helm or Flux binding's name), and the operator gets `bind` on it; a ClusterRole removed from the list loses its bindings. The agent-platform chart's admission policy holds which ServiceAccounts the operator binds there.",
+            "items": {
+                "type": "object",
+                "required": [
+                    "clusterRole",
+                    "serviceAccount"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                    "clusterRole": {
+                        "type": "string",
+                        "minLength": 1
+                    },
+                    "serviceAccount": {
+                        "type": "object",
+                        "required": [
+                            "namespace",
+                            "name"
+                        ],
+                        "additionalProperties": false,
+                        "properties": {
+                            "name": {
+                                "type": "string",
+                                "minLength": 1
+                            },
+                            "namespace": {
+                                "type": "string",
+                                "minLength": 1
+                            }
+                        }
+                    }
+                }
+            }
+        },
         "snapshots": {
             "type": "object",
             "additionalProperties": false,
