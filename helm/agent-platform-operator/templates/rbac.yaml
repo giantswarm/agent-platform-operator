@@ -57,7 +57,9 @@ rules:
     resourceNames:
       - "agent-platform:organizations-admin"
       - "agent-platform-tenant-flux"
+      {{- if .Values.commitMode.sourceRef.name }}
       - {{ .Values.commitMode.clusterRole | quote }}
+      {{- end }}
     verbs: ["bind"]
   # The Helm and worker ServiceAccounts, and the organization's Flux
   # ServiceAccount beside the installation's Flux source, which the erasure
@@ -71,9 +73,20 @@ rules:
   # The organization's Flux Kustomization: kept in commit mode, deleted by
   # the erasure; the installation's is read for the Orphaned condition. The
   # erasure deletes the HelmReleases and the Agents of its namespace too.
+  {{- $c := .Values.commitMode }}
   - apiGroups: ["kustomize.toolkit.fluxcd.io"]
     resources: ["kustomizations"]
-    verbs: ["get", "list", "watch", "create", "update", "delete"]
+    verbs:
+      - "list"
+      - "delete"
+      {{- if or $c.sourceRef.name $c.installationKustomization.name }}
+      - "get"
+      - "watch"
+      {{- end }}
+      {{- if $c.sourceRef.name }}
+      - "create"
+      - "update"
+      {{- end }}
   - apiGroups: ["helm.toolkit.fluxcd.io"]
     resources: ["helmreleases"]
     verbs: ["list", "delete"]

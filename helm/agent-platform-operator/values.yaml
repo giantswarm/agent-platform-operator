@@ -150,7 +150,7 @@ commitMode:
   sourceRef:
     # -- Kind of the installation's Flux source in `erasure.fluxNamespace`:
     # `GitRepository` or `OCIRepository`.
-    kind: GitRepository
+    kind: GitRepository  # @schema enum: [GitRepository, OCIRepository]
     # -- The installation's Flux source. Set: commit mode, every organization
     # gets, in `erasure.fluxNamespace`, a Kustomization that applies its path
     # from this source into its namespace, and the Flux ServiceAccount that

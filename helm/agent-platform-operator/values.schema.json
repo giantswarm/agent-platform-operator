@@ -100,7 +100,11 @@
                     "properties": {
                         "kind": {
                             "type": "string",
-                            "description": "Kind of the installation's Flux source in `erasure.fluxNamespace`: `GitRepository` or `OCIRepository`."
+                            "description": "Kind of the installation's Flux source in `erasure.fluxNamespace`: `GitRepository` or `OCIRepository`.",
+                            "enum": [
+                                "GitRepository",
+                                "OCIRepository"
+                            ]
                         },
                         "name": {
                             "type": "string",

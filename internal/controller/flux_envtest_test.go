@@ -29,8 +29,15 @@ func fluxCases(t *testing.T, c *cluster) {
 
 		// Both named after the organization namespace, with the label the
 		// erasure selects them by.
+		labels := map[string]string{
+			v1alpha1.OrganizationUIDLabel:  string(org.UID),
+			v1alpha1.OrganizationLabel:     "ledger",
+			v1alpha1.ParentLabel:           "org-git",
+			controller.ObjectLabel:         controller.ScopeFlux,
+			"app.kubernetes.io/managed-by": "agent-platform-operator",
+		}
 		k := c.eventually(t, kustomizationGVK, fluxNS, ns, nil)
-		assert.Equal(t, string(org.UID), k.GetLabels()[v1alpha1.OrganizationUIDLabel])
+		assert.Equal(t, labels, k.GetLabels())
 		assert.Equal(t, map[string]any{
 			"interval":           "10m",
 			"path":               "./agent-platform/organizations/org-git/ledger",
@@ -44,7 +51,7 @@ func fluxCases(t *testing.T, c *cluster) {
 		}, k.Object["spec"])
 		sa := &corev1.ServiceAccount{}
 		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKey{Namespace: fluxNS, Name: ns}, sa))
-		assert.Equal(t, string(org.UID), sa.Labels[v1alpha1.OrganizationUIDLabel])
+		assert.Equal(t, labels, sa.Labels)
 
 		// One binding of the ServiceAccount, in the organization namespace.
 		subject := rbacv1.Subject{Kind: rbacv1.ServiceAccountKind, Name: ns, Namespace: fluxNS}
@@ -81,15 +88,22 @@ func fluxCases(t *testing.T, c *cluster) {
 		}
 
 		// A change of the Kustomization is reverted.
-		require.EventuallyWithT(t, func(ct *assert.CollectT) {
-			got := c.read(t, kustomizationGVK, fluxNS, ns)
-			assert.NoError(ct, unstructured.SetNestedField(got.Object, other, "spec", "targetNamespace"))
-			assert.NoError(ct, unstructured.SetNestedField(got.Object, "kustomize-controller", "spec", "serviceAccountName"))
-			assert.NoError(ct, c.admin.Update(t.Context(), got))
-		}, timeout, tick)
+		edit := func(fields ...string) func(*unstructured.Unstructured, any) {
+			return func(got *unstructured.Unstructured, v any) {
+				require.NoError(t, unstructured.SetNestedField(got.Object, v, fields...))
+			}
+		}
+		c.editKustomization(t, ns, edit("spec", "targetNamespace"), other)
+		c.editKustomization(t, ns, edit("spec", "serviceAccountName"), "kustomize-controller")
 		c.eventually(t, kustomizationGVK, fluxNS, ns, func(ct *assert.CollectT, got *unstructured.Unstructured) {
 			assert.Equal(ct, ns, str(got, "spec", "targetNamespace"))
 			assert.Equal(ct, ns, str(got, "spec", "serviceAccountName"))
+		})
+		// An added field alone, which applies elsewhere, is reverted too.
+		c.editKustomization(t, ns, edit("spec", "kubeConfig"), map[string]any{"secretRef": nameRef("other-kubeconfig")})
+		c.eventually(t, kustomizationGVK, fluxNS, ns, func(ct *assert.CollectT, got *unstructured.Unstructured) {
+			_, added, _ := unstructured.NestedMap(got.Object, "spec", "kubeConfig")
+			assert.False(ct, added, "an added spec.kubeConfig stayed")
 		})
 	})
 
@@ -150,6 +164,16 @@ func fluxCases(t *testing.T, c *cluster) {
 		c.replicas(t, appliedNS, 3)
 		assert.Nil(t, meta.FindStatusCondition(c.get(t, applied).Status.Conditions, v1alpha1.ConditionOrphaned))
 	})
+}
+
+// editKustomization sets one value of the organization Kustomization fluxNS/name, as the admin.
+func (c *cluster) editKustomization(t *testing.T, name string, set func(*unstructured.Unstructured, any), v any) {
+	t.Helper()
+	require.EventuallyWithT(t, func(ct *assert.CollectT) {
+		got := c.read(t, kustomizationGVK, fluxNS, name)
+		set(got, v)
+		assert.NoError(ct, c.admin.Update(t.Context(), got))
+	}, timeout, tick)
 }
 
 // orphaned waits until org's Orphaned condition has status and reason.

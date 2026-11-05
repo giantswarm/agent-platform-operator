@@ -125,6 +125,9 @@ func run() error {
 		return fmt.Errorf("--flux-kustomization-api-version: %w", err)
 	}
 	cfg.Flux.Kustomization = kustomizationGV.WithKind("Kustomization")
+	if k := cfg.Flux.SourceKind; k != "GitRepository" && k != "OCIRepository" {
+		return fmt.Errorf("--flux-source-kind %q: GitRepository or OCIRepository", k)
+	}
 	if cfg.Flux.SourceName != "" && cfg.Flux.Namespace == "" {
 		return errors.New("--flux-source-name needs --flux-namespace: the organizations' Kustomizations live beside the source")
 	}

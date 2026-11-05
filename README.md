@@ -64,6 +64,8 @@ With `commitMode.sourceRef.name` (it needs `erasure.fluxNamespace`), an organiza
 
 Both are named after the organization namespace (`agents-payments-x7k2q`), so every organization Kustomization starts with `agents-`. Both carry `agent-platform.giantswarm.io/organization-uid: <uid>` and `agent-platform.giantswarm.io/organization-object: flux`. The erasure deletes the Kustomization first and the ServiceAccount last. Keep `commitMode.path` outside what the installation's Kustomization applies, or the installation's identity applies the organization's files too. No controller-wide Flux multi-tenancy flag is needed.
 
+Every organization's Kustomization decrypts with the installation's SOPS key, as every other manager writing to the installation's repository does. A file merged into an organization's path can therefore carry ciphertext copied from elsewhere in the repository, which Flux decrypts into the organization namespace. This is an accepted risk of the plan (per-organization keys are out of scope); a merge into an organization's path needs the same review as any other merge into the repository.
+
 ## Curated copies
 
 With `curated.enabled` (it needs `snapshots.bucket`), the operator also keeps read-only copies of the curated objects of `platformNamespace` in every organization namespace:

@@ -136,7 +136,17 @@ func (r *OrganizationReconciler) ensureFluxServiceAccount(ctx context.Context, o
 		return fmt.Errorf("get ServiceAccount %s/%s: %w", ns, name, err)
 	case existing.Labels[v1alpha1.OrganizationUIDLabel] != string(org.UID):
 		return nameTaken("ServiceAccount", ns, name)
+	case subset(existing.Labels, fluxObjectLabels(org)):
+		return nil
 	}
+	// Its labels back: without them the cache and the watch lose it.
+	for k, v := range fluxObjectLabels(org) {
+		existing.Labels[k] = v
+	}
+	if err := r.Client.Update(ctx, existing, client.FieldOwner(fieldManager)); err != nil {
+		return fmt.Errorf("update ServiceAccount %s/%s: %w", ns, name, err)
+	}
+	logf.FromContext(ctx).Info("organization object updated", "namespace", ns, "kind", "ServiceAccount", "name", name)
 	return nil
 }
 
@@ -159,7 +169,7 @@ func (r *OrganizationReconciler) ensureKustomization(ctx context.Context, org *v
 		return fmt.Errorf("get Kustomization %s/%s: %w", f.Namespace, name, err)
 	case existing.GetLabels()[v1alpha1.OrganizationUIDLabel] != string(org.UID):
 		return nameTaken("Kustomization", f.Namespace, name)
-	case contains(existing.Object["spec"], want.Object["spec"]) && subset(existing.GetLabels(), want.GetLabels()):
+	case sameSpec(existing.Object["spec"], want.Object["spec"]) && subset(existing.GetLabels(), want.GetLabels()):
 		return nil
 	}
 	existing.Object["spec"] = want.Object["spec"]
@@ -204,6 +214,25 @@ func (r *OrganizationReconciler) kustomization(org *v1alpha1.AgentPlatformOrgani
 	return k
 }
 
+// sameSpec reports whether the Kustomization spec have is want: every field
+// of want with its value, and no other field but a zero one (false, "", 0),
+// which is what the API server defaults. An added field (patches,
+// postBuild, kubeConfig, a decryption the reconciler does not set) is a
+// change, and is reverted.
+func sameSpec(have, want any) bool {
+	h, ok := have.(map[string]any)
+	w, ok2 := want.(map[string]any)
+	if !ok || !ok2 || !contains(h, w) {
+		return false
+	}
+	for k, v := range h {
+		if _, kept := w[k]; !kept && v != false && v != "" && v != int64(0) && v != float64(0) {
+			return false
+		}
+	}
+	return true
+}
+
 func nameTaken(kind, ns, name string) error {
 	return &notReadyError{reason: reasonNameTaken, message: fmt.Sprintf("the %s %s/%s is not the operator's for this organization, so the operator cannot write it", kind, ns, name)}
 }
@@ -217,6 +246,9 @@ func nameTaken(kind, ns, name string) error {
 func (r *OrganizationReconciler) setOrphaned(ctx context.Context, org *v1alpha1.AgentPlatformOrganization, status *v1alpha1.AgentPlatformOrganizationStatus) error {
 	f := r.Config.Flux
 	if !f.orphans() {
+		// Without the installation Kustomization nothing sets it: one left
+		// from an earlier configuration would stop the workers for good.
+		meta.RemoveStatusCondition(&status.Conditions, v1alpha1.ConditionOrphaned)
 		return nil
 	}
 	l := org.GetLabels()
