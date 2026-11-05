@@ -1,6 +1,7 @@
 package kagent_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -14,19 +15,48 @@ import (
 )
 
 // The messages below are encoded with the field numbers of kagent's
-// proto/kagent/api/v1alpha1/{sessions,common}.proto, independently of the
-// client's encoder.
+// proto/kagent/api/{v1,v1alpha1}/{sessions,common}.proto, independently of
+// the client's encoder.
+
+const (
+	v1       = "/kagent.api.v1.SessionService/"
+	v1alpha1 = "/kagent.api.v1alpha1.SessionService/"
+)
 
 func bytesField(b []byte, num protowire.Number, v []byte) []byte {
 	b = protowire.AppendTag(b, num, protowire.BytesType)
 	return protowire.AppendBytes(b, v)
 }
 
-// session is a Session{id = 1, agent = 15 ResourceReference{namespace = 1,
-// name = 2}}.
+// session is a kagent.api.v1 Session{id = 1, agent = 15
+// AgentProvenance{ref = 1 ResourceReference{namespace = 1, name = 2},
+// uid = 2}}.
 func session(id, namespace string) []byte {
-	agent := bytesField(bytesField(nil, 1, []byte(namespace)), 2, []byte("triage"))
+	agent := bytesField(bytesField(nil, 1, reference(namespace)), 2, []byte("8b0c2f4e-uid"))
 	return bytesField(bytesField(nil, 1, []byte(id)), 15, agent)
+}
+
+// sessionV1alpha1 is a kagent.api.v1alpha1 Session{id = 1, agent = 15
+// ResourceReference{namespace = 1, name = 2}}.
+func sessionV1alpha1(id, namespace string) []byte {
+	return bytesField(bytesField(nil, 1, []byte(id)), 15, reference(namespace))
+}
+
+func reference(namespace string) []byte {
+	return bytesField(bytesField(nil, 1, []byte(namespace)), 2, []byte("triage"))
+}
+
+// serving answers the methods of the packages in served, from respond, and
+// Unimplemented to the others.
+func serving(served *[]string, respond grpcwiretest.Handler) grpcwiretest.Handler {
+	return func(c grpcwiretest.Call) ([]byte, error) {
+		for _, prefix := range *served {
+			if strings.HasPrefix(c.Method, prefix) {
+				return respond(c)
+			}
+		}
+		return nil, status.Errorf(codes.Unimplemented, "unknown service %s", c.Method)
+	}
 }
 
 // listResponse is a ListSessionsResponse{sessions = 1, page = 2
@@ -79,28 +109,98 @@ func request(t *testing.T, b []byte) (allCreators bool, limit uint64, token, nam
 }
 
 func TestListReadsEveryCreatorsSessionsOfTheNamespaceOnEveryPage(t *testing.T) {
-	srv, conn := grpcwiretest.Start(t, "operator-token", func(c grpcwiretest.Call) ([]byte, error) {
-		if _, _, token, _ := request(t, c.Request); token == "" {
-			return listResponse("page-2", session("a", "agents-acme-x7k2q"), session("b", "agents-other-abcde")), nil
-		}
-		return listResponse("", session("c", "agents-acme-x7k2q")), nil
-	})
+	for _, tc := range []struct {
+		name    string
+		prefix  string
+		session func(id, namespace string) []byte
+		// filter: the listing asks for the namespace.
+		filter bool
+	}{
+		{name: "kagent.api.v1", prefix: v1, session: session},
+		{name: "kagent.api.v1alpha1", prefix: v1alpha1, session: sessionV1alpha1, filter: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			served := []string{tc.prefix}
+			srv, conn := grpcwiretest.Start(t, "operator-token", serving(&served, func(c grpcwiretest.Call) ([]byte, error) {
+				if _, _, token, _ := request(t, c.Request); token == "" {
+					return listResponse("page-2", tc.session("a", "agents-acme-x7k2q"), tc.session("b", "agents-other-abcde")), nil
+				}
+				return listResponse("", tc.session("c", "agents-acme-x7k2q")), nil
+			}))
 
-	ids, err := kagent.New(conn).List(t.Context(), "agents-acme-x7k2q")
-	require.NoError(t, err)
-	assert.Equal(t, []string{"a", "c"}, ids)
+			ids, err := kagent.New(conn).List(t.Context(), "agents-acme-x7k2q")
+			require.NoError(t, err)
+			assert.Equal(t, []string{"a", "c"}, ids)
 
-	calls := srv.Calls()
-	require.Len(t, calls, 2)
-	for i, wantToken := range []string{"", "page-2"} {
-		assert.Equal(t, "/kagent.api.v1alpha1.SessionService/ListSessions", calls[i].Method)
-		assert.Equal(t, "Bearer operator-token", calls[i].Authorization)
-		all, limit, token, namespace := request(t, calls[i].Request)
-		assert.True(t, all, "the listing is not every creator's")
-		assert.Equal(t, "agents-acme-x7k2q", namespace, "the listing is not the namespace's")
-		assert.EqualValues(t, 100, limit)
-		assert.Equal(t, wantToken, token)
+			var calls []grpcwiretest.Call
+			for _, c := range srv.Calls() {
+				if strings.HasPrefix(c.Method, tc.prefix) {
+					calls = append(calls, c)
+				}
+			}
+			require.Len(t, calls, 2)
+			for i, wantToken := range []string{"", "page-2"} {
+				assert.Equal(t, tc.prefix+"ListSessions", calls[i].Method)
+				assert.Equal(t, "Bearer operator-token", calls[i].Authorization)
+				all, limit, token, namespace := request(t, calls[i].Request)
+				assert.True(t, all, "the listing is not every creator's")
+				if tc.filter {
+					assert.Equal(t, "agents-acme-x7k2q", namespace, "the listing is not the namespace's")
+				} else {
+					assert.Empty(t, namespace, "the listing sends a namespace filter the package does not define")
+				}
+				assert.EqualValues(t, 100, limit)
+				assert.Equal(t, wantToken, token)
+			}
+		})
 	}
+}
+
+func TestListFollowsTheSessionServicePackageTheControllerServes(t *testing.T) {
+	served := []string{v1alpha1}
+	srv, conn := grpcwiretest.Start(t, "operator-token", serving(&served, func(c grpcwiretest.Call) ([]byte, error) {
+		if strings.HasPrefix(c.Method, v1) {
+			return listResponse("", session("on-v1", "agents-acme-x7k2q")), nil
+		}
+		return listResponse("", sessionV1alpha1("on-v1alpha1", "agents-acme-x7k2q")), nil
+	}))
+	sessions := kagent.New(conn)
+	methods := func() []string {
+		var out []string
+		for _, c := range srv.Calls() {
+			out = append(out, c.Method)
+		}
+		return out
+	}
+
+	ids, err := sessions.List(t.Context(), "agents-acme-x7k2q")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"on-v1alpha1"}, ids)
+	assert.Equal(t, []string{v1 + "ListSessions", v1alpha1 + "ListSessions"}, methods(), "a controller without kagent.api.v1 is not asked on kagent.api.v1alpha1")
+
+	_, err = sessions.List(t.Context(), "agents-acme-x7k2q")
+	require.NoError(t, err)
+	require.NoError(t, sessions.Delete(t.Context(), "11111111-1111-1111-1111-111111111111"))
+	assert.Equal(t, []string{v1alpha1 + "ListSessions", v1alpha1 + "DeleteSession"}, methods()[2:], "the package the controller answered is not tried first")
+
+	// kagent upgraded to kagent.api.v1.
+	served = []string{v1}
+	ids, err = sessions.List(t.Context(), "agents-acme-x7k2q")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"on-v1"}, ids)
+	assert.Equal(t, []string{v1alpha1 + "ListSessions", v1 + "ListSessions"}, methods()[4:])
+
+	// Rolled back to kagent.api.v1alpha1.
+	served = []string{v1alpha1}
+	ids, err = sessions.List(t.Context(), "agents-acme-x7k2q")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"on-v1alpha1"}, ids)
+
+	// Neither.
+	served = nil
+	_, err = sessions.List(t.Context(), "agents-acme-x7k2q")
+	require.Error(t, err)
+	assert.Equal(t, codes.Unimplemented, status.Code(err))
 }
 
 func TestDelete(t *testing.T) {
@@ -114,7 +214,8 @@ func TestDelete(t *testing.T) {
 		{name: "a refusal is an error", err: status.Error(codes.PermissionDenied, "denied"), wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			srv, conn := grpcwiretest.Start(t, "operator-token", func(grpcwiretest.Call) ([]byte, error) { return nil, tc.err })
+			served := []string{v1}
+			srv, conn := grpcwiretest.Start(t, "operator-token", serving(&served, func(grpcwiretest.Call) ([]byte, error) { return nil, tc.err }))
 			err := kagent.New(conn).Delete(t.Context(), "11111111-1111-1111-1111-111111111111")
 			if tc.wantErr {
 				require.Error(t, err)
@@ -123,7 +224,7 @@ func TestDelete(t *testing.T) {
 			}
 			calls := srv.Calls()
 			require.Len(t, calls, 1)
-			assert.Equal(t, "/kagent.api.v1alpha1.SessionService/DeleteSession", calls[0].Method)
+			assert.Equal(t, v1+"DeleteSession", calls[0].Method)
 			// DeleteSessionRequest{session_id = 1}.
 			assert.Equal(t, bytesField(nil, 1, []byte("11111111-1111-1111-1111-111111111111")), calls[0].Request)
 		})

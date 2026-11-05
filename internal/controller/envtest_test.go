@@ -225,7 +225,7 @@ func startEnvtest(t *testing.T) *cluster {
 	go recordQuotaUsage(ctx, admin)
 
 	log := &eventLog{}
-	sessions := &fakeSessions{log: log, byID: map[string]*fakeSession{}}
+	sessions := &fakeSessions{log: log, byID: map[string]*fakeSession{}, pkg: pkgV1alpha1}
 	actors := &fakeActors{log: log, sessions: sessions, linger: map[string]int{}}
 	bucket := &fakeBucket{log: log, objects: map[string]int{}, fail: map[string]error{}}
 	c := &cluster{admin: admin, rest: cfg, log: log, sessions: sessions, actors: actors, bucket: bucket, config: controller.Config{

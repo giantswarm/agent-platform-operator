@@ -49,6 +49,10 @@ const (
 	// installationWide is the erasure log's key of a session listing without
 	// a namespace.
 	installationWide = "(installation)"
+
+	// The packages kagent serves its SessionService in.
+	pkgV1       = "kagent.api.v1"
+	pkgV1alpha1 = "kagent.api.v1alpha1"
 )
 
 // erasureCases are the cases of a deleted organization's erasure, run in
@@ -172,6 +176,27 @@ func erasureCases(t *testing.T, c *cluster) {
 		c.deletedTwice(t, c.log.of(prefix))
 	})
 
+	t.Run("the erasure follows kagent from kagent.api.v1alpha1 to kagent.api.v1", func(t *testing.T) {
+		// The operator's client last answered on kagent.api.v1alpha1.
+		c.sessions.serving(pkgV1)
+		t.Cleanup(func() { c.sessions.serving(pkgV1alpha1) })
+		org := c.organization(t, "org-erase-v1", "upgraded")
+		ns := c.readyNamespace(t, org).Name
+		c.sessions.addOf(ns, "retired", "dave@example.com", "66666666-6666-6666-6666-666666666666")
+		other := c.organization(t, "org-erase-v1-other", "kept")
+		otherNS := c.readyNamespace(t, other).Name
+		c.sessions.add(otherNS, "dave@example.com", "77777777-7777-7777-7777-777777777777")
+		c.observeErasure(t, org, ns)
+
+		require.NoError(t, c.admin.Delete(t.Context(), org))
+		c.gone(t, org)
+
+		// kagent.api.v1 has no namespace filter: every namespace's sessions
+		// are listed, and only the organization's deleted.
+		assert.Empty(t, c.sessions.left(ns))
+		assert.Equal(t, []string{"77777777-7777-7777-7777-777777777777"}, c.sessions.left(otherNS))
+	})
+
 	t.Run("deleting the parent namespace erases its organizations", func(t *testing.T) {
 		org := c.organization(t, "org-parent-gone", "orphan")
 		ns := c.readyNamespace(t, org).Name
@@ -266,14 +291,18 @@ type fakeSession struct {
 	gone bool
 }
 
-// fakeSessions stands in for kagent's kagent.api.v1alpha1 SessionService as the
-// erasure needs it, served over gRPC to the operator's client: it deletes any
-// creator's session for the operator. kagent's session service does that only
-// for its control plane today (see kagent.Sessions.Delete).
+// fakeSessions stands in for kagent's SessionService as the erasure needs it,
+// served over gRPC to the operator's client: it deletes any creator's session
+// for the operator. kagent's session service does that only for its control
+// plane today (see kagent.Sessions.Delete).
 type fakeSessions struct {
 	log  *eventLog
 	mu   sync.Mutex
 	byID map[string]*fakeSession
+	// pkg is the one package the SessionService is served in:
+	// kagent.api.v1alpha1, the kagent line agent-platform pins, with the
+	// namespace filter; kagent.api.v1, without it.
+	pkg string
 	// onList runs at each listing, before it, with the namespace asked for
 	// (empty: every namespace).
 	onList func(namespace string)
@@ -309,18 +338,32 @@ func (f *fakeSessions) serve(t *testing.T) *kagent.Sessions {
 	return kagent.New(conn)
 }
 
+// serving makes kagent serve its SessionService in pkg only.
+func (f *fakeSessions) serving(pkg string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pkg = pkg
+}
+
 // handle answers ListSessions and DeleteSession, with the field numbers of
-// kagent's proto/kagent/api/v1alpha1/sessions.proto.
+// kagent's proto/kagent/api/{v1,v1alpha1}/sessions.proto.
 func (f *fakeSessions) handle(call grpcwiretest.Call) ([]byte, error) {
 	fields, err := grpcwire.Fields(call.Request)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+	f.mu.Lock()
+	pkg := f.pkg
+	f.mu.Unlock()
 	switch call.Method {
-	case "/kagent.api.v1alpha1.SessionService/ListSessions":
+	case "/" + pkg + ".SessionService/ListSessions":
+		if pkg == pkgV1 {
+			// No namespace filter: an unknown field is ignored.
+			return f.list(pkg, ""), nil
+		}
 		// ListSessionsRequest: namespace = 7.
-		return f.list(string(grpcwire.First(fields, 7))), nil
-	case "/kagent.api.v1alpha1.SessionService/DeleteSession":
+		return f.list(pkg, string(grpcwire.First(fields, 7))), nil
+	case "/" + pkg + ".SessionService/DeleteSession":
 		// DeleteSessionRequest: session_id = 1.
 		f.delete(string(grpcwire.First(fields, 1)))
 		return nil, nil
@@ -331,7 +374,7 @@ func (f *fakeSessions) handle(call grpcwiretest.Call) ([]byte, error) {
 // list is a ListSessionsResponse, on one page, of the sessions of namespace
 // (empty: every namespace). kagent matches the namespace of each session's
 // pinned revision, so a session whose Agent is gone is listed.
-func (f *fakeSessions) list(namespace string) []byte {
+func (f *fakeSessions) list(pkg, namespace string) []byte {
 	if hook := f.onList; hook != nil {
 		hook(namespace)
 	}
@@ -347,10 +390,14 @@ func (f *fakeSessions) list(namespace string) []byte {
 		if (namespace != "" && s.namespace != namespace) || s.gone {
 			continue
 		}
-		// Session{id = 1, agent = 15 ResourceReference{namespace = 1,
-		// name = 2}}.
-		ref := grpcwire.Message(nil).String(1, s.namespace).String(2, s.agent)
-		resp = resp.Message(1, grpcwire.Message(nil).String(1, id).Message(15, ref))
+		// Session{id = 1, agent = 15}: in kagent.api.v1alpha1 the
+		// ResourceReference{namespace = 1, name = 2}, in kagent.api.v1 an
+		// AgentProvenance{ref = 1, uid = 2} holding it.
+		agent := grpcwire.Message(nil).String(1, s.namespace).String(2, s.agent)
+		if pkg == pkgV1 {
+			agent = grpcwire.Message(nil).Message(1, agent).String(2, "uid-"+s.agent)
+		}
+		resp = resp.Message(1, grpcwire.Message(nil).String(1, id).Message(15, agent))
 		s.gone = s.deleted
 	}
 	return resp
