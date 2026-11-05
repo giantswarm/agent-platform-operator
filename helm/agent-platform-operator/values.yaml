@@ -50,14 +50,15 @@ agentChart:
 # `flux.helmReleaseServiceAccount`. Empty keeps none.
 helmReleaseServiceAccount: kagent-flux
 
-# -- ServiceAccounts of other namespaces that read Secrets in the organization
-# namespaces: Substrate's credential providers, which read the Secret an
-# actor's credential names there. Each ClusterRole is bound to its
-# ServiceAccount in every organization namespace, by a RoleBinding named after
-# the ClusterRole, and the operator gets `bind` on it; a reader removed from
-# the list loses its bindings. The agent-platform chart's admission policy
-# holds which ServiceAccounts the operator binds there.
-secretReaders: []  # @schema item: object; itemProperties: {"clusterRole": {"type": "string", "minLength": 1}, "serviceAccount": {"type": "object", "additionalProperties": false, "required": ["namespace", "name"], "properties": {"namespace": {"type": "string", "minLength": 1}, "name": {"type": "string", "minLength": 1}}}}; itemRequired: [clusterRole, serviceAccount]
+# -- ClusterRoles bound to a ServiceAccount of another namespace in every
+# organization namespace, such as Substrate's credential providers' Secret
+# readers, which read the Secret an actor's credential names there. Each
+# ClusterRole is bound by a RoleBinding named after it (listed once, not the
+# Helm or Flux binding's name), and the operator gets `bind` on it; a
+# ClusterRole removed from the list loses its bindings. The agent-platform
+# chart's admission policy holds which ServiceAccounts the operator binds
+# there.
+serviceAccountBindings: []  # @schema item: object; itemProperties: {"clusterRole": {"type": "string", "minLength": 1}, "serviceAccount": {"type": "object", "additionalProperties": false, "required": ["namespace", "name"], "properties": {"namespace": {"type": "string", "minLength": 1}, "name": {"type": "string", "minLength": 1}}}}; itemRequired: [clusterRole, serviceAccount]
 
 snapshots:
   # -- Bucket of the organizations' worker snapshots: an organization's

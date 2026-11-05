@@ -61,7 +61,7 @@ func run() error {
 		leaderElect               bool
 		leaderElectionNamespace   string
 		installationKustomization string
-		secretReaders             string
+		serviceAccountBindings    string
 	)
 	flag.StringVar(&cfg.PlatformNamespace, "platform-namespace", "kagent", "The platform namespace the network policies are copied from")
 	flag.StringVar(&networkPolicyFlavor, "network-policy-flavor", "", "Kind of the network policies copied into an organization namespace: kubernetes (NetworkPolicy) or cilium (CiliumNetworkPolicy); empty copies none")
@@ -73,7 +73,7 @@ func run() error {
 	flag.StringVar(&cfg.Chart.APIVersion, "flux-ocirepository-api-version", "source.toolkit.fluxcd.io/v1", "source.toolkit.fluxcd.io API version of the OCIRepository")
 	flag.StringVar(&cfg.HelmServiceAccount, "helmrelease-service-account", "kagent-flux", "The ServiceAccount the organization's HelmReleases run as, kept in every organization namespace; empty keeps none")
 	flag.StringVar(&cfg.HelmClusterRole, "helm-cluster-role", "agent-platform-tenant-flux", "ClusterRole bound to --helmrelease-service-account in every organization namespace")
-	flag.StringVar(&secretReaders, "secret-readers", "", "Comma-separated <clusterrole>=<namespace>/<serviceaccount>: each ClusterRole is bound to that ServiceAccount in every organization namespace, by a RoleBinding named after the ClusterRole, so it reads Secrets there and nowhere it is not bound (Substrate's credential providers); a reader removed from the list loses its bindings; empty binds none")
+	flag.StringVar(&serviceAccountBindings, "service-account-bindings", "", `JSON list of {"clusterRole": ..., "serviceAccount": {"namespace": ..., "name": ...}}: each ClusterRole is bound to that ServiceAccount of another namespace in every organization namespace, by a RoleBinding named after the ClusterRole, so it holds the ClusterRole there and nowhere it is not bound (Substrate's credential providers); a ClusterRole removed from the list loses its bindings; empty binds none`)
 	flag.StringVar(&cfg.SnapshotBucket, "snapshot-bucket", "", "Bucket of the organizations' worker snapshots: status.snapshotPrefix is s3://<bucket>/<uid>; empty leaves it empty")
 	flag.BoolVar(&curatedCopies, "curated-copies", false, "Copy the curated objects of --platform-namespace into every organization namespace: the Harnesses its spec.harnesses names, the WorkerPool --curated-worker-pool with its ServiceAccount, the Agents and AgentTemplates labelled "+v1alpha1.CuratedLabel+"=true and the RemoteMCPServers they name. Needs --snapshot-bucket")
 	flag.StringVar(&curatedWorkerPool, "curated-worker-pool", "kagent-default", "The curated WorkerPool in --platform-namespace every organization gets a copy of")
@@ -114,12 +114,12 @@ func run() error {
 	}
 	cfg.NetworkPolicyGVK = gvk
 	cfg.NetworkPolicies = splitList(networkPolicies)
-	if cfg.SecretReaders, err = controller.ParseSecretReaders(secretReaders); err != nil {
-		return fmt.Errorf("--secret-readers: %w", err)
+	if cfg.ServiceAccountBindings, err = controller.ParseServiceAccountBindings(serviceAccountBindings); err != nil {
+		return fmt.Errorf("--service-account-bindings: %w", err)
 	}
-	for _, reader := range cfg.SecretReaders {
-		if reader.ClusterRole == cfg.HelmServiceAccount || reader.ClusterRole == controller.FluxRoleBinding {
-			return fmt.Errorf("--secret-readers: the RoleBinding of ClusterRole %q would take the name of the operator's Helm or Flux binding", reader.ClusterRole)
+	for _, b := range cfg.ServiceAccountBindings {
+		if b.ClusterRole == cfg.HelmServiceAccount || b.ClusterRole == controller.FluxRoleBinding {
+			return fmt.Errorf("--service-account-bindings: the RoleBinding of ClusterRole %q would take the name of the operator's Helm or Flux binding", b.ClusterRole)
 		}
 	}
 	if cfg.ObjectQuota, err = parseQuota(objectQuota); err != nil {

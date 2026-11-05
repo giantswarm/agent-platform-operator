@@ -15,9 +15,9 @@
 //   - the agent chart's OCIRepository;
 //   - the Helm ServiceAccount the organization's HelmReleases run as, with its
 //     RoleBinding to the tenant Flux ClusterRole;
-//   - a RoleBinding of each SecretReader's ClusterRole to its ServiceAccount
-//     in another namespace (Config.SecretReaders), named after the
-//     ClusterRole, deleted when the reader is no longer configured;
+//   - a RoleBinding of each ServiceAccountBinding's ClusterRole to its
+//     ServiceAccount in another namespace (Config.ServiceAccountBindings),
+//     named after the ClusterRole, deleted when it is no longer configured;
 //   - a mirror of every RoleBinding of the parent namespace to the ClusterRole
 //     agent-platform:organizations-admin, with its User and Group subjects
 //     only, removed when the parent binding goes;
@@ -128,9 +128,10 @@ type Config struct {
 	// organization namespace. Empty HelmServiceAccount keeps neither.
 	HelmServiceAccount string
 	HelmClusterRole    string
-	// SecretReaders are the ClusterRoles bound in every organization
-	// namespace to a ServiceAccount of another namespace; empty binds none.
-	SecretReaders []SecretReader
+	// ServiceAccountBindings are the ClusterRoles bound in every
+	// organization namespace to a ServiceAccount of another namespace; empty
+	// binds none.
+	ServiceAccountBindings []ServiceAccountBinding
 	// SnapshotBucket is the bucket of the snapshot prefix s3://<bucket>/<uid>;
 	// empty leaves the prefix empty. The curated copies need it.
 	SnapshotBucket string
@@ -382,7 +383,7 @@ func (r *OrganizationReconciler) reconcile(ctx context.Context, org *v1alpha1.Ag
 	if sa := r.Config.HelmServiceAccount; sa != "" {
 		errs = append(errs, r.ensureServiceAccount(ctx, ns.Name, sa, ScopeNamespace), r.ensureHelmRoleBinding(ctx, ns.Name))
 	}
-	errs = append(errs, r.keepSecretReaders(ctx, ns.Name))
+	errs = append(errs, r.keepServiceAccountBindings(ctx, ns.Name))
 	if !r.Config.NetworkPolicyGVK.Empty() {
 		for _, name := range r.Config.NetworkPolicies {
 			errs = append(errs, r.copyObject(ctx, r.Config.NetworkPolicyGVK, name, ns.Name))

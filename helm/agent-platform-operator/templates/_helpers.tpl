@@ -55,13 +55,21 @@ empty without a flavor or without names.
 {{- end -}}
 
 {{/*
-secretReaders is the --secret-readers list:
-<clusterrole>=<namespace>/<serviceaccount>, comma-separated.
+serviceAccountBindings is the --service-account-bindings JSON list. A
+binding's RoleBinding is named after its ClusterRole, so a ClusterRole is
+listed once and takes neither the Helm ServiceAccount's binding name nor the
+Flux one.
 */}}
-{{- define "secretReaders" -}}
-{{- $out := list }}
-{{- range .Values.secretReaders }}
-{{- $out = append $out (printf "%s=%s/%s" .clusterRole .serviceAccount.namespace .serviceAccount.name) }}
+{{- define "serviceAccountBindings" -}}
+{{- $seen := dict }}
+{{- range .Values.serviceAccountBindings }}
+{{- if hasKey $seen .clusterRole }}
+{{- fail (printf "serviceAccountBindings: ClusterRole %q is listed twice: its RoleBinding is named after it" .clusterRole) }}
 {{- end }}
-{{- join "," $out }}
+{{- if or (eq .clusterRole $.Values.helmReleaseServiceAccount) (eq .clusterRole "organization-flux") }}
+{{- fail (printf "serviceAccountBindings: the RoleBinding of ClusterRole %q would take the name of the operator's Helm or Flux binding" .clusterRole) }}
+{{- end }}
+{{- $_ := set $seen .clusterRole true }}
+{{- end }}
+{{- toJson .Values.serviceAccountBindings }}
 {{- end }}

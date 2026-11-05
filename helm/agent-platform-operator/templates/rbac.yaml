@@ -24,8 +24,9 @@ The operator binds these ClusterRoles and nothing else: `bind` on those
 names, no `escalate`, no cluster-admin. agent-platform:organizations-admin for
 the mirrored bindings of a parent namespace, agent-platform-tenant-flux for
 the organization's Helm ServiceAccount, agent-platform:organization-flux for
-the organization's Flux ServiceAccount (commit mode), and each secretReaders
-ClusterRole for its ServiceAccount, in the organization namespace only.
+the organization's Flux ServiceAccount (commit mode), and each
+serviceAccountBindings ClusterRole for its ServiceAccount, in the organization
+namespace only.
 */}}
 {{- $netpol := include "networkPolicyResource" . | default "{}" | fromJson }}
 apiVersion: rbac.authorization.k8s.io/v1
@@ -60,7 +61,7 @@ rules:
       {{- if .Values.commitMode.sourceRef.name }}
       - {{ .Values.commitMode.clusterRole | quote }}
       {{- end }}
-      {{- range .Values.secretReaders }}
+      {{- range .Values.serviceAccountBindings }}
       - {{ .clusterRole | quote }}
       {{- end }}
     verbs: ["bind"]
