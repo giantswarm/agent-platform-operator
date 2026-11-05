@@ -1,7 +1,9 @@
 package controller_test
 
 import (
+	"context"
 	"fmt"
+	"maps"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -142,6 +144,74 @@ func curatedCases(t *testing.T, c *cluster) {
 		}
 	})
 
+	t.Run("a label a curated source loses goes from every copy", func(t *testing.T) {
+		one := c.organization(t, "org-labels-one", "one")
+		two := c.organization(t, "org-labels-two", "two")
+		namespaces := []string{c.readyNamespace(t, one).Name, c.readyNamespace(t, two).Name}
+		const otherLabel = "example.com/owner"
+		for _, ns := range namespaces {
+			copied := c.eventually(t, serverGVK, ns, musterServer, func(ct *assert.CollectT, s *unstructured.Unstructured) {
+				assert.Equal(ct, "disabled", s.GetLabels()[discoveryLabel])
+			})
+			labels := copied.GetLabels()
+			labels[otherLabel] = "someone"
+			copied.SetLabels(labels)
+			require.NoError(t, c.admin.Update(t.Context(), copied))
+		}
+
+		original := c.read(t, serverGVK, platformNS, musterServer).GetLabels()
+		c.editSource(t.Context(), t, serverGVK, musterServer, func(source *unstructured.Unstructured) error {
+			lost := maps.Clone(original)
+			delete(lost, discoveryLabel)
+			source.SetLabels(lost)
+			return nil
+		})
+		t.Cleanup(func() {
+			c.editSource(context.WithoutCancel(t.Context()), t, serverGVK, musterServer, func(source *unstructured.Unstructured) error {
+				source.SetLabels(original)
+				return nil
+			})
+		})
+
+		for _, ns := range namespaces {
+			c.eventually(t, serverGVK, ns, musterServer, func(ct *assert.CollectT, s *unstructured.Unstructured) {
+				assert.NotContains(ct, s.GetLabels(), discoveryLabel)
+				assert.Equal(ct, controller.ScopeCurated, s.GetLabels()[controller.ObjectLabel])
+				assert.Equal(ct, "someone", s.GetLabels()[otherLabel], "a label another writer added went")
+			})
+		}
+	})
+
+	t.Run("a renamed pool ServiceAccount replaces the old one in the organization namespace", func(t *testing.T) {
+		org := c.organization(t, "org-pool-sa", "pool-sa")
+		ns := c.readyNamespace(t, org).Name
+		require.EventuallyWithT(t, func(ct *assert.CollectT) {
+			assert.NoError(ct, c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns, Name: poolSA}, &corev1.ServiceAccount{}))
+		}, timeout, tick)
+
+		setPoolSA := func(ctx context.Context, name string) {
+			c.editSource(ctx, t, poolGVK, curatedPool, func(source *unstructured.Unstructured) error {
+				return unstructured.SetNestedField(source.Object, name, "spec", "template", "serviceAccountName")
+			})
+		}
+		const renamed = "substrate-worker-v2"
+		setPoolSA(t.Context(), renamed)
+		t.Cleanup(func() { setPoolSA(context.WithoutCancel(t.Context()), poolSA) })
+
+		require.EventuallyWithT(t, func(ct *assert.CollectT) {
+			list := &corev1.ServiceAccountList{}
+			if !assert.NoError(ct, c.admin.List(t.Context(), list, client.InNamespace(ns), client.MatchingLabels{controller.ObjectLabel: controller.ScopeCurated})) {
+				return
+			}
+			var names []string
+			for _, sa := range list.Items {
+				names = append(names, sa.Name)
+			}
+			assert.Equal(ct, []string{renamed}, names)
+		}, timeout, tick)
+		c.absent(t, corev1.SchemeGroupVersion.WithKind("ServiceAccount"), ns, poolSA)
+	})
+
 	t.Run("the object quota refuses objects over the count", func(t *testing.T) {
 		org := c.organization(t, "org-quota", "quota")
 		ns := c.readyNamespace(t, org).Name
@@ -182,6 +252,22 @@ func (c *cluster) eventually(t *testing.T, gvk schema.GroupVersionKind, ns, name
 		got = u
 	}, timeout, tick)
 	return got
+}
+
+// editSource changes the platform object of gvk named name with edit, with
+// ctx: a cleanup passes one t.Context's cancellation does not reach.
+func (c *cluster) editSource(ctx context.Context, t *testing.T, gvk schema.GroupVersionKind, name string, edit func(*unstructured.Unstructured) error) {
+	t.Helper()
+	require.EventuallyWithT(t, func(ct *assert.CollectT) {
+		source := &unstructured.Unstructured{}
+		source.SetGroupVersionKind(gvk)
+		if !assert.NoError(ct, c.admin.Get(ctx, client.ObjectKey{Namespace: platformNS, Name: name}, source)) {
+			return
+		}
+		if assert.NoError(ct, edit(source)) {
+			assert.NoError(ct, c.admin.Update(ctx, source))
+		}
+	}, timeout, tick)
 }
 
 // read reads the object of gvk ns/name.

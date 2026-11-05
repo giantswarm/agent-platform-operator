@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -292,10 +293,34 @@ func (r *OrganizationReconciler) copyWorkerPool(ctx context.Context, ns string, 
 	}
 	pool.SetLabels(map[string]string{workerPoolNameLabel: c.WorkerPool, workerPoolNamespaceLabel: ns})
 	var errs []error
-	if sa, _, _ := unstructured.NestedString(pool.Object, "spec", "template", "serviceAccountName"); sa != "" {
+	sa, _, _ := unstructured.NestedString(pool.Object, "spec", "template", "serviceAccountName")
+	if sa != "" {
 		errs = append(errs, r.ensureServiceAccount(ctx, ns, sa, ScopeCurated))
 	}
+	errs = append(errs, r.pruneWorkerServiceAccounts(ctx, ns, sa))
 	return errors.Join(append(errs, r.ensureScoped(ctx, ns, ScopeCurated, pool, objectRef(src), equal))...)
+}
+
+// pruneWorkerServiceAccounts deletes the curated ServiceAccounts in ns but
+// keep, the one the pool's workers run as now (empty: none).
+func (r *OrganizationReconciler) pruneWorkerServiceAccounts(ctx context.Context, ns, keep string) error {
+	list := &corev1.ServiceAccountList{}
+	if err := r.Client.List(ctx, list, client.InNamespace(ns), client.MatchingLabels{ObjectLabel: ScopeCurated}); err != nil {
+		return fmt.Errorf("list the curated ServiceAccounts in %s: %w", ns, err)
+	}
+	var errs []error
+	for i := range list.Items {
+		sa := &list.Items[i]
+		if sa.Name == keep {
+			continue
+		}
+		if err := r.Client.Delete(ctx, sa); client.IgnoreNotFound(err) != nil {
+			errs = append(errs, fmt.Errorf("delete ServiceAccount %s/%s: %w", ns, sa.Name, err))
+			continue
+		}
+		logf.FromContext(ctx).Info("organization object deleted", "namespace", ns, "kind", "ServiceAccount", "name", sa.Name)
+	}
+	return errors.Join(errs...)
 }
 
 // copyCurated copies the platform object of gvk named name into ns, its spec
