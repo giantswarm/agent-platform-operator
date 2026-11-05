@@ -74,7 +74,7 @@ func Dial(cfg Config) (*Conn, error) {
 			if _, err := readRoots(cfg.CAFile); err != nil {
 				return nil, fmt.Errorf("%s: %w", cfg.Target, err)
 			}
-			creds = &fileRootsCreds{TransportCredentials: creds, base: tlsConfig, caFile: cfg.CAFile}
+			creds = &fileRootsCreds{TransportCredentials: creds, caFile: cfg.CAFile}
 		}
 	}
 	conn, err := grpc.NewClient(hostPort, grpc.WithTransportCredentials(creds))
@@ -100,7 +100,6 @@ func readRoots(caFile string) (*x509.CertPool, error) {
 // at that handshake.
 type fileRootsCreds struct {
 	credentials.TransportCredentials
-	base   *tls.Config
 	caFile string
 }
 
@@ -109,18 +108,11 @@ func (c *fileRootsCreds) ClientHandshake(ctx context.Context, authority string, 
 	if err != nil {
 		return nil, nil, err
 	}
-	tlsConfig := c.base.Clone()
-	tlsConfig.RootCAs = roots
-	return credentials.NewTLS(tlsConfig).ClientHandshake(ctx, authority, rawConn)
+	return credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots}).ClientHandshake(ctx, authority, rawConn)
 }
 
 func (c *fileRootsCreds) Clone() credentials.TransportCredentials {
-	return &fileRootsCreds{TransportCredentials: c.TransportCredentials.Clone(), base: c.base.Clone(), caFile: c.caFile}
-}
-
-func (c *fileRootsCreds) OverrideServerName(name string) error {
-	c.base.ServerName = name
-	return nil
+	return &fileRootsCreds{TransportCredentials: c.TransportCredentials.Clone(), caFile: c.caFile}
 }
 
 // NewConn is a Conn on an existing connection.

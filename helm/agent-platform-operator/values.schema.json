@@ -188,7 +188,7 @@
                             "properties": {
                                 "matchLabels": {
                                     "type": "object",
-                                    "description": "Labels a ClusterTrustBundle of `signerName` must carry to be projected (Substrate's live bundles carry `podcert.ate.dev/canarying: live`).",
+                                    "description": "Labels a ClusterTrustBundle of `signerName` must carry to be projected (Substrate's live bundles carry `podcert.ate.dev/canarying: live`). Empty: every ClusterTrustBundle of `signerName`.",
                                     "additionalProperties": {
                                         "type": "string"
                                     }
