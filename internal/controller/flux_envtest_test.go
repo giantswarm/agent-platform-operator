@@ -237,7 +237,7 @@ func fluxCases(t *testing.T, c *cluster) {
 		require.NoError(t, c.admin.Delete(t.Context(), kustomization))
 		require.NoError(t, c.admin.Delete(t.Context(), serviceAccount))
 
-		waitsFor := func(kind string) {
+		waitsFor := func(kind, step string, namespaces int) {
 			t.Helper()
 			require.EventuallyWithT(t, func(ct *assert.CollectT) {
 				got := c.get(ct, org)
@@ -247,23 +247,22 @@ func fluxCases(t *testing.T, c *cluster) {
 					assert.Contains(ct, ready.Message, "waiting until these are gone: ")
 					assert.Contains(ct, ready.Message, kind+" "+fluxNS+"/"+ns)
 				}
-				assert.Equal(ct, v1alpha1.ErasureWorkloads, got.Status.ErasureStep)
+				assert.Equal(ct, step, got.Status.ErasureStep)
 			}, timeout, tick)
 			require.Never(t, func() bool {
 				got := &v1alpha1.AgentPlatformOrganization{}
 				err := c.admin.Get(context.Background(), client.ObjectKeyFromObject(org), got)
-				return err != nil || got.Status.ErasureStep != v1alpha1.ErasureWorkloads
-			}, time.Second, tick, "the erasure left the Workloads step while the %s was terminating", kind)
-			require.Len(t, c.namespacesOf(t, org), 1, "the namespace went while the %s was terminating", kind)
+				return err != nil || got.Status.ErasureStep != step
+			}, time.Second, tick, "the erasure left the %s step while the %s was terminating", step, kind)
+			require.Len(t, c.namespacesOf(t, org), namespaces)
 		}
 		require.NoError(t, c.admin.Delete(t.Context(), org))
-		waitsFor("Kustomization")
-
-		c.release(t.Context(), kustomization)
-		c.eventuallyAbsent(t, kustomizationGVK, fluxNS, ns)
-		waitsFor("ServiceAccount")
+		waitsFor("Kustomization", v1alpha1.ErasureWorkloads, 1)
 
 		c.finalizeNamespaceWhenDeleted(t, ns)
+		c.release(t.Context(), kustomization)
+		waitsFor("ServiceAccount", v1alpha1.ErasureOutsideObjects, 0)
+
 		c.release(t.Context(), serviceAccount)
 		c.gone(t, org)
 		require.Empty(t, c.namespacesOf(t, org))

@@ -247,16 +247,12 @@ func (r *OrganizationReconciler) eraseWorkloads(ctx context.Context, org *v1alph
 		// Before the namespace step, for both: a Flux object the label no
 		// longer finds holds the namespace, whose RoleBinding it needs.
 		if f.commitMode() {
-			var left []string
-			for _, obj := range []client.Object{object(f.Kustomization), &corev1.ServiceAccount{}} {
-				terminating, err := r.unlabelled(ctx, obj, org, ns)
-				if err != nil {
-					return nil, err
-				}
-				left = append(left, terminating...)
+			left, err := r.unlabelled(ctx, object(f.Kustomization), org, ns)
+			if err != nil || len(left) > 0 {
+				return r.waitFor(left), err
 			}
-			if len(left) > 0 {
-				return r.waitFor(left), nil
+			if _, err := r.unlabelled(ctx, &corev1.ServiceAccount{}, org, ns); err != nil {
+				return nil, err
 			}
 		}
 	}
