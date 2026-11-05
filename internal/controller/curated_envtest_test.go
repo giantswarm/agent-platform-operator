@@ -93,25 +93,39 @@ func curatedCases(t *testing.T, c *cluster) {
 		ns := c.readyNamespace(t, org).Name
 		harness := c.eventually(t, harnessGVK, ns, curatedHarness, nil)
 		pool := c.eventually(t, poolGVK, ns, curatedPool, nil)
+		// renamed is obj as a new object of another name, so a dry-run create
+		// runs the CRD's create validation on the operator's copy.
+		renamed := func(obj *unstructured.Unstructured) *unstructured.Unstructured {
+			copied := obj.DeepCopy()
+			copied.SetName(copied.GetName() + "-refused")
+			copied.SetResourceVersion("")
+			copied.SetUID("")
+			return copied
+		}
+		for _, obj := range []*unstructured.Unstructured{harness, pool} {
+			require.NoError(t, c.admin.Create(t.Context(), renamed(obj), client.DryRunAll), "the unchanged %s copy", obj.GetKind())
+		}
 
 		for _, tc := range []struct {
-			desc  string
-			obj   *unstructured.Unstructured
+			desc string
+			obj  *unstructured.Unstructured
+			// field is the path below spec; a nil value removes it.
 			field []string
 			value any
 		}{
-			{"a Harness image without a digest", harness, []string{specField, "workload", "image"}, "gsoci.azurecr.io/giantswarm/kagent/golang-adk:latest"},
-			{"a compaction threshold without its retention size", harness, []string{specField, "kagent", "compaction", "eventRetentionSize"}, nil},
-			{"a WorkerPool with negative replicas", pool, []string{specField, "replicas"}, int64(-1)},
+			{"a Harness image without a digest", harness, []string{"workload", "image"}, "gsoci.azurecr.io/giantswarm/kagent/golang-adk:latest"},
+			{"a compaction threshold without its retention size", harness, []string{"kagent", "compaction", "eventRetentionSize"}, nil},
+			{"a WorkerPool with negative replicas", pool, []string{"replicas"}, int64(-1)},
 		} {
 			t.Run(tc.desc, func(t *testing.T) {
-				copied := tc.obj.DeepCopy()
+				copied := renamed(tc.obj)
+				field := append([]string{"spec"}, tc.field...)
 				if tc.value == nil {
-					unstructured.RemoveNestedField(copied.Object, tc.field...)
+					unstructured.RemoveNestedField(copied.Object, field...)
 				} else {
-					require.NoError(t, unstructured.SetNestedField(copied.Object, tc.value, tc.field...))
+					require.NoError(t, unstructured.SetNestedField(copied.Object, tc.value, field...))
 				}
-				err := c.admin.Update(t.Context(), copied, client.DryRunAll)
+				err := c.admin.Create(t.Context(), copied, client.DryRunAll)
 				require.Truef(t, apierrors.IsInvalid(err), "want Invalid, got %v", err)
 			})
 		}

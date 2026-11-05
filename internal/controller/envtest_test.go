@@ -37,17 +37,20 @@ import (
 
 const (
 	chartDir = "../../helm/agent-platform-operator"
-	// crdsDir holds the kagent, Substrate and Flux CRDs at the versions the
-	// agent-platform chart ships (`make envtest-crds`).
+	// crdsDir holds the kagent, Substrate and Flux CRDs at the versions a
+	// management cluster serves (`make envtest-crds`).
 	crdsDir          = "testdata/crds"
 	releaseNamespace = "agent-platform"
 	platformNS       = "kagent"
 	workerPolicy     = "substrate-workers-ingress"
 	helmSA           = "kagent-flux"
-	helmClusterRole  = "agent-platform-tenant-flux"
-	snapshotBucket   = "agent-snapshots"
-	appLabel         = "app"
-	workerApp        = "substrate-worker"
+	// agentChart names the agent chart's OCIRepository: the last element of
+	// the chart's URL.
+	agentChart      = "agent"
+	helmClusterRole = "agent-platform-tenant-flux"
+	snapshotBucket  = "agent-snapshots"
+	appLabel        = "app"
+	workerApp       = "substrate-worker"
 
 	// The curated objects of the platform namespace.
 	curatedPool      = "kagent-default"
@@ -84,6 +87,8 @@ const (
 	// Kustomization in fluxNS, and the ClusterRole an organization's Flux
 	// ServiceAccount is bound to.
 	fluxSource          = "management-clusters-fleet"
+	fluxSourceKind      = "GitRepository"
+	fluxInterval        = "10m"
 	sopsSecret          = "sops-keys"
 	installationKS      = "flux"
 	organizationFluxCR  = "agent-platform:organization-flux"
@@ -246,8 +251,8 @@ func startEnvtest(t *testing.T) *cluster {
 		},
 		Flux: controller.FluxConfig{
 			Namespace: fluxNS, Kustomization: kustomizationGVK,
-			SourceKind: "GitRepository", SourceName: fluxSource, DecryptionSecret: sopsSecret,
-			Path: organizationPathFmt, Interval: "10m", ClusterRole: organizationFluxCR,
+			SourceKind: fluxSourceKind, SourceName: fluxSource, DecryptionSecret: sopsSecret,
+			Path: organizationPathFmt, Interval: fluxInterval, ClusterRole: organizationFluxCR,
 			Installation: types.NamespacedName{Namespace: fluxNS, Name: installationKS},
 		},
 	}}
@@ -340,25 +345,21 @@ func agentSpec(prompt string, fields map[string]any) map[string]any {
 	return map[string]any{"harnessRef": nameRef(curatedHarness), "template": templateSpec(prompt, fields)}
 }
 
-// helmReleaseSpec is the spec of an agent chart's HelmRelease.
+// helmReleaseSpec is the spec of a HelmRelease of the agent chart, from the
+// organization namespace's OCIRepository.
 var helmReleaseSpec = map[string]any{
 	intervalField: "30m",
-	"chart": map[string]any{specField: map[string]any{
-		"chart":     "agent",
-		sourceField: map[string]any{kindField: "HelmRepository", nameField: "agents"},
-	}},
+	"chartRef":    map[string]any{kindField: ociGVK.Kind, nameField: agentChart},
 }
 
 // nameRef is a reference to an object by name.
 func nameRef(name string) map[string]any { return map[string]any{nameField: name} }
 
-// The fields of a spec and of a reference.
+// The fields of a reference and a Flux object's interval.
 const (
-	specField     = "spec"
-	intervalField = "interval"
 	kindField     = "kind"
-	sourceField   = "sourceRef"
 	nameField     = "name"
+	intervalField = "interval"
 )
 
 // recordQuotaUsage does what kube-controller-manager's quota controller does

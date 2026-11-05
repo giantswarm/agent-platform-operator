@@ -42,13 +42,13 @@ func fluxCases(t *testing.T, c *cluster) {
 		k := c.eventually(t, kustomizationGVK, fluxNS, ns, nil)
 		assert.Equal(t, labels, k.GetLabels())
 		assert.Equal(t, map[string]any{
-			"interval":           "10m",
+			intervalField:        fluxInterval,
 			"path":               "./agent-platform/organizations/org-git/ledger",
 			"prune":              true,
 			"deletionPolicy":     "WaitForTermination",
 			"suspend":            false,
 			"force":              false,
-			"sourceRef":          map[string]any{"kind": "GitRepository", nameField: fluxSource, "namespace": fluxNS},
+			"sourceRef":          map[string]any{kindField: fluxSourceKind, nameField: fluxSource, "namespace": fluxNS},
 			"decryption":         map[string]any{"provider": "sops", "secretRef": nameRef(sopsSecret)},
 			"serviceAccountName": ns,
 			"targetNamespace":    ns,
@@ -300,8 +300,8 @@ func fluxCases(t *testing.T, c *cluster) {
 			return map[string]any{"id": parent + "_" + name + "_agent-platform.giantswarm.io_AgentPlatformOrganization", "v": "v1alpha1"}
 		}
 		c.create(t, newObject(kustomizationGVK, fluxNS, installationKS, nil, map[string]any{
-			intervalField: "10m", "path": "./management-clusters/test", "prune": true, "deletionPolicy": "Orphan",
-			sourceField: map[string]any{kindField: "GitRepository", nameField: fluxSource},
+			intervalField: fluxInterval, "path": "./management-clusters/test", "prune": true, "deletionPolicy": "Orphan",
+			"sourceRef": map[string]any{kindField: fluxSourceKind, nameField: fluxSource},
 		}))
 		// The status kustomize-controller records: settled (Ready for its
 		// generation), or reconciling, with the inventory of the last apply.

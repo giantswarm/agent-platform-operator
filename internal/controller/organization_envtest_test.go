@@ -59,7 +59,7 @@ func TestOrganizationEnvtest(t *testing.T) {
 
 		oci := &unstructured.Unstructured{}
 		oci.SetGroupVersionKind(ociGVK)
-		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns.Name, Name: "agent"}, oci))
+		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns.Name, Name: agentChart}, oci))
 		url, _, _ := unstructured.NestedString(oci.Object, "spec", "url")
 		semver, _, _ := unstructured.NestedString(oci.Object, "spec", "ref", "semver")
 		assert.Equal(t, "oci://gsoci.azurecr.io/charts/giantswarm/agent", url)
