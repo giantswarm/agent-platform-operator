@@ -144,7 +144,7 @@ func (r *OrganizationReconciler) ensureScoped(ctx context.Context, ns, scope str
 		logf.FromContext(ctx).V(1).Info("leaving an object the reconciler did not write", "namespace", ns, "kind", kind, "name", obj.GetName())
 		return nil
 	}
-	merged := mirroredLabels(existing.GetLabels(), want, scope)
+	merged := mirroredLabels(existing.GetLabels(), want, scope == ScopeCurated)
 	if same(existing.Object["spec"], obj.Object["spec"]) && maps.Equal(merged, existing.GetLabels()) {
 		return nil
 	}
@@ -212,14 +212,14 @@ func subset(have, want map[string]string) bool {
 	return true
 }
 
-// mirroredLabels are the labels an object of scope holding have gets: want
-// on top of have. A curated copy's labels mirrored from its source
-// (kagentLabelPrefix) are want's only, so a label the source lost goes;
-// labels other writers add stay.
-func mirroredLabels(have, want map[string]string, scope string) map[string]string {
+// mirroredLabels are the labels an object holding have gets: want on top of
+// have. With mirrorsKagent, as for a curated copy, its labels mirrored from
+// its source (kagentLabelPrefix) are want's only, so a label the source lost
+// goes; labels other writers add stay.
+func mirroredLabels(have, want map[string]string, mirrorsKagent bool) map[string]string {
 	merged := make(map[string]string, len(have)+len(want))
 	for k, v := range have {
-		if scope == ScopeCurated && strings.HasPrefix(k, kagentLabelPrefix) {
+		if mirrorsKagent && strings.HasPrefix(k, kagentLabelPrefix) {
 			continue
 		}
 		merged[k] = v
@@ -232,36 +232,35 @@ func mirroredLabels(have, want map[string]string, scope string) map[string]strin
 
 // ensureServiceAccount creates the ServiceAccount, the reconciler's own of
 // scope; one that exists is kept as it is (a ServiceAccount has nothing to
-// drift). The cache holds only the reconciler's own ServiceAccounts, so a
-// curated one whose name another writer's already holds is read from the API
-// server and makes the organization not Ready: the workers would run as it.
+// drift). A curated one is the workers' identity, so one of that name that is
+// not curated, another writer's or the reconciler's own of another scope,
+// makes the organization not Ready. The cache holds only ServiceAccounts
+// labelled ObjectLabel, so a name it misses that create finds taken is read
+// from the API server.
 func (r *OrganizationReconciler) ensureServiceAccount(ctx context.Context, ns, name, scope string) error {
 	key := client.ObjectKey{Namespace: ns, Name: name}
-	err := r.Client.Get(ctx, key, &corev1.ServiceAccount{})
-	if err == nil {
-		return nil
-	}
-	if !apierrors.IsNotFound(err) {
-		return fmt.Errorf("get ServiceAccount %s/%s: %w", ns, name, err)
-	}
-	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, Labels: ownLabels(scope)}}
-	if scope != ScopeCurated {
-		return r.create(ctx, sa, "ServiceAccount")
-	}
-	err = r.Client.Create(ctx, sa, client.FieldOwner(fieldManager))
-	switch {
-	case err == nil:
-		logf.FromContext(ctx).Info("organization object created", "namespace", ns, "kind", "ServiceAccount", "name", name)
-		return nil
-	case !apierrors.IsAlreadyExists(err):
-		return fmt.Errorf("create ServiceAccount %s/%s: %w", ns, name, err)
-	}
 	existing := &corev1.ServiceAccount{}
-	if err := r.APIReader.Get(ctx, key, existing); err != nil {
-		return fmt.Errorf("get ServiceAccount %s/%s: %w", ns, name, err)
+	err := r.Client.Get(ctx, key, existing)
+	if apierrors.IsNotFound(err) {
+		sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, Labels: ownLabels(scope)}}
+		if scope != ScopeCurated {
+			return r.create(ctx, sa, "ServiceAccount")
+		}
+		err = r.Client.Create(ctx, sa, client.FieldOwner(fieldManager))
+		if err == nil {
+			logf.FromContext(ctx).Info("organization object created", "namespace", ns, "kind", "ServiceAccount", "name", name)
+			return nil
+		}
+		if !apierrors.IsAlreadyExists(err) {
+			return fmt.Errorf("create ServiceAccount %s/%s: %w", ns, name, err)
+		}
+		err = r.APIReader.Get(ctx, key, existing)
 	}
-	if existing.Labels[ObjectLabel] != scope {
-		return &notReadyError{reason: reasonNameTaken, message: fmt.Sprintf("the ServiceAccount %s/%s is not the operator's, so the curated WorkerPool's workers cannot run as it", ns, name)}
+	switch {
+	case err != nil:
+		return fmt.Errorf("get ServiceAccount %s/%s: %w", ns, name, err)
+	case scope == ScopeCurated && existing.Labels[ObjectLabel] != scope:
+		return &notReadyError{reason: reasonNameTaken, message: fmt.Sprintf("the ServiceAccount %s/%s is not the operator's curated one, so the curated WorkerPool's workers cannot run as it", ns, name)}
 	}
 	return nil
 }

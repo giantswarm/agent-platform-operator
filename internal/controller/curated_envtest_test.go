@@ -215,30 +215,46 @@ func curatedCases(t *testing.T, c *cluster) {
 		})
 	})
 
-	t.Run("a pool ServiceAccount name another writer holds keeps the pool on its ServiceAccount and the organization not Ready", func(t *testing.T) {
-		org := c.organization(t, "org-pool-sa-taken", "pool-sa-taken")
-		ns := c.readyNamespace(t, org).Name
-		const taken = "tenant-worker"
-		require.NoError(t, c.admin.Create(t.Context(), &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: taken, Namespace: ns}}))
+	t.Run("a pool ServiceAccount name that is not curated keeps the pool on its ServiceAccount and the organization not Ready", func(t *testing.T) {
+		for _, tc := range []struct {
+			desc, parent, name, sa string
+			foreign                bool
+		}{
+			{desc: "another writer's", parent: "org-sa-foreign", name: "sa-foreign", sa: "tenant-worker", foreign: true},
+			{desc: "the Helm ServiceAccount", parent: "org-sa-helm", name: "sa-helm", sa: helmSA},
+		} {
+			t.Run(tc.desc, func(t *testing.T) {
+				org := c.organizationWith(t, tc.parent, tc.name, v1alpha1.AgentPlatformOrganizationSpec{Workers: v1alpha1.Workers{Replicas: 2}})
+				ns := c.readyNamespace(t, org).Name
+				model := c.modelConfig(t, ns, "anthropic", false)
+				c.replicas(t, ns, 2)
+				if tc.foreign {
+					require.NoError(t, c.admin.Create(t.Context(), &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: tc.sa, Namespace: ns}}))
+				}
 
-		setPoolSA := func(ctx context.Context, name string) {
-			c.editSource(ctx, t, poolGVK, curatedPool, func(source *unstructured.Unstructured) error {
-				return unstructured.SetNestedField(source.Object, name, "spec", "template", "serviceAccountName")
+				setPoolSA := func(ctx context.Context, name string) {
+					c.editSource(ctx, t, poolGVK, curatedPool, func(source *unstructured.Unstructured) error {
+						return unstructured.SetNestedField(source.Object, name, "spec", "template", "serviceAccountName")
+					})
+				}
+				setPoolSA(t.Context(), tc.sa)
+				t.Cleanup(func() { setPoolSA(context.WithoutCancel(t.Context()), poolSA) })
+
+				require.EventuallyWithT(t, func(ct *assert.CollectT) {
+					ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, v1alpha1.ConditionReady)
+					if assert.NotNil(ct, ready) {
+						assert.Equal(ct, metav1.ConditionFalse, ready.Status)
+						assert.Equal(ct, "NameTaken", ready.Reason)
+					}
+				}, timeout, tick)
+				pool := c.read(t, poolGVK, ns, curatedPool)
+				assert.Equal(t, poolSA, str(pool, "spec", "template", "serviceAccountName"), "the pool runs as a ServiceAccount that is not curated")
+				require.NoError(t, c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns, Name: poolSA}, &corev1.ServiceAccount{}), "the pool's ServiceAccount went while the pool still names it")
+
+				require.NoError(t, c.admin.Delete(t.Context(), model))
+				c.eventuallyAbsent(t, poolGVK, ns, curatedPool)
 			})
 		}
-		setPoolSA(t.Context(), taken)
-		t.Cleanup(func() { setPoolSA(context.WithoutCancel(t.Context()), poolSA) })
-
-		require.EventuallyWithT(t, func(ct *assert.CollectT) {
-			ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, v1alpha1.ConditionReady)
-			if assert.NotNil(ct, ready) {
-				assert.Equal(ct, metav1.ConditionFalse, ready.Status)
-				assert.Equal(ct, "NameTaken", ready.Reason)
-			}
-		}, timeout, tick)
-		pool := c.read(t, poolGVK, ns, curatedPool)
-		assert.Equal(t, poolSA, str(pool, "spec", "template", "serviceAccountName"), "the pool runs as another writer's ServiceAccount")
-		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns, Name: poolSA}, &corev1.ServiceAccount{}), "the pool's ServiceAccount went while the pool still names it")
 	})
 
 	t.Run("the object quota refuses objects over the count", func(t *testing.T) {

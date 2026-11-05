@@ -298,6 +298,9 @@ func (r *OrganizationReconciler) copyWorkerPool(ctx context.Context, ns string, 
 	sa, _, _ := unstructured.NestedString(pool.Object, "spec", "template", "serviceAccountName")
 	if sa != "" {
 		if err := r.ensureServiceAccount(ctx, ns, sa, ScopeCurated); err != nil {
+			if replicas == 0 {
+				err = errors.Join(err, r.deletePoolCopy(ctx, ns, c.WorkerPool))
+			}
 			return err
 		}
 	}
@@ -305,6 +308,31 @@ func (r *OrganizationReconciler) copyWorkerPool(ctx context.Context, ns string, 
 		return err
 	}
 	return r.pruneWorkerServiceAccounts(ctx, ns, sa)
+}
+
+// deletePoolCopy deletes the curated WorkerPool copy name in ns. It stands
+// for scaling a copy to 0 that cannot be written: admission
+// (agent-platform-organization-workerpool-copy) refuses a copy whose template
+// is not the curated one's, so a copy left on its ServiceAccount cannot take
+// new replicas.
+func (r *OrganizationReconciler) deletePoolCopy(ctx context.Context, ns, name string) error {
+	gvk := r.Config.Curated.pool()
+	pool := object(gvk)
+	err := r.Client.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, pool)
+	switch {
+	case apierrors.IsNotFound(err):
+		return nil
+	case err != nil:
+		return fmt.Errorf("get %s %s/%s: %w", gvk.Kind, ns, name, err)
+	case pool.GetLabels()[ObjectLabel] != ScopeCurated:
+		return nil
+	}
+	uid := pool.GetUID()
+	if err := r.Client.Delete(ctx, pool, client.Preconditions{UID: &uid}); client.IgnoreNotFound(err) != nil {
+		return fmt.Errorf("delete %s %s/%s: %w", gvk.Kind, ns, name, err)
+	}
+	logf.FromContext(ctx).Info("organization object deleted", "namespace", ns, "kind", gvk.Kind, "name", name)
+	return nil
 }
 
 // pruneWorkerServiceAccounts deletes the curated ServiceAccounts in ns other
