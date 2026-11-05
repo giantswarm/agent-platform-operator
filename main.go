@@ -15,7 +15,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -232,14 +231,6 @@ func run() error {
 			return fmt.Errorf("discovering %s: %w", k, err)
 		}
 	}
-	if k := cfg.Flux.Installation; k.Name != "" {
-		// A mistyped name would leave Orphaned unset for good, in silence.
-		ks := &unstructured.Unstructured{}
-		ks.SetGroupVersionKind(cfg.Flux.Kustomization)
-		if err := mgr.GetAPIReader().Get(context.Background(), k, ks); err != nil {
-			return fmt.Errorf("--installation-kustomization %s: %w", k, err)
-		}
-	}
 	r := &controller.OrganizationReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Cache: mgr.GetCache(), Config: cfg}
 	if err := r.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("controller: %w", err)
@@ -249,6 +240,12 @@ func run() error {
 	}
 	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
 		return err
+	}
+	// A mistyped name would leave Orphaned unset for good, in silence.
+	if check := controller.InstallationCheck(mgr.GetAPIReader(), cfg.Flux); check != nil {
+		if err := mgr.AddReadyzCheck("installation-kustomization", check); err != nil {
+			return err
+		}
 	}
 	return mgr.Start(ctrl.SetupSignalHandler())
 }

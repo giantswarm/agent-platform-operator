@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"reflect"
 	"strings"
 
@@ -116,14 +117,17 @@ func (r *OrganizationReconciler) keepFlux(ctx context.Context, org *v1alpha1.Age
 }
 
 // ensureFluxServiceAccount creates the organization's Flux ServiceAccount. It
-// is read from the API server, not the cache, which holds only labelled
-// ServiceAccounts: a ServiceAccount of that name without the organization's
-// UID is another writer's, and binding it would give its holder the
-// organization.
+// is read from the cache, which holds only labelled ServiceAccounts, and a
+// miss is confirmed from the API server: a ServiceAccount of that name without
+// the organization's UID is another writer's, and binding it would give its
+// holder the organization.
 func (r *OrganizationReconciler) ensureFluxServiceAccount(ctx context.Context, org *v1alpha1.AgentPlatformOrganization, name string) error {
 	ns := r.Config.Flux.Namespace
 	existing := &corev1.ServiceAccount{}
-	err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, existing)
+	err := r.Client.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, existing)
+	if apierrors.IsNotFound(err) {
+		err = r.APIReader.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, existing)
+	}
 	switch {
 	case apierrors.IsNotFound(err):
 		sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, Labels: fluxObjectLabels(org)}}
@@ -153,13 +157,17 @@ func (r *OrganizationReconciler) ensureFluxServiceAccount(ctx context.Context, o
 // ensureKustomization creates the organization's Kustomization, or brings
 // its spec and labels back to what the reconciler keeps; fields the API
 // server defaults, the status and other writers' metadata stay. It is read
-// from the API server: the cache holds only labelled Kustomizations, so one
-// of that name without the labels would read as missing.
+// from the cache, and a miss is confirmed from the API server: the cache
+// holds only labelled Kustomizations, so one of that name without the labels
+// would read as missing.
 func (r *OrganizationReconciler) ensureKustomization(ctx context.Context, org *v1alpha1.AgentPlatformOrganization, name string) error {
 	f := r.Config.Flux
 	want := r.kustomization(org, name)
 	existing := object(f.Kustomization)
-	err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(want), existing)
+	err := r.cacheReader().Get(ctx, client.ObjectKeyFromObject(want), existing)
+	if apierrors.IsNotFound(err) {
+		err = r.APIReader.Get(ctx, client.ObjectKeyFromObject(want), existing)
+	}
 	switch {
 	case apierrors.IsNotFound(err):
 		if err := r.Client.Create(ctx, want, client.FieldOwner(fieldManager)); err != nil {
@@ -346,11 +354,33 @@ func (r *OrganizationReconciler) setOrphaned(ctx context.Context, org *v1alpha1.
 
 // installationReader reads the installation Kustomization: from the cache,
 // which watches it, where the reconciler has one.
-func (r *OrganizationReconciler) installationReader() client.Reader {
+func (r *OrganizationReconciler) installationReader() client.Reader { return r.cacheReader() }
+
+// cacheReader reads the watched unstructured kinds (the Kustomizations) from
+// the manager's cache, or from the API server without one: the client reads
+// every unstructured object from the API server.
+func (r *OrganizationReconciler) cacheReader() client.Reader {
 	if r.Cache != nil {
 		return r.Cache
 	}
 	return r.APIReader
+}
+
+// InstallationCheck is a readiness check: not ready while the installation
+// Kustomization cannot be read, so a mistyped --installation-kustomization
+// shows on the pod, and an operator that comes up before Flux created it
+// becomes ready once it exists. Nil without one.
+func InstallationCheck(reader client.Reader, f FluxConfig) func(*http.Request) error {
+	if !f.orphans() {
+		return nil
+	}
+	return func(req *http.Request) error {
+		ks := object(f.Kustomization)
+		if err := reader.Get(req.Context(), f.Installation, ks); err != nil {
+			return fmt.Errorf("--installation-kustomization %s: %w", f.Installation, err)
+		}
+		return nil
+	}
 }
 
 // unsettled is why the Kustomization ks's inventory may lag what it applied,
@@ -421,10 +451,10 @@ func (r *OrganizationReconciler) isInstallation(o client.Object) bool {
 	return r.Config.Flux.orphans() && o.GetNamespace() == r.Config.Flux.Installation.Namespace && o.GetName() == r.Config.Flux.Installation.Name
 }
 
-// kustomizationChanged passes the installation Kustomization's inventory and
-// condition changes and an organization Kustomization's spec and label
-// changes, not the rest of the status kustomize-controller records on every
-// reconcile.
+// kustomizationChanged passes the installation Kustomization's inventory
+// changes and its moves into and out of settled, and an organization
+// Kustomization's spec and label changes, not the rest of the status
+// kustomize-controller records on every reconcile.
 func (r *OrganizationReconciler) kustomizationChanged() predicate.Funcs {
 	return predicate.Funcs{UpdateFunc: func(e event.UpdateEvent) bool {
 		if r.isInstallation(e.ObjectNew) {
@@ -433,14 +463,15 @@ func (r *OrganizationReconciler) kustomizationChanged() predicate.Funcs {
 			if !ok || !ok2 {
 				return true
 			}
-			for _, field := range []string{"inventory", "conditions", "observedGeneration"} {
-				ov, _, _ := unstructured.NestedFieldNoCopy(o.Object, "status", field)
-				nv, _, _ := unstructured.NestedFieldNoCopy(n.Object, "status", field)
-				if !reflect.DeepEqual(ov, nv) {
-					return true
-				}
+			// kustomize-controller patches the conditions several times per
+			// reconcile: only a move into or out of settled, or a new
+			// inventory, can change an organization's Orphaned condition.
+			if (unsettled(o) == "") != (unsettled(n) == "") {
+				return true
 			}
-			return false
+			oi, _, _ := unstructured.NestedFieldNoCopy(o.Object, "status", "inventory")
+			ni, _, _ := unstructured.NestedFieldNoCopy(n.Object, "status", "inventory")
+			return !reflect.DeepEqual(oi, ni)
 		}
 		return e.ObjectOld.GetGeneration() != e.ObjectNew.GetGeneration() || !reflect.DeepEqual(e.ObjectOld.GetLabels(), e.ObjectNew.GetLabels())
 	}}

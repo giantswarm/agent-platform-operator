@@ -244,6 +244,9 @@ func (r *OrganizationReconciler) eraseWorkloads(ctx context.Context, org *v1alph
 		if err != nil || len(left) > 0 {
 			return r.waitFor(left), err
 		}
+		if err := r.unlabelled(ctx, object(f.Kustomization), org, ns); err != nil {
+			return nil, err
+		}
 	}
 	if ns == "" {
 		return nil, nil
@@ -351,6 +354,9 @@ func (r *OrganizationReconciler) eraseOutsideObjects(ctx context.Context, org *v
 	if ns == "" {
 		return nil, nil
 	}
+	if err := r.unlabelled(ctx, &corev1.ServiceAccount{}, org, org.Status.Namespace); err != nil {
+		return nil, err
+	}
 	list := &corev1.ServiceAccountList{}
 	if err := r.APIReader.List(ctx, list, client.InNamespace(ns), fluxLabels(org)); err != nil {
 		return nil, fmt.Errorf("list the organization's Flux ServiceAccounts: %w", err)
@@ -368,6 +374,30 @@ func (r *OrganizationReconciler) eraseOutsideObjects(ctx context.Context, org *v
 		logf.FromContext(ctx).Info("organization object deleted", "namespace", sa.Namespace, "kind", "ServiceAccount", "name", sa.Name)
 	}
 	return r.waitFor(left), nil
+}
+
+// unlabelled fails the step while the Flux namespace holds an object of obj's
+// kind named after the organization namespace (the name the operator gave
+// the organization's Flux objects) without the organization's UID label:
+// the operator's own object that someone stripped, which the erasure would
+// not find by the label and the agent-platform admission policy lets it not
+// delete, or a squatter. Either way a person decides; the step is retried.
+func (r *OrganizationReconciler) unlabelled(ctx context.Context, obj client.Object, org *v1alpha1.AgentPlatformOrganization, name string) error {
+	if name == "" {
+		return nil
+	}
+	ns := r.Config.Flux.Namespace
+	err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, obj)
+	if meta.IsNoMatchError(err) || apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("get %s/%s: %w", ns, name, err)
+	}
+	if obj.GetLabels()[v1alpha1.OrganizationUIDLabel] == string(org.UID) || obj.GetDeletionTimestamp() != nil {
+		return nil
+	}
+	return fmt.Errorf("%s/%s, named after the organization namespace, does not carry %s=%s: restore the label so the erasure deletes it, or delete it", ns, name, v1alpha1.OrganizationUIDLabel, org.UID)
 }
 
 // deleteAll deletes every object of gvk in ns (every namespace when ns is

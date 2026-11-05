@@ -1,6 +1,7 @@
 package controller_test
 
 import (
+	"context"
 	"slices"
 	"testing"
 	"time"
@@ -130,6 +131,57 @@ func fluxCases(t *testing.T, c *cluster) {
 		c.readyAt(t, org, org.Generation)
 		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKey{Namespace: fluxNS, Name: ns}, sa))
 		assert.Equal(t, labels, sa.Labels)
+	})
+
+	t.Run("a Kustomization that lost the organization's UID label is not taken over and holds the erasure", func(t *testing.T) {
+		org := c.organization(t, "org-git-stripped", "ledger")
+		ns := c.readyNamespace(t, org).Name
+		org = c.get(t, org)
+		c.eventually(t, kustomizationGVK, fluxNS, ns, nil)
+		// Out of the cache too (no organization-object label): the operator
+		// confirms the miss from the API server.
+		strip := func(got *unstructured.Unstructured, _ any) {
+			l := got.GetLabels()
+			delete(l, v1alpha1.OrganizationUIDLabel)
+			delete(l, controller.ObjectLabel)
+			got.SetLabels(l)
+		}
+		c.editKustomization(t, ns, strip, nil)
+		require.EventuallyWithT(t, func(ct *assert.CollectT) {
+			ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, v1alpha1.ConditionReady)
+			if assert.NotNil(ct, ready) {
+				assert.Equal(ct, metav1.ConditionFalse, ready.Status)
+				assert.Equal(ct, "NameTaken", ready.Reason)
+				assert.Contains(ct, ready.Message, "Kustomization "+fluxNS+"/"+ns)
+			}
+		}, timeout, tick)
+		got := c.read(t, kustomizationGVK, fluxNS, ns)
+		assert.NotContains(t, got.GetLabels(), v1alpha1.OrganizationUIDLabel, "the operator took over a Kustomization without the organization's UID")
+
+		// The erasure does not find it by the label: it stops before the
+		// namespace goes, naming it, instead of leaving it behind.
+		require.NoError(t, c.admin.Delete(t.Context(), org))
+		require.EventuallyWithT(t, func(ct *assert.CollectT) {
+			got := c.get(ct, org)
+			ready := meta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionReady)
+			if assert.NotNil(ct, ready) {
+				assert.Equal(ct, "Deleting", ready.Reason)
+				assert.Contains(ct, ready.Message, fluxNS+"/"+ns+", named after the organization namespace, does not carry "+v1alpha1.OrganizationUIDLabel)
+			}
+			assert.Equal(ct, v1alpha1.ErasureWorkloads, got.Status.ErasureStep)
+		}, timeout, tick)
+		require.Len(t, c.namespacesOf(t, org), 1)
+
+		// The label back, the erasure ends.
+		c.editKustomization(t, ns, func(got *unstructured.Unstructured, _ any) {
+			l := got.GetLabels()
+			l[v1alpha1.OrganizationUIDLabel] = string(org.UID)
+			l[controller.ObjectLabel] = controller.ScopeFlux
+			got.SetLabels(l)
+		}, nil)
+		c.finalizeNamespaceWhenDeleted(t, ns)
+		c.gone(t, org)
+		c.eventuallyAbsent(t, kustomizationGVK, fluxNS, ns)
 	})
 
 	t.Run("a parent binding named like the organization's Flux binding is not mirrored", func(t *testing.T) {
@@ -265,6 +317,30 @@ func (c *cluster) editKustomization(t *testing.T, name string, set func(*unstruc
 		set(got, v)
 		assert.NoError(ct, c.admin.Update(t.Context(), got))
 	}, timeout, tick)
+}
+
+// finalizeNamespaceWhenDeleted stands in for the namespace controller until
+// the test ends: once ns is terminating, it ends it.
+func (c *cluster) finalizeNamespaceWhenDeleted(t *testing.T, name string) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	t.Cleanup(func() { cancel(); <-done })
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(50 * time.Millisecond):
+			}
+			ns := &corev1.Namespace{}
+			if err := c.admin.Get(ctx, client.ObjectKey{Name: name}, ns); err == nil && ns.DeletionTimestamp != nil {
+				ns.Spec.Finalizers = nil
+				_ = c.admin.SubResource("finalize").Update(ctx, ns)
+			}
+		}
+	}()
 }
 
 // orphaned waits until org's Orphaned condition has status and reason.
