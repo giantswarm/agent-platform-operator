@@ -94,8 +94,14 @@ spec:
             {{- with .Values.erasure.substrate.target }}
             - --substrate-target={{ . }}
             - --substrate-token-file=/var/run/secrets/agent-platform-operator/substrate/token
-            {{- if $.Values.erasure.substrate.caConfigMap.name }}
-            - --substrate-ca-file=/var/run/secrets/agent-platform-operator/substrate-ca/{{ $.Values.erasure.substrate.caConfigMap.key }}
+            {{- $ca := $.Values.erasure.substrate }}
+            {{- if and $ca.caClusterTrustBundle.signerName $ca.caConfigMap.name }}
+            {{- fail "erasure.substrate.caClusterTrustBundle.signerName and erasure.substrate.caConfigMap.name are exclusive: set one" }}
+            {{- end }}
+            {{- if $ca.caClusterTrustBundle.signerName }}
+            - --substrate-ca-file=/var/run/secrets/agent-platform-operator/substrate-ca/trust-bundle.pem
+            {{- else if $ca.caConfigMap.name }}
+            - --substrate-ca-file=/var/run/secrets/agent-platform-operator/substrate-ca/{{ $ca.caConfigMap.key }}
             {{- end }}
             {{- end }}
             - --sync-period={{ .Values.syncPeriod }}
@@ -134,7 +140,7 @@ spec:
             - name: substrate-token
               mountPath: /var/run/secrets/agent-platform-operator/substrate
               readOnly: true
-            {{- if $e.substrate.caConfigMap.name }}
+            {{- if or $e.substrate.caClusterTrustBundle.signerName $e.substrate.caConfigMap.name }}
             - name: substrate-ca
               mountPath: /var/run/secrets/agent-platform-operator/substrate-ca
               readOnly: true
@@ -160,10 +166,24 @@ spec:
                   path: token
                   audience: {{ required "erasure.substrate.audience is required with erasure.substrate.target" $e.substrate.audience }}
                   expirationSeconds: 3600
+        {{- with $e.substrate.caClusterTrustBundle.signerName }}
+        - name: substrate-ca
+          projected:
+            sources:
+              - clusterTrustBundle:
+                  signerName: {{ . }}
+                  {{- with $e.substrate.caClusterTrustBundle.matchLabels }}
+                  labelSelector:
+                    matchLabels:
+                      {{- toYaml . | nindent 22 }}
+                  {{- end }}
+                  path: trust-bundle.pem
+        {{- else }}
         {{- if $e.substrate.caConfigMap.name }}
         - name: substrate-ca
           configMap:
             name: {{ $e.substrate.caConfigMap.name }}
+        {{- end }}
         {{- end }}
         {{- end }}
       {{- end }}
