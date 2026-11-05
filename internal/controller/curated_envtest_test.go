@@ -86,8 +86,6 @@ func curatedCases(t *testing.T, c *cluster) {
 		c.eventuallyAbsent(t, harnessGVK, ns, curatedHarness)
 	})
 
-	// The Orphaned part of the rule is in fluxCases: the condition is the
-	// operator's own, set from the installation Kustomization's inventory.
 	t.Run("the pool runs no workers without a ModelConfig", func(t *testing.T) {
 		org := c.organizationWith(t, "org-workers", "workers", v1alpha1.AgentPlatformOrganizationSpec{Workers: v1alpha1.Workers{Replicas: 3}})
 		ns := c.readyNamespace(t, org).Name

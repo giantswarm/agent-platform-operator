@@ -295,9 +295,16 @@ func (r *OrganizationReconciler) mirrorAdmins(ctx context.Context, parent, ns st
 		return fmt.Errorf("list RoleBindings in %s: %w", parent, err)
 	}
 	want := map[string]*rbacv1.RoleBinding{}
+	var errs []error
 	for i := range parents.Items {
 		pb := &parents.Items[i]
 		if !isOrganizationsAdmin(pb.RoleRef) || pb.DeletionTimestamp != nil {
+			continue
+		}
+		if pb.Name == FluxRoleBinding && r.Config.Flux.commitMode() {
+			// The name of the organization's Flux binding: the mirror would
+			// take it and leave the organization without its Kustomization.
+			errs = append(errs, &notReadyError{reason: reasonNameTaken, message: fmt.Sprintf("the RoleBinding %s/%s has the name the operator keeps for the organization's Flux binding, so it is not mirrored; rename it", parent, pb.Name)})
 			continue
 		}
 		subjects := mirroredSubjects(pb.Subjects)
@@ -314,7 +321,6 @@ func (r *OrganizationReconciler) mirrorAdmins(ctx context.Context, parent, ns st
 			Subjects: subjects,
 		}
 	}
-	var errs []error
 	mirrors := &rbacv1.RoleBindingList{}
 	if err := r.Client.List(ctx, mirrors, client.InNamespace(ns), client.MatchingLabels{ObjectLabel: ScopeAdminMirror}); err != nil {
 		errs = append(errs, fmt.Errorf("list RoleBindings in %s: %w", ns, err))

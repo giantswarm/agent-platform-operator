@@ -179,7 +179,7 @@ func CacheOptions(cfg Config, syncPeriod time.Duration) cache.Options {
 		if f.orphans() {
 			namespaces[f.Installation.Namespace] = cache.Config{}
 		}
-		byObject[object(f.Kustomization)] = cache.ByObject{Namespaces: namespaces}
+		byObject[object(f.Kustomization)] = cache.ByObject{Namespaces: namespaces, Transform: stripInventory(f.Installation)}
 	}
 	return cache.Options{
 		SyncPeriod:       &syncPeriod,
@@ -195,7 +195,10 @@ type OrganizationReconciler struct {
 	// APIReader reads from the API server: the organization namespace is
 	// looked up there, so a namespace the cache has not seen yet is found.
 	APIReader client.Reader
-	Config    Config
+	// Cache reads the installation Kustomization from the manager's cache,
+	// which watches it; nil reads it from the API server.
+	Cache  client.Reader
+	Config Config
 }
 
 // SetupWithManager registers the controller: one work item per

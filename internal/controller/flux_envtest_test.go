@@ -1,7 +1,9 @@
 package controller_test
 
 import (
+	"slices"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -74,15 +76,15 @@ func fluxCases(t *testing.T, c *cluster) {
 
 		// What kustomize-controller does with a merged file: apply it as
 		// spec.serviceAccountName. Into the organization namespace it lands;
-		// into another organization's namespace or the Flux namespace it is
-		// refused.
+		// into another organization's namespace, the parent namespace or the
+		// Flux namespace it is refused.
 		other := c.readyNamespace(t, c.organization(t, "org-git-other", "ledger")).Name
 		asFlux := c.as(t, "system:serviceaccount:"+fluxNS+":"+ns)
 		secret := func(namespace string) *corev1.Secret {
 			return &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "tenant-credential-merged", Namespace: namespace}}
 		}
 		require.NoError(t, asFlux.Create(t.Context(), secret(ns)))
-		for _, elsewhere := range []string{other, fluxNS} {
+		for _, elsewhere := range []string{other, "org-git", fluxNS} {
 			err := asFlux.Create(t.Context(), secret(elsewhere))
 			assert.True(t, apierrors.IsForbidden(err), "a merged file was applied into %s: %v", elsewhere, err)
 		}
@@ -105,6 +107,52 @@ func fluxCases(t *testing.T, c *cluster) {
 			_, added, _ := unstructured.NestedMap(got.Object, "spec", "kubeConfig")
 			assert.False(ct, added, "an added spec.kubeConfig stayed")
 		})
+		// And one added below a field the operator sets.
+		c.editKustomization(t, ns, edit("spec", "decryption", "serviceAccountName"), "kustomize-controller")
+		c.eventually(t, kustomizationGVK, fluxNS, ns, func(ct *assert.CollectT, got *unstructured.Unstructured) {
+			assert.Empty(ct, str(got, "spec", "decryption", "serviceAccountName"), "an added spec.decryption.serviceAccountName stayed")
+		})
+
+		// The Flux ServiceAccount's labels come back: without them the cache
+		// and the watch lose it.
+		require.EventuallyWithT(t, func(ct *assert.CollectT) {
+			got := &corev1.ServiceAccount{}
+			if assert.NoError(ct, c.admin.Get(t.Context(), client.ObjectKey{Namespace: fluxNS, Name: ns}, got)) {
+				delete(got.Labels, controller.ObjectLabel)
+				assert.NoError(ct, c.admin.Update(t.Context(), got))
+			}
+		}, timeout, tick)
+		// A spec change reconciles the organization: the stripped
+		// ServiceAccount no longer does.
+		org = c.get(t, org)
+		org.Spec.Workers.Replicas = 2
+		require.NoError(t, c.admin.Update(t.Context(), org))
+		c.readyAt(t, org, org.Generation)
+		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKey{Namespace: fluxNS, Name: ns}, sa))
+		assert.Equal(t, labels, sa.Labels)
+	})
+
+	t.Run("a parent binding named like the organization's Flux binding is not mirrored", func(t *testing.T) {
+		org := c.organization(t, "org-git-taken", "ledger")
+		ns := c.readyNamespace(t, org).Name
+		c.create(t, &rbacv1.RoleBinding{
+			ObjectMeta: metav1.ObjectMeta{Name: controller.FluxRoleBinding, Namespace: "org-git-taken"},
+			RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: kindClusterRole, Name: controller.OrganizationsAdminClusterRole},
+			Subjects:   []rbacv1.Subject{{Kind: rbacv1.UserKind, APIGroup: rbacv1.GroupName, Name: "dave@example.com"}},
+		})
+		require.EventuallyWithT(t, func(ct *assert.CollectT) {
+			ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, v1alpha1.ConditionReady)
+			if assert.NotNil(ct, ready) {
+				assert.Equal(ct, metav1.ConditionFalse, ready.Status)
+				assert.Equal(ct, "NameTaken", ready.Reason)
+				assert.Contains(ct, ready.Message, "org-git-taken/"+controller.FluxRoleBinding)
+			}
+		}, timeout, tick)
+		// The organization keeps its Flux binding and its Kustomization.
+		rb := &rbacv1.RoleBinding{}
+		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns, Name: controller.FluxRoleBinding}, rb))
+		assert.Equal(t, organizationFluxCR, rb.RoleRef.Name)
+		c.eventually(t, kustomizationGVK, fluxNS, ns, nil)
 	})
 
 	t.Run("an organization missing from the installation Kustomization's inventory is Orphaned until it is back", func(t *testing.T) {
@@ -114,16 +162,26 @@ func fluxCases(t *testing.T, c *cluster) {
 		entry := func(name string) any {
 			return map[string]any{"id": parent + "_" + name + "_agent-platform.giantswarm.io_AgentPlatformOrganization", "v": "v1alpha1"}
 		}
-		installation := newObject(kustomizationGVK, fluxNS, installationKS, nil, map[string]any{"path": "./management-clusters/test", "prune": true, "deletionPolicy": "Orphan"})
-		installation.Object["status"] = map[string]any{"inventory": map[string]any{"entries": []any{entry("treasury")}}}
-		c.create(t, installation)
-		setInventory := func(entries ...any) {
+		c.create(t, newObject(kustomizationGVK, fluxNS, installationKS, nil, map[string]any{"path": "./management-clusters/test", "prune": true, "deletionPolicy": "Orphan"}))
+		// The status kustomize-controller records: settled (Ready for its
+		// generation), or reconciling, with the inventory of the last apply.
+		setStatus := func(settled bool, entries ...any) {
 			require.EventuallyWithT(t, func(ct *assert.CollectT) {
 				got := c.read(t, kustomizationGVK, fluxNS, installationKS)
-				assert.NoError(ct, unstructured.SetNestedSlice(got.Object, entries, "status", "inventory", "entries"))
-				assert.NoError(ct, c.admin.Update(t.Context(), got))
+				condition := map[string]any{"type": "Ready", "status": "True", "reason": "ReconciliationSucceeded"}
+				if !settled {
+					condition = map[string]any{"type": "Reconciling", "status": "True", "reason": "Progressing"}
+				}
+				got.Object["status"] = map[string]any{
+					"observedGeneration": got.GetGeneration(),
+					"conditions":         []any{condition},
+					"inventory":          map[string]any{"entries": entries},
+				}
+				assert.NoError(ct, c.admin.Status().Update(t.Context(), got))
 			}, timeout, tick)
 		}
+		setInventory := func(entries ...any) { setStatus(true, entries...) }
+		setInventory(entry("treasury"))
 
 		// Applied by the installation Kustomization, as Flux labels it.
 		fromGit := map[string]string{v1alpha1.FluxNameLabel: installationKS, v1alpha1.FluxNamespaceLabel: fluxNS}
@@ -136,6 +194,14 @@ func fluxCases(t *testing.T, c *cluster) {
 		c.modelConfig(t, ns, "anthropic", false)
 		c.orphaned(t, org, metav1.ConditionFalse, v1alpha1.ReasonInInventory)
 		c.replicas(t, ns, 3)
+
+		// While Flux reconciles, an organization it labelled may not be in the
+		// inventory yet: it is not Orphaned for that.
+		setStatus(false)
+		assert.Never(t, func() bool {
+			cond := meta.FindStatusCondition(c.get(t, org).Status.Conditions, v1alpha1.ConditionOrphaned)
+			return cond == nil || cond.Status != metav1.ConditionFalse
+		}, 2*time.Second, tick, "Orphaned changed while the installation Kustomization reconciled")
 
 		// The file is gone from git: Orphaned, and the workers stop.
 		setInventory()
@@ -155,6 +221,31 @@ func fluxCases(t *testing.T, c *cluster) {
 		setInventory(entry("treasury"))
 		c.orphaned(t, org, metav1.ConditionFalse, v1alpha1.ReasonInInventory)
 		c.replicas(t, ns, 3)
+
+		// The two-step delete: the delete pull request merged (DeleteMerged,
+		// no workers), then the organization is deleted. Its workers run
+		// again until its sessions are gone, so kagent can suspend its
+		// actors; its Kustomization goes first, its Flux ServiceAccount last.
+		setInventory()
+		c.orphaned(t, org, metav1.ConditionTrue, v1alpha1.ReasonDeleteMerged)
+		c.replicas(t, ns, 0)
+		c.sessions.add(ns, "alice@example.com", "44444444-4444-4444-4444-444444444444")
+		kustomization, serviceAccount := c.holdFluxObjects(t, ns)
+		org = c.get(t, org)
+		c.observeErasure(t, org, ns, kustomization, serviceAccount)
+		require.NoError(t, c.admin.Delete(t.Context(), org))
+		c.gone(t, org)
+		events := c.log.of(ns, org.Status.SnapshotPrefix)
+		t.Logf("erasure: %v", events)
+		workers := all(events, evWorkers)
+		require.Len(t, workers, 3, "the pool's replicas: %v", workers)
+		assert.Equal(t, []string{"0", "3", "0"}, []string{workers[0].detail, workers[1].detail, workers[2].detail})
+		assert.Less(t, slices.Index(events, workers[1]), firstIndex(events, evSessionsListed), "the workers did not run before the sessions were listed")
+		assert.Greater(t, slices.Index(events, workers[2]), firstIndex(events, evNoActor))
+		for _, e := range events[:max(firstIndex(events, evKustomizationDeleted), 0)] {
+			assert.Equal(t, evWorkers, e.what, "%s came before the Kustomization was deleted", e)
+		}
+		assert.Equal(t, len(events)-1, lastIndex(events, evFluxSADeleted), "the Flux ServiceAccount was not the last object deleted")
 
 		// An organization applied without git, missing from the same
 		// inventory, is never Orphaned.

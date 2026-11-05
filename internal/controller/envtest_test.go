@@ -160,7 +160,7 @@ func startEnvtest(t *testing.T) *cluster {
 			anyFieldsCRD(modelGVK, "modelconfigs"),
 			anyFieldsCRD(serverGVK, "remotemcpservers"),
 			anyFieldsCRD(poolGVK, "workerpools"),
-			anyFieldsCRD(kustomizationGVK, "kustomizations"),
+			withStatus(anyFieldsCRD(kustomizationGVK, "kustomizations")),
 			anyFieldsCRD(helmReleaseGVK, "helmreleases"),
 		},
 	}
@@ -267,7 +267,7 @@ func startEnvtest(t *testing.T) *cluster {
 		HealthProbeBindAddress: "0",
 	})
 	require.NoError(t, err)
-	r := &controller.OrganizationReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Config: c.config}
+	r := &controller.OrganizationReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Cache: mgr.GetCache(), Config: c.config}
 	require.NoError(t, r.SetupWithManager(mgr))
 	mgrCtx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -427,6 +427,15 @@ func anyFieldsCRD(gvk schema.GroupVersionKind, plural string) *apiextensionsv1.C
 			}},
 		},
 	}
+}
+
+// withStatus gives crd a status subresource, as Flux's Kustomization has: a
+// status write then leaves the generation as it is.
+func withStatus(crd *apiextensionsv1.CustomResourceDefinition) *apiextensionsv1.CustomResourceDefinition {
+	for i := range crd.Spec.Versions {
+		crd.Spec.Versions[i].Subresources = &apiextensionsv1.CustomResourceSubresources{Status: &apiextensionsv1.CustomResourceSubresourceStatus{}}
+	}
+	return crd
 }
 
 func stderrOf(err error) string {

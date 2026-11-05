@@ -67,6 +67,12 @@ rules:
   - apiGroups: [""]
     resources: ["serviceaccounts"]
     verbs: ["get", "list", "watch", "create", "delete"]
+  {{- if .Values.commitMode.sourceRef.name }}
+  # Commit mode restores the Flux ServiceAccount's labels.
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["update"]
+  {{- end }}
   - apiGroups: ["source.toolkit.fluxcd.io"]
     resources: ["ocirepositories"]
     verbs: ["get", "create"]

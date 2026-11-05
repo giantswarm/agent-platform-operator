@@ -152,12 +152,14 @@ func (r *OrganizationReconciler) ensureFluxServiceAccount(ctx context.Context, o
 
 // ensureKustomization creates the organization's Kustomization, or brings
 // its spec and labels back to what the reconciler keeps; fields the API
-// server defaults, the status and other writers' metadata stay.
+// server defaults, the status and other writers' metadata stay. It is read
+// from the API server: the cache holds only labelled Kustomizations, so one
+// of that name without the labels would read as missing.
 func (r *OrganizationReconciler) ensureKustomization(ctx context.Context, org *v1alpha1.AgentPlatformOrganization, name string) error {
 	f := r.Config.Flux
 	want := r.kustomization(org, name)
 	existing := object(f.Kustomization)
-	err := r.Client.Get(ctx, client.ObjectKeyFromObject(want), existing)
+	err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(want), existing)
 	switch {
 	case apierrors.IsNotFound(err):
 		if err := r.Client.Create(ctx, want, client.FieldOwner(fieldManager)); err != nil {
@@ -214,23 +216,66 @@ func (r *OrganizationReconciler) kustomization(org *v1alpha1.AgentPlatformOrgani
 	return k
 }
 
-// sameSpec reports whether the Kustomization spec have is want: every field
-// of want with its value, and no other field but a zero one (false, "", 0),
-// which is what the API server defaults. An added field (patches,
-// postBuild, kubeConfig, a decryption the reconciler does not set) is a
-// change, and is reverted.
+// sameSpec reports whether the Kustomization spec have is want, at every
+// level: every field of want with its value, and no other field but a zero
+// one (false, "", 0, an empty map or list), which is what the API server
+// defaults. An added field (patches, postBuild, kubeConfig,
+// decryption.serviceAccountName) is a change, and is reverted. The
+// Kustomization CRD defaults no non-zero spec field; one that did would be
+// rewritten on every reconcile, with no generation change.
 func sameSpec(have, want any) bool {
-	h, ok := have.(map[string]any)
-	w, ok2 := want.(map[string]any)
-	if !ok || !ok2 || !contains(h, w) {
-		return false
-	}
-	for k, v := range h {
-		if _, kept := w[k]; !kept && v != false && v != "" && v != int64(0) && v != float64(0) {
+	switch w := want.(type) {
+	case map[string]any:
+		h, ok := have.(map[string]any)
+		if !ok {
 			return false
 		}
+		for k, v := range w {
+			if !sameSpec(h[k], v) {
+				return false
+			}
+		}
+		for k, v := range h {
+			if _, kept := w[k]; !kept && !zero(v) {
+				return false
+			}
+		}
+		return true
+	case []any:
+		h, ok := have.([]any)
+		if !ok || len(h) != len(w) {
+			return false
+		}
+		for i := range w {
+			if !sameSpec(h[i], w[i]) {
+				return false
+			}
+		}
+		return true
+	default:
+		return reflect.DeepEqual(have, want)
 	}
-	return true
+}
+
+// zero reports whether v is a field's zero value.
+func zero(v any) bool {
+	switch x := v.(type) {
+	case nil:
+		return true
+	case bool:
+		return !x
+	case string:
+		return x == ""
+	case int64:
+		return x == 0
+	case float64:
+		return x == 0
+	case map[string]any:
+		return len(x) == 0
+	case []any:
+		return len(x) == 0
+	}
+	return false
 }
 
 func nameTaken(kind, ns, name string) error {
@@ -257,13 +302,20 @@ func (r *OrganizationReconciler) setOrphaned(ctx context.Context, org *v1alpha1.
 		return nil
 	}
 	ks := object(f.Kustomization)
-	err := r.APIReader.Get(ctx, f.Installation, ks)
+	err := r.installationReader().Get(ctx, f.Installation, ks)
 	if apierrors.IsNotFound(err) {
-		logf.FromContext(ctx).V(1).Info("the installation Kustomization is missing; Orphaned stays as it was", "kustomization", f.Installation)
+		logf.FromContext(ctx).Info("the installation Kustomization is missing; Orphaned stays as it was", "kustomization", f.Installation)
 		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("get the installation Kustomization %s: %w", f.Installation, err)
+	}
+	// Flux labels an object when it applies it, and records it in the
+	// inventory only once the apply and its health checks succeeded: until
+	// then a new organization would read as missing from git.
+	if why := unsettled(ks); why != "" {
+		logf.FromContext(ctx).V(1).Info("the installation Kustomization is not settled; Orphaned stays as it was", "kustomization", f.Installation, "why", why)
+		return nil
 	}
 	inventory, found, err := unstructured.NestedMap(ks.Object, "status", "inventory")
 	if err != nil || !found {
@@ -292,6 +344,43 @@ func (r *OrganizationReconciler) setOrphaned(ctx context.Context, org *v1alpha1.
 	return nil
 }
 
+// installationReader reads the installation Kustomization: from the cache,
+// which watches it, where the reconciler has one.
+func (r *OrganizationReconciler) installationReader() client.Reader {
+	if r.Cache != nil {
+		return r.Cache
+	}
+	return r.APIReader
+}
+
+// unsettled is why the Kustomization ks's inventory may lag what it applied,
+// or empty: it is settled when it is Ready for its current generation and not
+// Reconciling.
+func unsettled(ks *unstructured.Unstructured) string {
+	observed, _, _ := unstructured.NestedInt64(ks.Object, "status", "observedGeneration")
+	if observed < ks.GetGeneration() {
+		return "its generation is not observed yet"
+	}
+	conditions, _, _ := unstructured.NestedSlice(ks.Object, "status", "conditions")
+	ready := false
+	for _, c := range conditions {
+		m, ok := c.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch {
+		case m["type"] == "Reconciling" && m["status"] == string(metav1.ConditionTrue):
+			return "it is reconciling"
+		case m["type"] == "Ready" && m["status"] == string(metav1.ConditionTrue):
+			ready = true
+		}
+	}
+	if !ready {
+		return "it is not Ready"
+	}
+	return ""
+}
+
 func inInventory(entries []any, id string) bool {
 	for _, e := range entries {
 		if m, ok := e.(map[string]any); ok && m["id"] == id {
@@ -299,6 +388,24 @@ func inInventory(entries []any, id string) bool {
 		}
 	}
 	return false
+}
+
+// stripInventory is the cache's transform of a Kustomization: the managed
+// fields go, and so does the inventory of any Kustomization but installation,
+// which the reconciler never reads. A Kustomization's inventory lists every
+// object it applied.
+func stripInventory(installation types.NamespacedName) func(any) (any, error) {
+	return func(o any) (any, error) {
+		u, ok := o.(*unstructured.Unstructured)
+		if !ok {
+			return o, nil
+		}
+		u.SetManagedFields(nil)
+		if u.GetNamespace() != installation.Namespace || u.GetName() != installation.Name {
+			unstructured.RemoveNestedField(u.Object, "status", "inventory")
+		}
+		return u, nil
+	}
 }
 
 // organizationsOfKustomization maps the installation Kustomization to every
@@ -314,9 +421,10 @@ func (r *OrganizationReconciler) isInstallation(o client.Object) bool {
 	return r.Config.Flux.orphans() && o.GetNamespace() == r.Config.Flux.Installation.Namespace && o.GetName() == r.Config.Flux.Installation.Name
 }
 
-// kustomizationChanged passes the installation Kustomization's inventory
-// changes and an organization Kustomization's spec and label changes, not
-// the status kustomize-controller records on every reconcile.
+// kustomizationChanged passes the installation Kustomization's inventory and
+// condition changes and an organization Kustomization's spec and label
+// changes, not the rest of the status kustomize-controller records on every
+// reconcile.
 func (r *OrganizationReconciler) kustomizationChanged() predicate.Funcs {
 	return predicate.Funcs{UpdateFunc: func(e event.UpdateEvent) bool {
 		if r.isInstallation(e.ObjectNew) {
@@ -325,9 +433,14 @@ func (r *OrganizationReconciler) kustomizationChanged() predicate.Funcs {
 			if !ok || !ok2 {
 				return true
 			}
-			oi, _, _ := unstructured.NestedFieldNoCopy(o.Object, "status", "inventory")
-			ni, _, _ := unstructured.NestedFieldNoCopy(n.Object, "status", "inventory")
-			return !reflect.DeepEqual(oi, ni)
+			for _, field := range []string{"inventory", "conditions", "observedGeneration"} {
+				ov, _, _ := unstructured.NestedFieldNoCopy(o.Object, "status", field)
+				nv, _, _ := unstructured.NestedFieldNoCopy(n.Object, "status", field)
+				if !reflect.DeepEqual(ov, nv) {
+					return true
+				}
+			}
+			return false
 		}
 		return e.ObjectOld.GetGeneration() != e.ObjectNew.GetGeneration() || !reflect.DeepEqual(e.ObjectOld.GetLabels(), e.ObjectNew.GetLabels())
 	}}
