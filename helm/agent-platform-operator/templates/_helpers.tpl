@@ -53,3 +53,15 @@ empty without a flavor or without names.
 {{- end -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+secretReaders is the --secret-readers list:
+<clusterrole>=<namespace>/<serviceaccount>, comma-separated.
+*/}}
+{{- define "secretReaders" -}}
+{{- $out := list }}
+{{- range .Values.secretReaders }}
+{{- $out = append $out (printf "%s=%s/%s" .clusterRole .serviceAccount.namespace .serviceAccount.name) }}
+{{- end }}
+{{- join "," $out }}
+{{- end }}

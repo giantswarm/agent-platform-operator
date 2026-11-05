@@ -84,6 +84,12 @@ const (
 	installationKS      = "flux"
 	organizationFluxCR  = "agent-platform:organization-flux"
 	organizationPathFmt = "./agent-platform/organizations/{parent}/{name}"
+
+	// A credential provider's Secret reader: its ClusterRole and its
+	// ServiceAccount in Substrate's namespace.
+	readerClusterRole = "k8s-credential-provider-secret-reader"
+	readerNS          = "ate-system"
+	readerSA          = "k8s-credential-provider"
 )
 
 var (
@@ -146,6 +152,7 @@ func startEnvtest(t *testing.T) *cluster {
 		"--set", "erasure.kagent.target=grpc://kagent-controller.kagent.svc:8083",
 		"--set", "erasure.substrate.target=grpcs://ate-api.substrate.svc",
 		"--set", "erasure.substrate.audience=ate-api",
+		"--set-json", `secretReaders=[{"clusterRole":"`+readerClusterRole+`","serviceAccount":{"namespace":"`+readerNS+`","name":"`+readerSA+`"}}]`,
 	).Output()
 	require.NoError(t, err, "helm template: %s", stderrOf(err))
 
@@ -202,7 +209,7 @@ func startEnvtest(t *testing.T) *cluster {
 
 	// The ClusterRoles the operator binds grant what the operator does not
 	// hold itself, so only `bind` lets it write the bindings.
-	for _, name := range []string{controller.OrganizationsAdminClusterRole, helmClusterRole, organizationFluxCR} {
+	for _, name := range []string{controller.OrganizationsAdminClusterRole, helmClusterRole, organizationFluxCR, readerClusterRole} {
 		require.NoError(t, admin.Create(ctx, &rbacv1.ClusterRole{
 			ObjectMeta: metav1.ObjectMeta{Name: name},
 			Rules:      []rbacv1.PolicyRule{{APIGroups: []string{""}, Resources: []string{"secrets"}, Verbs: []string{"get", "list", "create"}}},
@@ -238,8 +245,11 @@ func startEnvtest(t *testing.T) *cluster {
 		},
 		HelmServiceAccount: helmSA,
 		HelmClusterRole:    helmClusterRole,
-		SnapshotBucket:     snapshotBucket,
-		Curated:            controller.CuratedConfig{WorkerPool: curatedPool, Kagent: kagentGV, Substrate: substrateGV},
+		SecretReaders: []controller.SecretReader{
+			{ClusterRole: readerClusterRole, ServiceAccount: types.NamespacedName{Namespace: readerNS, Name: readerSA}},
+		},
+		SnapshotBucket: snapshotBucket,
+		Curated:        controller.CuratedConfig{WorkerPool: curatedPool, Kagent: kagentGV, Substrate: substrateGV},
 		ObjectQuota: corev1.ResourceList{
 			corev1.ResourceConfigMaps: resource.MustParse(strconv.Itoa(configMapQuota)),
 			// The operator's own Agent copies count too.

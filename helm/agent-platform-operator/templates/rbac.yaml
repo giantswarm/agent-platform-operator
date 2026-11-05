@@ -20,12 +20,12 @@ and deletes the organizations' Kustomizations and Flux ServiceAccounts in the
 Flux namespace, and reads the installation's Kustomization
 (commitMode.installationKustomization) for the Orphaned condition.
 
-The operator binds three ClusterRoles and nothing else: `bind` on those
+The operator binds these ClusterRoles and nothing else: `bind` on those
 names, no `escalate`, no cluster-admin. agent-platform:organizations-admin for
 the mirrored bindings of a parent namespace, agent-platform-tenant-flux for
 the organization's Helm ServiceAccount, agent-platform:organization-flux for
-the organization's Flux ServiceAccount (commit mode), in the organization
-namespace only.
+the organization's Flux ServiceAccount (commit mode), and each secretReaders
+ClusterRole for its ServiceAccount, in the organization namespace only.
 */}}
 {{- $netpol := include "networkPolicyResource" . | default "{}" | fromJson }}
 apiVersion: rbac.authorization.k8s.io/v1
@@ -59,6 +59,9 @@ rules:
       - "agent-platform-tenant-flux"
       {{- if .Values.commitMode.sourceRef.name }}
       - {{ .Values.commitMode.clusterRole | quote }}
+      {{- end }}
+      {{- range .Values.secretReaders }}
+      - {{ .clusterRole | quote }}
       {{- end }}
     verbs: ["bind"]
   # The Helm and worker ServiceAccounts, and the organization's Flux

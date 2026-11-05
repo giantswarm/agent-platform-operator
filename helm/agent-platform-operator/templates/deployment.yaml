@@ -36,6 +36,9 @@ spec:
             - --ocirepository-interval={{ .Values.agentChart.interval }}
             - --flux-ocirepository-api-version={{ .Values.agentChart.ociRepositoryApiVersion }}
             - --helmrelease-service-account={{ .Values.helmReleaseServiceAccount }}
+            {{- with .Values.secretReaders }}
+            - --secret-readers={{ include "secretReaders" $ }}
+            {{- end }}
             {{- with .Values.snapshots.bucket }}
             - --snapshot-bucket={{ . }}
             {{- end }}

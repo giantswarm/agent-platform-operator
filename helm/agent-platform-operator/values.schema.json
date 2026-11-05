@@ -390,6 +390,42 @@
                 }
             }
         },
+        "secretReaders": {
+            "type": "array",
+            "description": "ServiceAccounts of other namespaces that read Secrets in the organization namespaces: Substrate's credential providers, which read the Secret an actor's credential names there. Each ClusterRole is bound to its ServiceAccount in every organization namespace, by a RoleBinding named after the ClusterRole, and the operator gets `bind` on it; a reader removed from the list loses its bindings. The agent-platform chart's admission policy holds which ServiceAccounts the operator binds there.",
+            "items": {
+                "type": "object",
+                "required": [
+                    "clusterRole",
+                    "serviceAccount"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                    "clusterRole": {
+                        "type": "string",
+                        "minLength": 1
+                    },
+                    "serviceAccount": {
+                        "type": "object",
+                        "required": [
+                            "namespace",
+                            "name"
+                        ],
+                        "additionalProperties": false,
+                        "properties": {
+                            "name": {
+                                "type": "string",
+                                "minLength": 1
+                            },
+                            "namespace": {
+                                "type": "string",
+                                "minLength": 1
+                            }
+                        }
+                    }
+                }
+            }
+        },
         "securityContext": {
             "type": "object",
             "description": "Container security context.",

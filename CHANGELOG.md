@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Commit mode (`commitMode.sourceRef.name`): every organization gets, in `erasure.fluxNamespace`, a Flux Kustomization `agents-<name>-<5>` that applies its path in git (`commitMode.path`) into its namespace as its own Flux ServiceAccount. That ServiceAccount is bound to `agent-platform:organization-flux` in the organization namespace only.
 - `erasure.substrate.caClusterTrustBundle.signerName` and `.matchLabels` verify ate-api with the ClusterTrustBundles of a signer, projected into the pod (needs the `ClusterTrustBundleProjection` feature); exclusive with `erasure.substrate.caConfigMap.name`.
 - With `commitMode.installationKustomization.name`, an organization that the installation's Kustomization applied and that is missing from its inventory is `Orphaned`: reason `DeleteMerged` with `agent-platform.giantswarm.io/delete-pull-request`, `MissingFromGit` otherwise. Its workers stop; an organization back in the inventory is no longer `Orphaned`.
+- `secretReaders`: each ClusterRole is bound, in every organization namespace, to its ServiceAccount of another namespace (Substrate's credential providers), by a RoleBinding named after the ClusterRole, and the operator gets `bind` on it. A reader removed from the list loses its bindings.
 
 ### Changed
 
