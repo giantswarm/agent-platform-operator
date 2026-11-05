@@ -180,7 +180,7 @@ func (r *OrganizationReconciler) eraseStep(ctx context.Context, org *v1alpha1.Ag
 	case v1alpha1.ErasureNamespace:
 		return r.eraseNamespace(ctx, org)
 	case v1alpha1.ErasureOutsideObjects:
-		return r.eraseOutsideObjects(ctx, org)
+		return r.eraseOutsideObjects(ctx, org, ns)
 	}
 	return nil, fmt.Errorf("unknown erasure step %q", status.ErasureStep)
 }
@@ -247,10 +247,12 @@ func (r *OrganizationReconciler) eraseWorkloads(ctx context.Context, org *v1alph
 		// Before the namespace step, for both: a Flux object the label no
 		// longer finds holds the namespace, whose RoleBinding it needs.
 		if f.commitMode() {
-			for _, obj := range []client.Object{object(f.Kustomization), &corev1.ServiceAccount{}} {
-				if err := r.unlabelled(ctx, obj, org, ns); err != nil {
-					return nil, err
-				}
+			left, err := r.unlabelled(ctx, object(f.Kustomization), org, ns)
+			if err != nil || len(left) > 0 {
+				return r.waitFor(left), err
+			}
+			if _, err := r.unlabelled(ctx, &corev1.ServiceAccount{}, org, ns); err != nil {
+				return nil, err
 			}
 		}
 	}
@@ -354,8 +356,9 @@ func (r *OrganizationReconciler) eraseNamespace(ctx context.Context, org *v1alph
 }
 
 // eraseOutsideObjects deletes the organization's Flux ServiceAccount beside
-// the installation's Flux source and waits until it is gone.
-func (r *OrganizationReconciler) eraseOutsideObjects(ctx context.Context, org *v1alpha1.AgentPlatformOrganization) (*waiting, error) {
+// the installation's Flux source and waits until it is gone, also when it is
+// terminating without the organization's UID label.
+func (r *OrganizationReconciler) eraseOutsideObjects(ctx context.Context, org *v1alpha1.AgentPlatformOrganization, orgNamespace string) (*waiting, error) {
 	ns := r.Config.Flux.Namespace
 	if ns == "" {
 		return nil, nil
@@ -376,36 +379,49 @@ func (r *OrganizationReconciler) eraseOutsideObjects(ctx context.Context, org *v
 		}
 		logf.FromContext(ctx).Info("organization object deleted", "namespace", sa.Namespace, "kind", "ServiceAccount", "name", sa.Name)
 	}
+	if r.Config.Flux.commitMode() && !slices.ContainsFunc(list.Items, func(sa corev1.ServiceAccount) bool { return sa.Name == orgNamespace }) {
+		terminating, err := r.unlabelled(ctx, &corev1.ServiceAccount{}, org, orgNamespace)
+		if err != nil {
+			return nil, err
+		}
+		left = append(left, terminating...)
+	}
 	return r.waitFor(left), nil
 }
 
-// unlabelled fails the step while the Flux namespace holds an object of obj's
-// kind named after the organization namespace name (the name the operator
-// gave the organization's Flux objects; the one the erasure resolves, also
-// with an empty status) without the organization's UID label:
-// the operator's own object that someone stripped, which the erasure would
-// not find by the label and the agent-platform admission policy lets it not
-// delete, or a squatter. Either way a person decides; the step is retried.
-func (r *OrganizationReconciler) unlabelled(ctx context.Context, obj client.Object, org *v1alpha1.AgentPlatformOrganization, name string) error {
+// unlabelled looks in the Flux namespace for an object of obj's kind named
+// after the organization namespace name (the name the operator gave the
+// organization's Flux objects; the one the erasure resolves, also with an
+// empty status) that the organization's UID label does not find. A
+// terminating one is returned, so the step waits until it is gone: a
+// finalizer (Flux's on a Kustomization) may still hold it. One that is not
+// terminating fails the step: the operator's own object that someone
+// stripped, which the erasure would not find by the label and the
+// agent-platform admission policy lets it not delete, or a squatter. Either
+// way a person decides; the step is retried.
+func (r *OrganizationReconciler) unlabelled(ctx context.Context, obj client.Object, org *v1alpha1.AgentPlatformOrganization, name string) ([]string, error) {
 	if name == "" {
-		return nil
+		return nil, nil
 	}
 	ns := r.Config.Flux.Namespace
 	err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, obj)
 	if meta.IsNoMatchError(err) || apierrors.IsNotFound(err) {
-		return nil
+		return nil, nil
 	}
 	if err != nil {
-		return fmt.Errorf("get %s/%s: %w", ns, name, err)
-	}
-	if obj.GetLabels()[v1alpha1.OrganizationUIDLabel] == string(org.UID) || obj.GetDeletionTimestamp() != nil {
-		return nil
+		return nil, fmt.Errorf("get %s/%s: %w", ns, name, err)
 	}
 	kind := obj.GetObjectKind().GroupVersionKind().Kind
 	if kind == "" {
 		kind = "ServiceAccount"
 	}
-	return fmt.Errorf("the %s %s/%s, named after the organization namespace, does not carry %s=%s: restore it with %s=%s, so the erasure finds and deletes it at once, or delete it",
+	if obj.GetDeletionTimestamp() != nil {
+		return []string{kind + " " + ns + "/" + name}, nil
+	}
+	if obj.GetLabels()[v1alpha1.OrganizationUIDLabel] == string(org.UID) {
+		return nil, nil
+	}
+	return nil, fmt.Errorf("the %s %s/%s, named after the organization namespace, does not carry %s=%s: restore it with %s=%s, so the erasure finds and deletes it at once, or delete it",
 		kind, ns, name, v1alpha1.OrganizationUIDLabel, org.UID, ObjectLabel, ScopeFlux)
 }
 
