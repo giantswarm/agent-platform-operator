@@ -182,6 +182,23 @@
                             "type": "string",
                             "description": "The audience of the ServiceAccount token sent to ate-api: one its Kubernetes JWT provider accepts."
                         },
+                        "caClusterTrustBundle": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "matchLabels": {
+                                    "type": "object",
+                                    "description": "Labels a ClusterTrustBundle of `signerName` must carry to be projected (Substrate's live bundles carry `podcert.ate.dev/canarying: live`). Empty: every ClusterTrustBundle of `signerName`.",
+                                    "additionalProperties": {
+                                        "type": "string"
+                                    }
+                                },
+                                "signerName": {
+                                    "type": "string",
+                                    "description": "Signer of the ClusterTrustBundles ate-api's serving certificate is verified with, projected into the pod (Substrate's `servicedns.podcert.ate.dev/identity`). The kubelet updates the projection when a bundle changes and the operator reads it at each new connection, so a rotated CA is trusted without a restart. Needs the `ClusterTrustBundleProjection` feature. Set: `caConfigMap.name` must be empty."
+                                }
+                            }
+                        },
                         "caConfigMap": {
                             "type": "object",
                             "additionalProperties": false,
@@ -192,7 +209,7 @@
                                 },
                                 "name": {
                                     "type": "string",
-                                    "description": "ConfigMap holding the CA bundle ate-api's serving certificate is verified with; empty uses the system roots."
+                                    "description": "ConfigMap holding the CA bundle ate-api's serving certificate is verified with, for a cluster without the ClusterTrustBundle projection. Empty, with `caClusterTrustBundle.signerName` empty too: the system roots."
                                 }
                             }
                         },

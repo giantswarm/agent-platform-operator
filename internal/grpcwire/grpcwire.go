@@ -20,6 +20,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -41,7 +42,9 @@ const (
 type Config struct {
 	// Target is grpc://host:port or grpcs://host[:port] (443 by default).
 	Target string
-	// CAFile verifies a grpcs server; empty uses the system roots.
+	// CAFile verifies a grpcs server; empty uses the system roots. It is
+	// read again at each handshake, so a rotated bundle is trusted on the
+	// next connection.
 	CAFile string
 	// TokenFile is the projected ServiceAccount token sent as the bearer of
 	// every call, read at each call: the kubelet rotates it.
@@ -66,23 +69,50 @@ func Dial(cfg Config) (*Conn, error) {
 	creds := insecure.NewCredentials()
 	if useTLS {
 		tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
-		if cfg.CAFile != "" {
-			pem, err := os.ReadFile(cfg.CAFile)
-			if err != nil {
-				return nil, fmt.Errorf("%s: read the CA file: %w", cfg.Target, err)
-			}
-			tlsConfig.RootCAs = x509.NewCertPool()
-			if !tlsConfig.RootCAs.AppendCertsFromPEM(pem) {
-				return nil, fmt.Errorf("%s: the CA file %s holds no certificate", cfg.Target, cfg.CAFile)
-			}
-		}
 		creds = credentials.NewTLS(tlsConfig)
+		if cfg.CAFile != "" {
+			if _, err := readRoots(cfg.CAFile); err != nil {
+				return nil, fmt.Errorf("%s: %w", cfg.Target, err)
+			}
+			creds = &fileRootsCreds{TransportCredentials: creds, caFile: cfg.CAFile}
+		}
 	}
 	conn, err := grpc.NewClient(hostPort, grpc.WithTransportCredentials(creds))
 	if err != nil {
 		return nil, fmt.Errorf("dial %s: %w", cfg.Target, err)
 	}
 	return &Conn{conn: conn, tokenFile: cfg.TokenFile}, nil
+}
+
+func readRoots(caFile string) (*x509.CertPool, error) {
+	pem, err := os.ReadFile(filepath.Clean(caFile))
+	if err != nil {
+		return nil, fmt.Errorf("read the CA file: %w", err)
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("the CA file %s holds no certificate", caFile)
+	}
+	return roots, nil
+}
+
+// fileRootsCreds verifies each new connection against the CA file as it is
+// at that handshake.
+type fileRootsCreds struct {
+	credentials.TransportCredentials
+	caFile string
+}
+
+func (c *fileRootsCreds) ClientHandshake(ctx context.Context, authority string, rawConn net.Conn) (net.Conn, credentials.AuthInfo, error) {
+	roots, err := readRoots(c.caFile)
+	if err != nil {
+		return nil, nil, err
+	}
+	return credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots}).ClientHandshake(ctx, authority, rawConn)
+}
+
+func (c *fileRootsCreds) Clone() credentials.TransportCredentials {
+	return &fileRootsCreds{TransportCredentials: c.TransportCredentials.Clone(), caFile: c.caFile}
 }
 
 // NewConn is a Conn on an existing connection.
