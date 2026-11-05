@@ -133,7 +133,7 @@ func fluxCases(t *testing.T, c *cluster) {
 		assert.Equal(t, labels, sa.Labels)
 	})
 
-	t.Run("a Kustomization that lost the organization's UID label is not taken over and holds the erasure", func(t *testing.T) {
+	t.Run("Flux objects that lost the organization's UID label are not taken over and hold the erasure before the namespace", func(t *testing.T) {
 		org := c.organization(t, "org-git-stripped", "ledger")
 		ns := c.readyNamespace(t, org).Name
 		org = c.get(t, org)
@@ -147,41 +147,68 @@ func fluxCases(t *testing.T, c *cluster) {
 			got.SetLabels(l)
 		}
 		c.editKustomization(t, ns, strip, nil)
+		saKey := client.ObjectKey{Namespace: fluxNS, Name: ns}
+		editSA := func(edit func(map[string]string)) {
+			require.EventuallyWithT(t, func(ct *assert.CollectT) {
+				sa := &corev1.ServiceAccount{}
+				if assert.NoError(ct, c.admin.Get(t.Context(), saKey, sa)) {
+					edit(sa.Labels)
+					assert.NoError(ct, c.admin.Update(t.Context(), sa))
+				}
+			}, timeout, tick)
+		}
+		editSA(func(l map[string]string) { delete(l, v1alpha1.OrganizationUIDLabel); delete(l, controller.ObjectLabel) })
 		require.EventuallyWithT(t, func(ct *assert.CollectT) {
 			ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, v1alpha1.ConditionReady)
 			if assert.NotNil(ct, ready) {
 				assert.Equal(ct, metav1.ConditionFalse, ready.Status)
 				assert.Equal(ct, "NameTaken", ready.Reason)
-				assert.Contains(ct, ready.Message, "Kustomization "+fluxNS+"/"+ns)
 			}
 		}, timeout, tick)
 		got := c.read(t, kustomizationGVK, fluxNS, ns)
 		assert.NotContains(t, got.GetLabels(), v1alpha1.OrganizationUIDLabel, "the operator took over a Kustomization without the organization's UID")
+		sa := &corev1.ServiceAccount{}
+		require.NoError(t, c.admin.Get(t.Context(), saKey, sa))
+		assert.NotContains(t, sa.Labels, v1alpha1.OrganizationUIDLabel, "the operator took over a ServiceAccount without the organization's UID")
 
-		// The erasure does not find it by the label: it stops before the
-		// namespace goes, naming it, instead of leaving it behind.
-		require.NoError(t, c.admin.Delete(t.Context(), org))
-		require.EventuallyWithT(t, func(ct *assert.CollectT) {
-			got := c.get(ct, org)
-			ready := meta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionReady)
-			if assert.NotNil(ct, ready) {
-				assert.Equal(ct, "Deleting", ready.Reason)
-				assert.Contains(ct, ready.Message, fluxNS+"/"+ns+", named after the organization namespace, does not carry "+v1alpha1.OrganizationUIDLabel)
-			}
-			assert.Equal(ct, v1alpha1.ErasureWorkloads, got.Status.ErasureStep)
-		}, timeout, tick)
-		require.Len(t, c.namespacesOf(t, org), 1)
-
-		// The label back, the erasure ends.
-		c.editKustomization(t, ns, func(got *unstructured.Unstructured, _ any) {
-			l := got.GetLabels()
+		// The erasure does not find them by the label: it stops in its first
+		// step, before the namespace goes, naming each and both labels.
+		stopsAt := func(kind string) {
+			t.Helper()
+			require.EventuallyWithT(t, func(ct *assert.CollectT) {
+				got := c.get(ct, org)
+				ready := meta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionReady)
+				if assert.NotNil(ct, ready) {
+					assert.Equal(ct, "Deleting", ready.Reason)
+					assert.Contains(ct, ready.Message, "the "+kind+" "+fluxNS+"/"+ns+", named after the organization namespace, does not carry "+v1alpha1.OrganizationUIDLabel)
+					assert.Contains(ct, ready.Message, controller.ObjectLabel+"="+controller.ScopeFlux)
+				}
+				assert.Equal(ct, v1alpha1.ErasureWorkloads, got.Status.ErasureStep)
+			}, timeout, tick)
+			require.Len(t, c.namespacesOf(t, org), 1, "the namespace went while the %s was unlabelled", kind)
+		}
+		restore := func(l map[string]string) {
 			l[v1alpha1.OrganizationUIDLabel] = string(org.UID)
 			l[controller.ObjectLabel] = controller.ScopeFlux
+		}
+		require.NoError(t, c.admin.Delete(t.Context(), org))
+		stopsAt("Kustomization")
+
+		// The Kustomization's labels back: the ServiceAccount still holds it.
+		c.editKustomization(t, ns, func(got *unstructured.Unstructured, _ any) {
+			l := got.GetLabels()
+			restore(l)
 			got.SetLabels(l)
 		}, nil)
+		c.eventuallyAbsent(t, kustomizationGVK, fluxNS, ns)
+		stopsAt("ServiceAccount")
+
+		// Both labels back, the erasure ends.
+		editSA(restore)
 		c.finalizeNamespaceWhenDeleted(t, ns)
 		c.gone(t, org)
-		c.eventuallyAbsent(t, kustomizationGVK, fluxNS, ns)
+		err := c.admin.Get(t.Context(), saKey, &corev1.ServiceAccount{})
+		assert.True(t, apierrors.IsNotFound(err), "the Flux ServiceAccount outlived the organization: %v", err)
 	})
 
 	t.Run("a parent binding named like the organization's Flux binding is not mirrored", func(t *testing.T) {
