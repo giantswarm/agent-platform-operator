@@ -1,0 +1,66 @@
+# The --object-quota argument the chart passes the operator, and the keys
+# the values schema refuses because the API server refuses them in a
+# ResourceQuota.
+suite: objectQuota
+templates:
+  - templates/deployment.yaml
+tests:
+  - it: passes the default object counts, ServiceAccounts as count/serviceaccounts
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --object-quota=configmaps=500,count/agents.api.kagent.dev=200,count/agenttemplates.api.kagent.dev=200,count/helmreleases.helm.toolkit.fluxcd.io=200,count/modelconfigs.api.kagent.dev=100,count/remotemcpservers.api.kagent.dev=200,count/rolebindings.rbac.authorization.k8s.io=200,count/serviceaccounts=100,secrets=1000,services=100
+
+  - it: drops a null key the chart does not set, such as the old serviceaccounts override
+    set:
+      objectQuota:
+        serviceaccounts: null
+        count/serviceaccounts: "100"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --object-quota=configmaps=500,count/agents.api.kagent.dev=200,count/agenttemplates.api.kagent.dev=200,count/helmreleases.helm.toolkit.fluxcd.io=200,count/modelconfigs.api.kagent.dev=100,count/remotemcpservers.api.kagent.dev=200,count/rolebindings.rbac.authorization.k8s.io=200,count/serviceaccounts=100,secrets=1000,services=100
+
+  - it: passes numeric counts of default and custom keys
+    set:
+      objectQuota:
+        configmaps: 50
+        count/jobs.batch: 10
+        pods: 20
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --object-quota=configmaps=50,count/agents.api.kagent.dev=200,count/agenttemplates.api.kagent.dev=200,count/helmreleases.helm.toolkit.fluxcd.io=200,count/jobs.batch=10,count/modelconfigs.api.kagent.dev=100,count/remotemcpservers.api.kagent.dev=200,count/rolebindings.rbac.authorization.k8s.io=200,count/serviceaccounts=100,pods=20,secrets=1000,services=100
+
+  - it: passes no --object-quota when every limit is dropped
+    set:
+      objectQuota:
+        configmaps: null
+        secrets: null
+        services: null
+        count/serviceaccounts: null
+        count/rolebindings.rbac.authorization.k8s.io: null
+        count/agents.api.kagent.dev: null
+        count/agenttemplates.api.kagent.dev: null
+        count/modelconfigs.api.kagent.dev: null
+        count/remotemcpservers.api.kagent.dev: null
+        count/helmreleases.helm.toolkit.fluxcd.io: null
+    asserts:
+      - notExists:
+          path: spec.template.spec.containers[0].args[?(@ =~ /^--object-quota/)]
+
+  - it: refuses a bare key that is not a standard quota resource
+    set:
+      objectQuota:
+        serviceaccounts: "100"
+    asserts:
+      - failedTemplate:
+          errorPattern: "at '/objectQuota/serviceaccounts': got string, want null"
+
+  - it: refuses a count that is not a string or a number
+    set:
+      objectQuota:
+        count/jobs.batch: true
+    asserts:
+      - failedTemplate:
+          errorPattern: "at '/objectQuota/count~1jobs.batch'"
