@@ -11,6 +11,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -20,6 +22,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/giantswarm/agent-platform-operator/api/v1alpha1"
+	"github.com/giantswarm/agent-platform-operator/internal/grpcwire"
+	"github.com/giantswarm/agent-platform-operator/internal/grpcwire/grpcwiretest"
+	"github.com/giantswarm/agent-platform-operator/internal/kagent"
 )
 
 const (
@@ -33,12 +38,17 @@ const (
 	// The events of the erasure log.
 	evKustomizationDeleted = "Kustomization deleted"
 	evSessionsListed       = "sessions listed"
+	evSessionsListedAll    = "sessions of every namespace listed"
 	evSessionDeleted       = "session deleted"
 	evNoActor              = "no actor"
 	evSnapshotsDeleted     = "snapshots deleted"
 	evNamespaceDeleted     = "namespace deleted"
 	evFluxSADeleted        = "Flux ServiceAccount deleted"
 	evWorkers              = "workers"
+
+	// installationWide is the erasure log's key of a session listing without
+	// a namespace.
+	installationWide = "(installation)"
 )
 
 // erasureCases are the cases of a deleted organization's erasure, run in
@@ -69,7 +79,10 @@ func erasureCases(t *testing.T, c *cluster) {
 		// An Agent written outside git, without the operator's label.
 		c.create(t, newObject(agentGVK, ns, "by-hand", nil, agentSpec("By hand.", nil)))
 		c.sessions.add(ns, "alice@example.com", "11111111-1111-1111-1111-111111111111")
-		c.sessions.add(ns, "bob@example.com", "22222222-2222-2222-2222-222222222222")
+		c.sessions.addOf(ns, "by-hand", "bob@example.com", "22222222-2222-2222-2222-222222222222")
+		// A session of an Agent deleted before the erasure: no Agent of the
+		// organization names it any more.
+		c.sessions.addOf(ns, "retired", "carol@example.com", "55555555-5555-5555-5555-555555555555")
 		other := c.organization(t, "org-erase-other", "kept")
 		otherNS := c.readyNamespace(t, other).Name
 		c.sessions.add(otherNS, "alice@example.com", "33333333-3333-3333-3333-333333333333")
@@ -82,10 +95,13 @@ func erasureCases(t *testing.T, c *cluster) {
 		events := c.log.of(ns, prefix)
 		t.Logf("erasure: %v", events)
 
-		// The organization's sessions are all deleted, through kagent; the
-		// other organization's stay.
+		// The organization's sessions are all deleted, through kagent, its
+		// Agents gone or not; the other organization's stay. kagent is asked
+		// for the organization namespace's sessions only.
 		assert.Empty(t, c.sessions.left(ns))
 		assert.Equal(t, []string{"33333333-3333-3333-3333-333333333333"}, c.sessions.left(otherNS))
+		assert.Empty(t, c.log.of(installationWide), "the erasure listed every namespace's sessions")
+		assert.NotEmpty(t, all(events, evSessionsListed))
 		assert.Zero(t, c.bucket.objects[prefix])
 		assert.Empty(t, c.namespacesOf(t, org))
 		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKeyFromObject(elsewhere), &corev1.ServiceAccount{}), "a ServiceAccount labelled with the organization's UID outside the Flux namespace was deleted")
@@ -240,30 +256,37 @@ func all(events []event, what string) []event {
 	return out
 }
 
-// fakeSession is a kagent session of an Agent in namespace.
+// fakeSession is a kagent session whose pinned revision is of the Agent
+// agent in namespace.
 type fakeSession struct {
-	namespace, creator string
-	deleted            bool
+	namespace, agent, creator string
+	deleted                   bool
 	// gone: kagent deletes a session asynchronously, so a deleted session is
 	// still listed once.
 	gone bool
 }
 
-// fakeSessions stands in for kagent's session API as the erasure needs it:
-// it deletes any creator's session for the operator. kagent's session service
-// does that only for its control plane today (see kagent.Sessions.Delete).
+// fakeSessions stands in for kagent's kagent.api.v1alpha1 SessionService as the
+// erasure needs it, served over gRPC to the operator's client: it deletes any
+// creator's session for the operator. kagent's session service does that only
+// for its control plane today (see kagent.Sessions.Delete).
 type fakeSessions struct {
 	log  *eventLog
 	mu   sync.Mutex
 	byID map[string]*fakeSession
-	// onList runs at each listing, before it.
+	// onList runs at each listing, before it, with the namespace asked for
+	// (empty: every namespace).
 	onList func(namespace string)
 }
 
 func (f *fakeSessions) add(namespace, creator, id string) {
+	f.addOf(namespace, "triage", creator, id)
+}
+
+func (f *fakeSessions) addOf(namespace, agent, creator, id string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.byID[id] = &fakeSession{namespace: namespace, creator: creator}
+	f.byID[id] = &fakeSession{namespace: namespace, agent: agent, creator: creator}
 }
 
 // left are the IDs of the sessions of namespace not deleted.
@@ -280,34 +303,68 @@ func (f *fakeSessions) left(namespace string) []string {
 	return ids
 }
 
-func (f *fakeSessions) List(_ context.Context, namespace string) ([]string, error) {
+// serve serves f over gRPC and returns the operator's kagent client of it.
+func (f *fakeSessions) serve(t *testing.T) *kagent.Sessions {
+	_, conn := grpcwiretest.Start(t, "operator-token", f.handle)
+	return kagent.New(conn)
+}
+
+// handle answers ListSessions and DeleteSession, with the field numbers of
+// kagent's proto/kagent/api/v1alpha1/sessions.proto.
+func (f *fakeSessions) handle(call grpcwiretest.Call) ([]byte, error) {
+	fields, err := grpcwire.Fields(call.Request)
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	switch call.Method {
+	case "/kagent.api.v1alpha1.SessionService/ListSessions":
+		// ListSessionsRequest: namespace = 7.
+		return f.list(string(grpcwire.First(fields, 7))), nil
+	case "/kagent.api.v1alpha1.SessionService/DeleteSession":
+		// DeleteSessionRequest: session_id = 1.
+		f.delete(string(grpcwire.First(fields, 1)))
+		return nil, nil
+	}
+	return nil, status.Errorf(codes.Unimplemented, "%s", call.Method)
+}
+
+// list is a ListSessionsResponse, on one page, of the sessions of namespace
+// (empty: every namespace). kagent matches the namespace of each session's
+// pinned revision, so a session whose Agent is gone is listed.
+func (f *fakeSessions) list(namespace string) []byte {
 	if hook := f.onList; hook != nil {
 		hook(namespace)
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.log.add(evSessionsListed, namespace, "")
-	var ids []string
+	if namespace == "" {
+		f.log.add(evSessionsListedAll, installationWide, "")
+	} else {
+		f.log.add(evSessionsListed, namespace, "")
+	}
+	resp := grpcwire.Message(nil)
 	for id, s := range f.byID {
-		if s.namespace != namespace || s.gone {
+		if (namespace != "" && s.namespace != namespace) || s.gone {
 			continue
 		}
-		ids = append(ids, id)
+		// Session{id = 1, agent = 15 ResourceReference{namespace = 1,
+		// name = 2}}.
+		ref := grpcwire.Message(nil).String(1, s.namespace).String(2, s.agent)
+		resp = resp.Message(1, grpcwire.Message(nil).String(1, id).Message(15, ref))
 		s.gone = s.deleted
 	}
-	return ids, nil
+	return resp
 }
 
-func (f *fakeSessions) Delete(_ context.Context, id string) error {
+func (f *fakeSessions) delete(id string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	s, ok := f.byID[id]
 	if !ok {
-		return nil
+		return
 	}
 	s.deleted = true
 	f.log.add(evSessionDeleted, s.namespace, id)
-	return nil
 }
 
 // fakeActors stands in for Substrate's actors: an actor per session left,
@@ -383,7 +440,7 @@ func (c *cluster) observeErasure(t *testing.T, org *v1alpha1.AgentPlatformOrgani
 	seen := &observed{}
 	var once sync.Once
 	c.sessions.onList = func(namespace string) {
-		if namespace != ns {
+		if namespace != ns && namespace != "" {
 			return
 		}
 		once.Do(func() {
