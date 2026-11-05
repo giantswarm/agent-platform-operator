@@ -148,7 +148,8 @@ func (s *Sessions) List(ctx context.Context, namespace string) ([]string, error)
 	return nil, fmt.Errorf("kagent ListSessions: %w", grpcwire.ErrPageLimit)
 }
 
-// sessionOf reads a Session's ID and its Agent's namespace, with Session.agent as a encodes it.
+// sessionOf reads a Session's ID and its Agent's namespace, with Session.agent
+// as a's package encodes it.
 func sessionOf(raw []byte, a api) (id, namespace string, err error) {
 	session, err := grpcwire.Fields(raw)
 	if err != nil {
