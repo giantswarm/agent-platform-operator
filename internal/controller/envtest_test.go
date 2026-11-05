@@ -7,12 +7,12 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -74,10 +74,6 @@ const (
 	promptField = "systemPrompt"
 	// agentPrompt is the curated Agent's system prompt.
 	agentPrompt = "Help with agents."
-
-	// configMapQuota is the ConfigMap count of the object quota: no other
-	// case writes ConfigMaps.
-	configMapQuota = 3
 
 	// snapshotDelay is the erasure's delay between the two deletions of a
 	// snapshot prefix.
@@ -249,11 +245,9 @@ func startEnvtest(t *testing.T) *cluster {
 		},
 		SnapshotBucket: snapshotBucket,
 		Curated:        controller.CuratedConfig{WorkerPool: curatedPool, Kagent: kagentGV, Substrate: substrateGV},
-		ObjectQuota: corev1.ResourceList{
-			corev1.ResourceConfigMaps: resource.MustParse(strconv.Itoa(configMapQuota)),
-			// The operator's own Agent copies count too.
-			"count/agents.api.kagent.dev": resource.MustParse("100"),
-		},
+		// The chart's default, so a key the API server refuses in it keeps
+		// every organization from Ready.
+		ObjectQuota: chartObjectQuota(t),
 		Erasure: controller.ErasureConfig{
 			Sessions: sessions.serve(t), Actors: actors, Snapshots: bucket,
 			SnapshotDelay: snapshotDelay, Poll: 100 * time.Millisecond,
@@ -420,6 +414,37 @@ func countObjects(ctx context.Context, c client.Client, ns string, name corev1.R
 		return 0, err
 	}
 	return len(list.Items), nil
+}
+
+// chartObjectQuota is the --object-quota the chart passes the operator with
+// its default values: the ResourceQuota every organization namespace gets
+// when objectQuota is left as it is.
+func chartObjectQuota(t *testing.T) corev1.ResourceList {
+	t.Helper()
+	rendered, err := exec.Command("helm", "template", "agent-platform-operator", chartDir,
+		"--namespace", releaseNamespace,
+		"--show-only", "templates/deployment.yaml",
+	).Output()
+	require.NoError(t, err, "helm template: %s", stderrOf(err))
+	deployment := &appsv1.Deployment{}
+	require.NoError(t, utilyaml.Unmarshal(rendered, deployment))
+	for _, container := range deployment.Spec.Template.Spec.Containers {
+		for _, arg := range container.Args {
+			value, ok := strings.CutPrefix(arg, "--object-quota=")
+			if !ok {
+				continue
+			}
+			quota := corev1.ResourceList{}
+			for _, pair := range strings.Split(value, ",") {
+				name, count, ok := strings.Cut(pair, "=")
+				require.True(t, ok, "--object-quota: %q is not <resource>=<count>", pair)
+				quota[corev1.ResourceName(name)] = resource.MustParse(count)
+			}
+			return quota
+		}
+	}
+	require.FailNow(t, "the chart's Deployment passes no --object-quota with the default values")
+	return nil
 }
 
 func createNamespace(t *testing.T, c client.Client, name string) {
