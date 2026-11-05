@@ -87,23 +87,28 @@ curated:
   # -- ate.dev API version of the WorkerPool.
   workerPoolApiVersion: ate.dev/v1alpha1
 
-# @schema additionalProperties: true
+# @schema additionalProperties: {"type": "null"}; patternProperties: {"^([^/]+/[^/]+|pods|services|secrets|configmaps|persistentvolumeclaims|replicationcontrollers|resourcequotas|services[.]nodeports|services[.]loadbalancers|cpu|memory|ephemeral-storage|requests[.](cpu|memory|storage|ephemeral-storage)|limits[.](cpu|memory|ephemeral-storage)|(requests[.])?hugepages-.+)$": {"type": ["string", "number", "null"]}}
 # -- Hard limits of the ResourceQuota `agent-platform-organization-objects`
 # kept in every organization namespace, as `<resource>: <count>`: object
 # counts, so one organization cannot flood the API server. A key set to
-# `null` drops its limit; no key keeps no ResourceQuota.
+# `null` drops its limit, also a key the chart does not set; no key keeps
+# no ResourceQuota. A key without `/` must be a standard quota resource
+# (`pods`, `services`, `secrets`, `configmaps`, ...): count other kinds as
+# `count/<resource>.<group>` (`count/serviceaccounts` for the core group),
+# or the API server refuses the ResourceQuota. The chart refuses such a key
+# with "at '/objectQuota/<key>': got string, want null".
 # @default -- object counts of the kinds an organization writes
 objectQuota:
-  configmaps: "500"
-  secrets: "1000"
-  services: "100"
-  serviceaccounts: "100"
-  count/rolebindings.rbac.authorization.k8s.io: "200"
-  count/agents.api.kagent.dev: "200"
-  count/agenttemplates.api.kagent.dev: "200"
-  count/modelconfigs.api.kagent.dev: "100"
-  count/remotemcpservers.api.kagent.dev: "200"
-  count/helmreleases.helm.toolkit.fluxcd.io: "200"
+  configmaps: "500"  # @schema type: [string, number]
+  secrets: "1000"  # @schema type: [string, number]
+  services: "100"  # @schema type: [string, number]
+  count/serviceaccounts: "100"  # @schema type: [string, number]
+  count/rolebindings.rbac.authorization.k8s.io: "200"  # @schema type: [string, number]
+  count/agents.api.kagent.dev: "200"  # @schema type: [string, number]
+  count/agenttemplates.api.kagent.dev: "200"  # @schema type: [string, number]
+  count/modelconfigs.api.kagent.dev: "100"  # @schema type: [string, number]
+  count/remotemcpservers.api.kagent.dev: "200"  # @schema type: [string, number]
+  count/helmreleases.helm.toolkit.fluxcd.io: "200"  # @schema type: [string, number]
 
 serviceAccount:
   # @schema additionalProperties: true

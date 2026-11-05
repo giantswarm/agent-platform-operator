@@ -56,7 +56,9 @@ spec:
             {{- end }}
             {{- $quota := list }}
             {{- range $name, $count := .Values.objectQuota }}
+            {{- if not (kindIs "invalid" $count) }}
             {{- $quota = append $quota (printf "%s=%v" $name $count) }}
+            {{- end }}
             {{- end }}
             {{- with $quota }}
             - --object-quota={{ join "," . }}

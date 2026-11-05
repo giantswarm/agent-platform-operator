@@ -9,9 +9,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -300,12 +300,15 @@ func curatedCases(t *testing.T, c *cluster) {
 		}
 	})
 
-	t.Run("the object quota refuses objects over the count", func(t *testing.T) {
+	t.Run("the chart's default object quota is kept and refuses objects over the count", func(t *testing.T) {
 		org := c.organization(t, "org-quota", "quota")
 		ns := c.readyNamespace(t, org).Name
 		quota := &corev1.ResourceQuota{}
 		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns, Name: controller.ObjectQuotaName}, quota))
-		assert.True(t, quota.Spec.Hard[corev1.ResourceConfigMaps].Equal(resource.MustParse(fmt.Sprint(configMapQuota))))
+		assert.True(t, equality.Semantic.DeepEqual(c.config.ObjectQuota, quota.Spec.Hard), "hard: %v", quota.Spec.Hard)
+		// No other case writes ConfigMaps.
+		configMapQuota := quota.Spec.Hard[corev1.ResourceConfigMaps]
+		require.False(t, configMapQuota.IsZero(), "the chart's default quota counts no ConfigMaps")
 		// From the recorded usage on, the quota admission counts.
 		require.EventuallyWithT(t, func(ct *assert.CollectT) {
 			got := &corev1.ResourceQuota{}
@@ -314,7 +317,7 @@ func curatedCases(t *testing.T, c *cluster) {
 			}
 		}, timeout, tick)
 
-		for i := range configMapQuota {
+		for i := range configMapQuota.Value() {
 			require.NoError(t, c.admin.Create(t.Context(), &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("cm-%d", i), Namespace: ns}}))
 		}
 		err := c.admin.Create(t.Context(), &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "one-too-many", Namespace: ns}})

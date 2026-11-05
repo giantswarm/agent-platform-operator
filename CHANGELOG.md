@@ -29,4 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The operator reads the CA bundles of `--kagent-ca-file` and `--substrate-ca-file` at each new connection, so a rotated CA is trusted without a restart.
 - **Breaking**: the default ModelConfig annotation is `agent-platform.giantswarm.io/is-default-model-config: "true"`, after Kubernetes' `ingressclass.kubernetes.io/is-default-class`; the release candidates' `agent-platform.giantswarm.io/default-model-config` no longer marks a default. Before upgrading, annotate the default ModelConfig of each organization namespace with the new key, or mark it again through an agent-manager on the new key.
 
+### Fixed
+
+- With the chart's default `objectQuota`, organizations become `Ready`: the default counts ServiceAccounts as `count/serviceaccounts`, not as the bare `serviceaccounts` that the API server refuses in a ResourceQuota. The chart refuses an `objectQuota` key without `/` that is not a standard quota resource; a key set to `null` that the chart does not set, such as the old `serviceaccounts`, renders no limit.
+
 [Unreleased]: https://github.com/giantswarm/agent-platform-operator/tree/main
