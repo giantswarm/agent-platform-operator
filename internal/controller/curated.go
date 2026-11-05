@@ -292,17 +292,23 @@ func (r *OrganizationReconciler) copyWorkerPool(ctx context.Context, ns string, 
 		return err
 	}
 	pool.SetLabels(map[string]string{workerPoolNameLabel: c.WorkerPool, workerPoolNamespaceLabel: ns})
-	var errs []error
+	// The pool names its ServiceAccount only once that exists and is the
+	// operator's, and the previous one goes only once the pool no longer
+	// names it.
 	sa, _, _ := unstructured.NestedString(pool.Object, "spec", "template", "serviceAccountName")
 	if sa != "" {
-		errs = append(errs, r.ensureServiceAccount(ctx, ns, sa, ScopeCurated))
+		if err := r.ensureServiceAccount(ctx, ns, sa, ScopeCurated); err != nil {
+			return err
+		}
 	}
-	errs = append(errs, r.pruneWorkerServiceAccounts(ctx, ns, sa))
-	return errors.Join(append(errs, r.ensureScoped(ctx, ns, ScopeCurated, pool, objectRef(src), equal))...)
+	if err := r.ensureScoped(ctx, ns, ScopeCurated, pool, objectRef(src), equal); err != nil {
+		return err
+	}
+	return r.pruneWorkerServiceAccounts(ctx, ns, sa)
 }
 
-// pruneWorkerServiceAccounts deletes the curated ServiceAccounts in ns but
-// keep, the one the pool's workers run as now (empty: none).
+// pruneWorkerServiceAccounts deletes the curated ServiceAccounts in ns other
+// than keep, the one the pool's workers run as now (empty: none).
 func (r *OrganizationReconciler) pruneWorkerServiceAccounts(ctx context.Context, ns, keep string) error {
 	list := &corev1.ServiceAccountList{}
 	if err := r.Client.List(ctx, list, client.InNamespace(ns), client.MatchingLabels{ObjectLabel: ScopeCurated}); err != nil {

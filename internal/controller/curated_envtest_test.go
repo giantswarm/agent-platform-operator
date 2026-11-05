@@ -210,6 +210,35 @@ func curatedCases(t *testing.T, c *cluster) {
 			assert.Equal(ct, []string{renamed}, names)
 		}, timeout, tick)
 		c.absent(t, corev1.SchemeGroupVersion.WithKind("ServiceAccount"), ns, poolSA)
+		c.eventually(t, poolGVK, ns, curatedPool, func(ct *assert.CollectT, pool *unstructured.Unstructured) {
+			assert.Equal(ct, renamed, str(pool, "spec", "template", "serviceAccountName"))
+		})
+	})
+
+	t.Run("a pool ServiceAccount name another writer holds keeps the pool on its ServiceAccount and the organization not Ready", func(t *testing.T) {
+		org := c.organization(t, "org-pool-sa-taken", "pool-sa-taken")
+		ns := c.readyNamespace(t, org).Name
+		const taken = "tenant-worker"
+		require.NoError(t, c.admin.Create(t.Context(), &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: taken, Namespace: ns}}))
+
+		setPoolSA := func(ctx context.Context, name string) {
+			c.editSource(ctx, t, poolGVK, curatedPool, func(source *unstructured.Unstructured) error {
+				return unstructured.SetNestedField(source.Object, name, "spec", "template", "serviceAccountName")
+			})
+		}
+		setPoolSA(t.Context(), taken)
+		t.Cleanup(func() { setPoolSA(context.WithoutCancel(t.Context()), poolSA) })
+
+		require.EventuallyWithT(t, func(ct *assert.CollectT) {
+			ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, v1alpha1.ConditionReady)
+			if assert.NotNil(ct, ready) {
+				assert.Equal(ct, metav1.ConditionFalse, ready.Status)
+				assert.Equal(ct, "NameTaken", ready.Reason)
+			}
+		}, timeout, tick)
+		pool := c.read(t, poolGVK, ns, curatedPool)
+		assert.Equal(t, poolSA, str(pool, "spec", "template", "serviceAccountName"), "the pool runs as another writer's ServiceAccount")
+		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns, Name: poolSA}, &corev1.ServiceAccount{}), "the pool's ServiceAccount went while the pool still names it")
 	})
 
 	t.Run("the object quota refuses objects over the count", func(t *testing.T) {

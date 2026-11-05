@@ -232,16 +232,38 @@ func mirroredLabels(have, want map[string]string, scope string) map[string]strin
 
 // ensureServiceAccount creates the ServiceAccount, the reconciler's own of
 // scope; one that exists is kept as it is (a ServiceAccount has nothing to
-// drift).
+// drift). The cache holds only the reconciler's own ServiceAccounts, so a
+// curated one whose name another writer's already holds is read from the API
+// server and makes the organization not Ready: the workers would run as it.
 func (r *OrganizationReconciler) ensureServiceAccount(ctx context.Context, ns, name, scope string) error {
-	err := r.Client.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &corev1.ServiceAccount{})
+	key := client.ObjectKey{Namespace: ns, Name: name}
+	err := r.Client.Get(ctx, key, &corev1.ServiceAccount{})
 	if err == nil {
 		return nil
 	}
 	if !apierrors.IsNotFound(err) {
 		return fmt.Errorf("get ServiceAccount %s/%s: %w", ns, name, err)
 	}
-	return r.create(ctx, &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, Labels: ownLabels(scope)}}, "ServiceAccount")
+	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, Labels: ownLabels(scope)}}
+	if scope != ScopeCurated {
+		return r.create(ctx, sa, "ServiceAccount")
+	}
+	err = r.Client.Create(ctx, sa, client.FieldOwner(fieldManager))
+	switch {
+	case err == nil:
+		logf.FromContext(ctx).Info("organization object created", "namespace", ns, "kind", "ServiceAccount", "name", name)
+		return nil
+	case !apierrors.IsAlreadyExists(err):
+		return fmt.Errorf("create ServiceAccount %s/%s: %w", ns, name, err)
+	}
+	existing := &corev1.ServiceAccount{}
+	if err := r.APIReader.Get(ctx, key, existing); err != nil {
+		return fmt.Errorf("get ServiceAccount %s/%s: %w", ns, name, err)
+	}
+	if existing.Labels[ObjectLabel] != scope {
+		return &notReadyError{reason: reasonNameTaken, message: fmt.Sprintf("the ServiceAccount %s/%s is not the operator's, so the curated WorkerPool's workers cannot run as it", ns, name)}
+	}
+	return nil
 }
 
 // ensureHelmRoleBinding binds the Helm ClusterRole to the Helm
