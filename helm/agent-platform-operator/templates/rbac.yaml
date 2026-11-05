@@ -15,12 +15,17 @@ in the installation's Flux namespace to those labelled
 agent-platform.giantswarm.io/organization-uid)
 is rendered by the agent-platform chart, not here.
 
-The operator binds two ClusterRoles and nothing else: `bind` on those names,
-no `escalate`, no cluster-admin. agent-platform:organizations-admin for the
-mirrored bindings of a parent namespace, agent-platform-tenant-flux for the
-organization's Helm ServiceAccount. `bind` on
-agent-platform:organization-flux comes with the organization's Flux
-ServiceAccount (commit mode), the first code that binds it.
+In commit mode (commitMode.sourceRef.name) the operator also creates, updates
+and deletes the organizations' Kustomizations and Flux ServiceAccounts in the
+Flux namespace, and reads the installation's Kustomization
+(commitMode.installationKustomization) for the Orphaned condition.
+
+The operator binds three ClusterRoles and nothing else: `bind` on those
+names, no `escalate`, no cluster-admin. agent-platform:organizations-admin for
+the mirrored bindings of a parent namespace, agent-platform-tenant-flux for
+the organization's Helm ServiceAccount, agent-platform:organization-flux for
+the organization's Flux ServiceAccount (commit mode), in the organization
+namespace only.
 */}}
 {{- $netpol := include "networkPolicyResource" . | default "{}" | fromJson }}
 apiVersion: rbac.authorization.k8s.io/v1
@@ -52,20 +57,42 @@ rules:
     resourceNames:
       - "agent-platform:organizations-admin"
       - "agent-platform-tenant-flux"
+      {{- if .Values.commitMode.sourceRef.name }}
+      - {{ .Values.commitMode.clusterRole | quote }}
+      {{- end }}
     verbs: ["bind"]
-  # The Helm and worker ServiceAccounts; the erasure deletes the
-  # organization's Flux ServiceAccount beside the installation's Flux source.
+  # The Helm and worker ServiceAccounts, and the organization's Flux
+  # ServiceAccount beside the installation's Flux source, which the erasure
+  # deletes last.
   - apiGroups: [""]
     resources: ["serviceaccounts"]
     verbs: ["get", "list", "watch", "create", "delete"]
+  {{- if .Values.commitMode.sourceRef.name }}
+  # Commit mode restores the Flux ServiceAccount's labels.
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["update"]
+  {{- end }}
   - apiGroups: ["source.toolkit.fluxcd.io"]
     resources: ["ocirepositories"]
     verbs: ["get", "create"]
-  # The erasure deletes the organization's Flux Kustomization, the
-  # HelmReleases and the Agents of its namespace.
+  # The organization's Flux Kustomization: kept in commit mode, deleted by
+  # the erasure; the installation's is read for the Orphaned condition. The
+  # erasure deletes the HelmReleases and the Agents of its namespace too.
+  {{- $c := .Values.commitMode }}
   - apiGroups: ["kustomize.toolkit.fluxcd.io"]
     resources: ["kustomizations"]
-    verbs: ["list", "delete"]
+    verbs:
+      - "list"
+      - "delete"
+      {{- if or $c.sourceRef.name $c.installationKustomization.name }}
+      - "get"
+      - "watch"
+      {{- end }}
+      {{- if $c.sourceRef.name }}
+      - "create"
+      - "update"
+      {{- end }}
   - apiGroups: ["helm.toolkit.fluxcd.io"]
     resources: ["helmreleases"]
     verbs: ["list", "delete"]

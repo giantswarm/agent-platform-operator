@@ -63,6 +63,28 @@ spec:
             {{- with .Values.erasure.fluxNamespace }}
             - --flux-namespace={{ . }}
             {{- end }}
+            {{- with .Values.commitMode }}
+            {{- if .sourceRef.name }}
+            {{- if not $.Values.erasure.fluxNamespace }}
+            {{- fail "commitMode.sourceRef.name needs erasure.fluxNamespace: the organizations' Kustomizations live beside the installation's Flux source" }}
+            {{- end }}
+            - --flux-source-kind={{ .sourceRef.kind }}
+            - --flux-source-name={{ .sourceRef.name }}
+            {{- with .decryptionSecret }}
+            - --flux-decryption-secret={{ . }}
+            {{- end }}
+            - --organization-path={{ .path }}
+            - --organization-kustomization-interval={{ .interval }}
+            {{- end }}
+            - --organization-flux-cluster-role={{ .clusterRole }}
+            {{- with .installationKustomization.name }}
+            {{- $ns := $.Values.commitMode.installationKustomization.namespace | default $.Values.erasure.fluxNamespace }}
+            {{- if not $ns }}
+            {{- fail "commitMode.installationKustomization.name needs its namespace or erasure.fluxNamespace" }}
+            {{- end }}
+            - --installation-kustomization={{ $ns }}/{{ . }}
+            {{- end }}
+            {{- end }}
             - --snapshot-erase-delay={{ .Values.erasure.snapshotDelay }}
             - --erasure-poll-interval={{ .Values.erasure.pollInterval }}
             {{- with .Values.erasure.kagent.target }}

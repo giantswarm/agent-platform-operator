@@ -32,8 +32,13 @@ const (
 	workerPoolNameLabel      = "kagent.dev/worker-pool-name"
 	workerPoolNamespaceLabel = "kagent.dev/worker-pool-namespace"
 
-	// fieldName is the name field of an object's metadata and of a reference.
-	fieldName = "name"
+	// fieldName, fieldKind and fieldNamespace are the fields of an object's
+	// metadata and of a reference.
+	fieldName      = "name"
+	fieldKind      = "kind"
+	fieldNamespace = "namespace"
+	// kindClusterRole is a RoleBinding's roleRef kind.
+	kindClusterRole = "ClusterRole"
 	// kagentLabelPrefix starts the labels kagent reads from an object's
 	// metadata (kagent.dev/discovery on a RemoteMCPServer, say): a copy
 	// carries its source's.
@@ -116,7 +121,10 @@ func (r *OrganizationReconciler) keepCurated(ctx context.Context, org *v1alpha1.
 		return errors.New("the curated Harnesses are not copied: the operator has no snapshot bucket")
 	}
 	k := &curated{keep: map[schema.GroupVersionKind]map[string]bool{}, complete: map[schema.GroupVersionKind]bool{}}
-	errs := []error{r.copyWorkerPool(ctx, ns, workerReplicas(org, len(models) > 0), k)}
+	// The rule reads the Orphaned condition this reconcile set.
+	current := org.DeepCopy()
+	current.Status = *status
+	errs := []error{r.copyWorkerPool(ctx, ns, workerReplicas(current, len(models) > 0), k)}
 
 	for _, name := range org.Spec.Harnesses {
 		k.kept(c.harness(), name)

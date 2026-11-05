@@ -40,8 +40,8 @@ func (c ChartSource) object(ns string) *unstructured.Unstructured {
 	}
 	return &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": c.APIVersion,
-		"kind":       "OCIRepository",
-		"metadata":   map[string]any{fieldName: c.Name(), "namespace": ns},
+		fieldKind:    "OCIRepository",
+		"metadata":   map[string]any{fieldName: c.Name(), fieldNamespace: ns},
 		"spec": map[string]any{
 			"interval": c.Interval,
 			"url":      c.URL,
@@ -236,7 +236,7 @@ func (r *OrganizationReconciler) ensureHelmRoleBinding(ctx context.Context, ns s
 	name := r.Config.HelmServiceAccount
 	return r.ensureRoleBinding(ctx, &rbacv1.RoleBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, Labels: ownLabels(ScopeNamespace)},
-		RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: r.Config.HelmClusterRole},
+		RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: kindClusterRole, Name: r.Config.HelmClusterRole},
 		Subjects:   []rbacv1.Subject{{Kind: rbacv1.ServiceAccountKind, Name: name, Namespace: ns}},
 	})
 }
@@ -295,9 +295,16 @@ func (r *OrganizationReconciler) mirrorAdmins(ctx context.Context, parent, ns st
 		return fmt.Errorf("list RoleBindings in %s: %w", parent, err)
 	}
 	want := map[string]*rbacv1.RoleBinding{}
+	var errs []error
 	for i := range parents.Items {
 		pb := &parents.Items[i]
 		if !isOrganizationsAdmin(pb.RoleRef) || pb.DeletionTimestamp != nil {
+			continue
+		}
+		if pb.Name == FluxRoleBinding && r.Config.Flux.commitMode() {
+			// The name of the organization's Flux binding: the mirror would
+			// take it and leave the organization without its Kustomization.
+			errs = append(errs, &notReadyError{reason: reasonNameTaken, message: fmt.Sprintf("the RoleBinding %s/%s has the name the operator keeps for the organization's Flux binding, so it is not mirrored; rename it", parent, pb.Name)})
 			continue
 		}
 		subjects := mirroredSubjects(pb.Subjects)
@@ -314,7 +321,6 @@ func (r *OrganizationReconciler) mirrorAdmins(ctx context.Context, parent, ns st
 			Subjects: subjects,
 		}
 	}
-	var errs []error
 	mirrors := &rbacv1.RoleBindingList{}
 	if err := r.Client.List(ctx, mirrors, client.InNamespace(ns), client.MatchingLabels{ObjectLabel: ScopeAdminMirror}); err != nil {
 		errs = append(errs, fmt.Errorf("list RoleBindings in %s: %w", ns, err))

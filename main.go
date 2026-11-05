@@ -17,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -43,22 +44,23 @@ func main() {
 
 func run() error {
 	var (
-		cfg                     controller.Config
-		networkPolicyFlavor     string
-		networkPolicies         string
-		curatedCopies           bool
-		curatedWorkerPool       string
-		kagentAPIVersion        string
-		workerPoolAPIVersion    string
-		objectQuota             string
-		kustomizationAPIVersion string
-		helmReleaseAPIVersion   string
-		kagentSessions          grpcwire.Config
-		substrateAPI            grpcwire.Config
-		syncPeriod              time.Duration
-		metricsAddr, probeAddr  string
-		leaderElect             bool
-		leaderElectionNamespace string
+		cfg                       controller.Config
+		networkPolicyFlavor       string
+		networkPolicies           string
+		curatedCopies             bool
+		curatedWorkerPool         string
+		kagentAPIVersion          string
+		workerPoolAPIVersion      string
+		objectQuota               string
+		kustomizationAPIVersion   string
+		helmReleaseAPIVersion     string
+		kagentSessions            grpcwire.Config
+		substrateAPI              grpcwire.Config
+		syncPeriod                time.Duration
+		metricsAddr, probeAddr    string
+		leaderElect               bool
+		leaderElectionNamespace   string
+		installationKustomization string
 	)
 	flag.StringVar(&cfg.PlatformNamespace, "platform-namespace", "kagent", "The platform namespace the network policies are copied from")
 	flag.StringVar(&networkPolicyFlavor, "network-policy-flavor", "", "Kind of the network policies copied into an organization namespace: kubernetes (NetworkPolicy) or cilium (CiliumNetworkPolicy); empty copies none")
@@ -76,7 +78,7 @@ func run() error {
 	flag.StringVar(&kagentAPIVersion, "kagent-api-version", "api.kagent.dev/v1alpha3", "api.kagent.dev API version of the Agents, AgentTemplates, Harnesses, ModelConfigs and RemoteMCPServers; the erasure deletes a deleted organization's Agents of it")
 	flag.StringVar(&workerPoolAPIVersion, "workerpool-api-version", "ate.dev/v1alpha1", "ate.dev API version of the WorkerPool")
 	flag.StringVar(&objectQuota, "object-quota", "", "Comma-separated <resource>=<count> hard limits of the ResourceQuota "+controller.ObjectQuotaName+" kept in every organization namespace, for example configmaps=500,count/agents.api.kagent.dev=200; empty keeps none")
-	flag.StringVar(&kustomizationAPIVersion, "flux-kustomization-api-version", "kustomize.toolkit.fluxcd.io/v1", "kustomize.toolkit.fluxcd.io API version of the organizations' Flux Kustomizations, which the erasure deletes")
+	flag.StringVar(&kustomizationAPIVersion, "flux-kustomization-api-version", "kustomize.toolkit.fluxcd.io/v1", "kustomize.toolkit.fluxcd.io API version of the organizations' Flux Kustomizations and of the installation's")
 	flag.StringVar(&helmReleaseAPIVersion, "flux-helmrelease-api-version", "helm.toolkit.fluxcd.io/v2", "helm.toolkit.fluxcd.io API version of the HelmReleases the erasure deletes")
 	flag.StringVar(&kagentSessions.Target, "kagent-target", "", "The kagent controller's gRPC API, grpc://host:port or grpcs://host[:port], through which the erasure deletes a deleted organization's sessions; empty skips them. Needed with --curated-copies")
 	flag.StringVar(&kagentSessions.CAFile, "kagent-ca-file", "", "CA bundle of a grpcs --kagent-target; empty uses the system roots")
@@ -84,7 +86,14 @@ func run() error {
 	flag.StringVar(&substrateAPI.Target, "substrate-target", "", "Substrate's ate-api, grpcs://host[:port], which the erasure asks for a deleted organization's actors; empty skips the wait. Needed with --curated-copies")
 	flag.StringVar(&substrateAPI.CAFile, "substrate-ca-file", "", "CA bundle of --substrate-target; empty uses the system roots")
 	flag.StringVar(&substrateAPI.TokenFile, "substrate-token-file", "/var/run/secrets/agent-platform-operator/substrate/token", "Projected ServiceAccount token of an audience ate-api trusts, sent to --substrate-target")
-	flag.StringVar(&cfg.Erasure.FluxNamespace, "flux-namespace", "", "Namespace of the installation's Flux source, where an organization's Flux Kustomization and Flux ServiceAccount live, labelled "+v1alpha1.OrganizationUIDLabel+"=<its UID>; the erasure deletes them there. Empty: there are none")
+	flag.StringVar(&cfg.Flux.Namespace, "flux-namespace", "", "Namespace of the installation's Flux source and SOPS key, where an organization's Flux Kustomization and Flux ServiceAccount live, labelled "+v1alpha1.OrganizationUIDLabel+"=<its UID>; the erasure deletes them there. Empty: there are none")
+	flag.StringVar(&cfg.Flux.SourceKind, "flux-source-kind", "GitRepository", "Kind of the installation's Flux source in --flux-namespace: GitRepository or OCIRepository")
+	flag.StringVar(&cfg.Flux.SourceName, "flux-source-name", "", "The installation's Flux source in --flux-namespace. Set: commit mode, every organization gets, in --flux-namespace, a Kustomization applying its path from this source into its namespace and the Flux ServiceAccount that Kustomization runs as, both named after the organization namespace. Empty: none. Needs --flux-namespace")
+	flag.StringVar(&cfg.Flux.DecryptionSecret, "flux-decryption-secret", "", "The installation's SOPS key Secret in --flux-namespace, which the organizations' Kustomizations decrypt with; empty decrypts nothing")
+	flag.StringVar(&cfg.Flux.Path, "organization-path", "./agent-platform/organizations/{parent}/{name}", "An organization's path in --flux-source-name, with {parent} and {name} replaced by its parent namespace and name. Keep it outside what the installation's Kustomization applies")
+	flag.StringVar(&cfg.Flux.Interval, "organization-kustomization-interval", "10m", "spec.interval of the organizations' Kustomizations")
+	flag.StringVar(&cfg.Flux.ClusterRole, "organization-flux-cluster-role", "agent-platform:organization-flux", "ClusterRole an organization's Flux ServiceAccount is bound to, in its organization namespace only")
+	flag.StringVar(&installationKustomization, "installation-kustomization", "", "<namespace>/<name> of the installation's Kustomization that applies the AgentPlatformOrganizations (a bare name is in --flux-namespace). An organization it applied is Orphaned while it is missing from its inventory. Empty: no Orphaned condition")
 	flag.DurationVar(&cfg.Erasure.SnapshotDelay, "snapshot-erase-delay", 5*time.Minute, "How long after the first deletion of a deleted organization's snapshot prefix it is deleted again: at least Substrate's --actor-workflow-deadline (5m by default), so an upload that started before the last actor went has ended")
 	flag.DurationVar(&cfg.Erasure.Poll, "erasure-poll-interval", 10*time.Second, "How often an erasure step that waits for something to be gone looks again")
 	flag.DurationVar(&syncPeriod, "sync-period", 10*time.Minute, "How often every organization is reconciled without a change")
@@ -115,7 +124,23 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("--flux-kustomization-api-version: %w", err)
 	}
-	cfg.Erasure.Kustomization = kustomizationGV.WithKind("Kustomization")
+	cfg.Flux.Kustomization = kustomizationGV.WithKind("Kustomization")
+	if k := cfg.Flux.SourceKind; k != "GitRepository" && k != "OCIRepository" {
+		return fmt.Errorf("--flux-source-kind %q: GitRepository or OCIRepository", k)
+	}
+	if cfg.Flux.SourceName != "" && cfg.Flux.Namespace == "" {
+		return errors.New("--flux-source-name needs --flux-namespace: the organizations' Kustomizations live beside the source")
+	}
+	if installationKustomization != "" {
+		ns, name, ok := strings.Cut(installationKustomization, "/")
+		if !ok {
+			ns, name = cfg.Flux.Namespace, installationKustomization
+		}
+		if ns == "" || name == "" {
+			return fmt.Errorf("--installation-kustomization %q: <namespace>/<name>, or a name with --flux-namespace", installationKustomization)
+		}
+		cfg.Flux.Installation = types.NamespacedName{Namespace: ns, Name: name}
+	}
 	helmReleaseGV, err := schema.ParseGroupVersion(helmReleaseAPIVersion)
 	if err != nil {
 		return fmt.Errorf("--flux-helmrelease-api-version: %w", err)
@@ -194,6 +219,9 @@ func run() error {
 			watched[k] = "--curated-copies"
 		}
 	}
+	if cfg.Flux.SourceName != "" || cfg.Flux.Installation.Name != "" {
+		watched[cfg.Flux.Kustomization] = "--flux-source-name or --installation-kustomization"
+	}
 	for k, by := range watched {
 		_, err := mgr.GetRESTMapper().RESTMapping(k.GroupKind(), k.Version)
 		switch {
@@ -203,7 +231,7 @@ func run() error {
 			return fmt.Errorf("discovering %s: %w", k, err)
 		}
 	}
-	r := &controller.OrganizationReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Config: cfg}
+	r := &controller.OrganizationReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Cache: mgr.GetCache(), Config: cfg}
 	if err := r.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("controller: %w", err)
 	}
@@ -212,6 +240,12 @@ func run() error {
 	}
 	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
 		return err
+	}
+	// A mistyped name would leave Orphaned unset for good, in silence.
+	if check := controller.InstallationCheck(mgr.GetAPIReader(), cfg.Flux); check != nil {
+		if err := mgr.AddReadyzCheck("installation-kustomization", check); err != nil {
+			return err
+		}
 	}
 	return mgr.Start(ctrl.SetupSignalHandler())
 }

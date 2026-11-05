@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An organization's WorkerPool runs `spec.workers.replicas` workers, and 0 while its namespace holds no ModelConfig or while it is `Orphaned`.
 - Every organization namespace gets the ResourceQuota `agent-platform-organization-objects` on object counts (`objectQuota`).
 - A deleted organization is erased, in order: its Flux Kustomization or HelmReleases and its Agents, every creator's sessions through kagent until Substrate holds no actor of it, its snapshot prefix twice (`erasure.snapshotDelay` apart), its namespace, then its Flux ServiceAccount. `Ready` stays `False` with reason `Deleting` and `status.erasureStep` names the step; a failing step is retried. The workers run until the sessions are gone and stop after. `curated.enabled` needs `erasure.kagent.target` and `erasure.substrate.target`.
+- Commit mode (`commitMode.sourceRef.name`): every organization gets, in `erasure.fluxNamespace`, a Flux Kustomization `agents-<name>-<5>` that applies its path in git (`commitMode.path`) into its namespace as its own Flux ServiceAccount. That ServiceAccount is bound to `agent-platform:organization-flux` in the organization namespace only.
+- With `commitMode.installationKustomization.name`, an organization that the installation's Kustomization applied and that is missing from its inventory is `Orphaned`: reason `DeleteMerged` with `agent-platform.giantswarm.io/delete-pull-request`, `MissingFromGit` otherwise. Its workers stop; an organization back in the inventory is no longer `Orphaned`.
 
 
 [Unreleased]: https://github.com/giantswarm/agent-platform-operator/tree/main

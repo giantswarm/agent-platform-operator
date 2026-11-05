@@ -60,6 +60,60 @@
         "clusterID": {
             "type": "string"
         },
+        "commitMode": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "clusterRole": {
+                    "type": "string",
+                    "description": "The ClusterRole an organization's Flux ServiceAccount is bound to in its organization namespace (rendered by the agent-platform chart)."
+                },
+                "decryptionSecret": {
+                    "type": "string",
+                    "description": "The installation's SOPS key Secret in `erasure.fluxNamespace`, which the organizations' Kustomizations decrypt with; empty decrypts nothing."
+                },
+                "installationKustomization": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "The installation's Kustomization that applies the AgentPlatformOrganizations (with `deletionPolicy: Orphan`). An organization it applied is `Orphaned` while it is missing from its inventory, with reason `DeleteMerged` when it carries `agent-platform.giantswarm.io/delete-pull-request`, `MissingFromGit` otherwise. Empty: no `Orphaned` condition."
+                        },
+                        "namespace": {
+                            "type": "string",
+                            "description": "Its namespace; empty is `erasure.fluxNamespace`."
+                        }
+                    }
+                },
+                "interval": {
+                    "type": "string",
+                    "description": "`spec.interval` of the organizations' Kustomizations."
+                },
+                "path": {
+                    "type": "string",
+                    "description": "An organization's path in the source: `{parent}` and `{name}` are replaced by its parent namespace and its name. An installation puts it under its own agent-platform configuration path, outside what the installation's Kustomization applies."
+                },
+                "sourceRef": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "kind": {
+                            "type": "string",
+                            "description": "Kind of the installation's Flux source in `erasure.fluxNamespace`: `GitRepository` or `OCIRepository`.",
+                            "enum": [
+                                "GitRepository",
+                                "OCIRepository"
+                            ]
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "The installation's Flux source. Set: commit mode, every organization gets, in `erasure.fluxNamespace`, a Kustomization that applies its path from this source into its namespace, and the Flux ServiceAccount that Kustomization runs as, both named after the organization namespace, bound in the organization namespace only to `clusterRole`. Empty: none. Needs `erasure.fluxNamespace`."
+                        }
+                    }
+                }
+            }
+        },
         "curated": {
             "type": "object",
             "additionalProperties": false,
@@ -110,7 +164,7 @@
                 },
                 "kustomizationApiVersion": {
                     "type": "string",
-                    "description": "kustomize.toolkit.fluxcd.io API version of the organizations' Flux Kustomizations."
+                    "description": "kustomize.toolkit.fluxcd.io API version of the organizations' Flux Kustomizations and of the installation's."
                 },
                 "pollInterval": {
                     "type": "string",
