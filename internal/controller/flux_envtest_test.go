@@ -211,6 +211,64 @@ func fluxCases(t *testing.T, c *cluster) {
 		assert.True(t, apierrors.IsNotFound(err), "the Flux ServiceAccount outlived the organization: %v", err)
 	})
 
+	t.Run("an unlabelled Flux object deleted by hand holds the erasure until a finalizer lets it go", func(t *testing.T) {
+		org := c.organization(t, "org-git-terminating", "ledger")
+		ns := c.readyNamespace(t, org).Name
+		org = c.get(t, org)
+		kustomization, serviceAccount := c.holdFluxObjects(t, ns)
+		t.Cleanup(func() {
+			c.release(context.Background(), kustomization)
+			c.release(context.Background(), serviceAccount)
+		})
+		c.editKustomization(t, ns, func(got *unstructured.Unstructured, _ any) {
+			l := got.GetLabels()
+			delete(l, v1alpha1.OrganizationUIDLabel)
+			delete(l, controller.ObjectLabel)
+			got.SetLabels(l)
+		}, nil)
+		require.EventuallyWithT(t, func(ct *assert.CollectT) {
+			sa := &corev1.ServiceAccount{}
+			if assert.NoError(ct, c.admin.Get(t.Context(), client.ObjectKeyFromObject(serviceAccount), sa)) {
+				delete(sa.Labels, v1alpha1.OrganizationUIDLabel)
+				delete(sa.Labels, controller.ObjectLabel)
+				assert.NoError(ct, c.admin.Update(t.Context(), sa))
+			}
+		}, timeout, tick)
+		require.NoError(t, c.admin.Delete(t.Context(), kustomization))
+		require.NoError(t, c.admin.Delete(t.Context(), serviceAccount))
+
+		waitsFor := func(kind string) {
+			t.Helper()
+			require.EventuallyWithT(t, func(ct *assert.CollectT) {
+				got := c.get(ct, org)
+				ready := meta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionReady)
+				if assert.NotNil(ct, ready) {
+					assert.Equal(ct, "Deleting", ready.Reason)
+					assert.Contains(ct, ready.Message, "waiting until these are gone: ")
+					assert.Contains(ct, ready.Message, kind+" "+fluxNS+"/"+ns)
+				}
+				assert.Equal(ct, v1alpha1.ErasureWorkloads, got.Status.ErasureStep)
+			}, timeout, tick)
+			require.Never(t, func() bool {
+				got := &v1alpha1.AgentPlatformOrganization{}
+				err := c.admin.Get(context.Background(), client.ObjectKeyFromObject(org), got)
+				return err != nil || got.Status.ErasureStep != v1alpha1.ErasureWorkloads
+			}, time.Second, tick, "the erasure left the Workloads step while the %s was terminating", kind)
+			require.Len(t, c.namespacesOf(t, org), 1, "the namespace went while the %s was terminating", kind)
+		}
+		require.NoError(t, c.admin.Delete(t.Context(), org))
+		waitsFor("Kustomization")
+
+		c.release(t.Context(), kustomization)
+		c.eventuallyAbsent(t, kustomizationGVK, fluxNS, ns)
+		waitsFor("ServiceAccount")
+
+		c.finalizeNamespaceWhenDeleted(t, ns)
+		c.release(t.Context(), serviceAccount)
+		c.gone(t, org)
+		require.Empty(t, c.namespacesOf(t, org))
+	})
+
 	t.Run("a parent binding named like the organization's Flux binding is not mirrored", func(t *testing.T) {
 		org := c.organization(t, "org-git-taken", "ledger")
 		ns := c.readyNamespace(t, org).Name
