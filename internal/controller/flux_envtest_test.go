@@ -47,6 +47,7 @@ func fluxCases(t *testing.T, c *cluster) {
 			"prune":              true,
 			"deletionPolicy":     "WaitForTermination",
 			"suspend":            false,
+			"force":              false,
 			"sourceRef":          map[string]any{"kind": "GitRepository", nameField: fluxSource, "namespace": fluxNS},
 			"decryption":         map[string]any{"provider": "sops", "secretRef": nameRef(sopsSecret)},
 			"serviceAccountName": ns,
@@ -298,16 +299,23 @@ func fluxCases(t *testing.T, c *cluster) {
 		entry := func(name string) any {
 			return map[string]any{"id": parent + "_" + name + "_agent-platform.giantswarm.io_AgentPlatformOrganization", "v": "v1alpha1"}
 		}
-		c.create(t, newObject(kustomizationGVK, fluxNS, installationKS, nil, map[string]any{"path": "./management-clusters/test", "prune": true, "deletionPolicy": "Orphan"}))
+		c.create(t, newObject(kustomizationGVK, fluxNS, installationKS, nil, map[string]any{
+			intervalField: "10m", "path": "./management-clusters/test", "prune": true, "deletionPolicy": "Orphan",
+			sourceField: map[string]any{kindField: "GitRepository", nameField: fluxSource},
+		}))
 		// The status kustomize-controller records: settled (Ready for its
 		// generation), or reconciling, with the inventory of the last apply.
 		setStatus := func(settled bool, entries ...any) {
+			if entries == nil {
+				entries = []any{}
+			}
 			require.EventuallyWithT(t, func(ct *assert.CollectT) {
 				got := c.read(t, kustomizationGVK, fluxNS, installationKS)
-				condition := map[string]any{"type": "Ready", "status": "True", "reason": "ReconciliationSucceeded"}
+				condition := map[string]any{"type": "Ready", "status": "True", "reason": "ReconciliationSucceeded", "message": "Applied revision"}
 				if !settled {
-					condition = map[string]any{"type": "Reconciling", "status": "True", "reason": "Progressing"}
+					condition = map[string]any{"type": "Reconciling", "status": "True", "reason": "Progressing", "message": "Reconciliation in progress"}
 				}
+				condition["lastTransitionTime"] = metav1.Now().UTC().Format(time.RFC3339)
 				got.Object["status"] = map[string]any{
 					"observedGeneration": got.GetGeneration(),
 					"conditions":         []any{condition},
