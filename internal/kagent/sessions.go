@@ -23,9 +23,10 @@ const (
 	methodListSessions  = "/kagent.api.v1alpha1.SessionService/ListSessions"
 	methodDeleteSession = "/kagent.api.v1alpha1.SessionService/DeleteSession"
 
-	// ListSessionsRequest: all_creators = 2, page = 3.
-	fieldAllCreators protowire.Number = 2
-	fieldPage        protowire.Number = 3
+	// ListSessionsRequest: all_creators = 2, page = 3, namespace = 7.
+	fieldAllCreators   protowire.Number = 2
+	fieldPage          protowire.Number = 3
+	fieldListNamespace protowire.Number = 7
 	// PageRequest: limit = 1, page_token = 2.
 	fieldLimit     protowire.Number = 1
 	fieldPageToken protowire.Number = 2
@@ -55,15 +56,16 @@ type Sessions struct{ conn *grpcwire.Conn }
 func New(conn *grpcwire.Conn) *Sessions { return &Sessions{conn: conn} }
 
 // List returns the IDs of every creator's sessions of the Agents in
-// namespace. The service filters by one Agent at most, and the organization's
-// Agents are gone by now, so it lists every session and keeps the
-// namespace's.
+// namespace, Agents that are gone included: kagent matches the namespace of
+// each session's pinned revision. A kagent without the namespace filter
+// ignores the field and lists every namespace's sessions, so the namespace's
+// are kept here too.
 func (s *Sessions) List(ctx context.Context, namespace string) ([]string, error) {
 	var ids []string
 	token := ""
 	for range maxPages {
 		page := grpcwire.Message(nil).Uint(fieldLimit, pageSize).String(fieldPageToken, token)
-		req := grpcwire.Message(nil).Bool(fieldAllCreators, true).Message(fieldPage, page)
+		req := grpcwire.Message(nil).Bool(fieldAllCreators, true).Message(fieldPage, page).String(fieldListNamespace, namespace)
 		resp, err := s.conn.Invoke(ctx, methodListSessions, req)
 		if err != nil {
 			return nil, fmt.Errorf("kagent ListSessions: %w", err)

@@ -43,8 +43,8 @@ func listResponse(next string, sessions ...[]byte) []byte {
 }
 
 // request reads a ListSessionsRequest: all_creators (2), page.limit (3.1),
-// page.page_token (3.2).
-func request(t *testing.T, b []byte) (allCreators bool, limit uint64, token string) {
+// page.page_token (3.2), namespace (7).
+func request(t *testing.T, b []byte) (allCreators bool, limit uint64, token, namespace string) {
 	t.Helper()
 	for len(b) > 0 {
 		num, typ, n := protowire.ConsumeTag(b)
@@ -68,16 +68,19 @@ func request(t *testing.T, b []byte) (allCreators bool, limit uint64, token stri
 				v, n := protowire.ConsumeBytes(page)
 				token, page = string(v), page[n:]
 			}
+		case num == 7 && typ == protowire.BytesType:
+			v, n := protowire.ConsumeBytes(b)
+			namespace, b = string(v), b[n:]
 		default:
 			t.Fatalf("ListSessionsRequest carries field %d", num)
 		}
 	}
-	return allCreators, limit, token
+	return allCreators, limit, token, namespace
 }
 
 func TestListReadsEveryCreatorsSessionsOfTheNamespaceOnEveryPage(t *testing.T) {
 	srv, conn := grpcwiretest.Start(t, "operator-token", func(c grpcwiretest.Call) ([]byte, error) {
-		if _, _, token := request(t, c.Request); token == "" {
+		if _, _, token, _ := request(t, c.Request); token == "" {
 			return listResponse("page-2", session("a", "agents-acme-x7k2q"), session("b", "agents-other-abcde")), nil
 		}
 		return listResponse("", session("c", "agents-acme-x7k2q")), nil
@@ -92,8 +95,9 @@ func TestListReadsEveryCreatorsSessionsOfTheNamespaceOnEveryPage(t *testing.T) {
 	for i, wantToken := range []string{"", "page-2"} {
 		assert.Equal(t, "/kagent.api.v1alpha1.SessionService/ListSessions", calls[i].Method)
 		assert.Equal(t, "Bearer operator-token", calls[i].Authorization)
-		all, limit, token := request(t, calls[i].Request)
+		all, limit, token, namespace := request(t, calls[i].Request)
 		assert.True(t, all, "the listing is not every creator's")
+		assert.Equal(t, "agents-acme-x7k2q", namespace, "the listing is not the namespace's")
 		assert.EqualValues(t, 100, limit)
 		assert.Equal(t, wantToken, token)
 	}

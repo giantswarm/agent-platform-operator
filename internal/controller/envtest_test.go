@@ -246,7 +246,7 @@ func startEnvtest(t *testing.T) *cluster {
 			"count/agents.api.kagent.dev": resource.MustParse("100"),
 		},
 		Erasure: controller.ErasureConfig{
-			Sessions: sessions, Actors: actors, Snapshots: bucket,
+			Sessions: sessions.serve(t), Actors: actors, Snapshots: bucket,
 			SnapshotDelay: snapshotDelay, Poll: 100 * time.Millisecond,
 			HelmRelease: helmReleaseGVK, Agent: agentGVK,
 		},
