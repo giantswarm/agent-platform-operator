@@ -31,7 +31,7 @@ const (
 	// (giantswarm-platform-manager#789): the one curated Agents run on. Exactly
 	// one marked ModelConfig is the default; none or more than one means there
 	// is none.
-	DefaultModelConfigAnnotation = "agent-platform.giantswarm.io/default-model-config"
+	DefaultModelConfigAnnotation = "agent-platform.giantswarm.io/is-default-model-config"
 
 	// Finalizer is on every AgentPlatformOrganization: the operator removes it
 	// once the deleted organization is erased.
