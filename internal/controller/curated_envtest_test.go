@@ -88,6 +88,49 @@ func curatedCases(t *testing.T, c *cluster) {
 		c.eventuallyAbsent(t, harnessGVK, ns, curatedHarness)
 	})
 
+	t.Run("the kagent and Substrate CRDs refuse a copy their schema refuses", func(t *testing.T) {
+		org := c.organizationWith(t, "org-schema", "schema", v1alpha1.AgentPlatformOrganizationSpec{Harnesses: []string{curatedHarness}})
+		ns := c.readyNamespace(t, org).Name
+		harness := c.eventually(t, harnessGVK, ns, curatedHarness, nil)
+		pool := c.eventually(t, poolGVK, ns, curatedPool, nil)
+		// renamed is obj as a new object of another name, so a dry-run create
+		// runs the CRD's create validation on the operator's copy.
+		renamed := func(obj *unstructured.Unstructured) *unstructured.Unstructured {
+			copied := obj.DeepCopy()
+			copied.SetName(copied.GetName() + "-refused")
+			copied.SetResourceVersion("")
+			copied.SetUID("")
+			return copied
+		}
+		for _, obj := range []*unstructured.Unstructured{harness, pool} {
+			require.NoError(t, c.admin.Create(t.Context(), renamed(obj), client.DryRunAll), "the unchanged %s copy", obj.GetKind())
+		}
+
+		for _, tc := range []struct {
+			desc string
+			obj  *unstructured.Unstructured
+			// field is the path below spec; a nil value removes it.
+			field []string
+			value any
+		}{
+			{"a Harness image without a digest", harness, []string{"workload", "image"}, "gsoci.azurecr.io/giantswarm/kagent/golang-adk:latest"},
+			{"a compaction threshold without its retention size", harness, []string{"kagent", "compaction", "eventRetentionSize"}, nil},
+			{"a WorkerPool with negative replicas", pool, []string{"replicas"}, int64(-1)},
+		} {
+			t.Run(tc.desc, func(t *testing.T) {
+				copied := renamed(tc.obj)
+				field := append([]string{"spec"}, tc.field...)
+				if tc.value == nil {
+					unstructured.RemoveNestedField(copied.Object, field...)
+				} else {
+					require.NoError(t, unstructured.SetNestedField(copied.Object, tc.value, field...))
+				}
+				err := c.admin.Create(t.Context(), copied, client.DryRunAll)
+				require.Truef(t, apierrors.IsInvalid(err), "want Invalid, got %v", err)
+			})
+		}
+	})
+
 	t.Run("the pool runs no workers without a ModelConfig", func(t *testing.T) {
 		org := c.organizationWith(t, "org-workers", "workers", v1alpha1.AgentPlatformOrganizationSpec{Workers: v1alpha1.Workers{Replicas: 3}})
 		ns := c.readyNamespace(t, org).Name
@@ -122,7 +165,7 @@ func curatedCases(t *testing.T, c *cluster) {
 		namespaces := []string{c.readyNamespace(t, one).Name, c.readyNamespace(t, two).Name}
 
 		source := c.read(t, harnessGVK, platformNS, curatedHarness)
-		require.NoError(t, unstructured.SetNestedField(source.Object, harnessImage+"bbbb", "spec", "workload", "image"))
+		require.NoError(t, unstructured.SetNestedField(source.Object, harnessImageNext, "spec", "workload", "image"))
 		require.NoError(t, c.admin.Update(t.Context(), source))
 
 		added := newObject(agentGVK, platformNS, "cost-advisor", curatedLabels, agentSpec("Costs.", nil))
@@ -130,7 +173,7 @@ func curatedCases(t *testing.T, c *cluster) {
 
 		for _, ns := range namespaces {
 			c.eventually(t, harnessGVK, ns, curatedHarness, func(ct *assert.CollectT, h *unstructured.Unstructured) {
-				assert.Equal(ct, harnessImage+"bbbb", str(h, "spec", "workload", "image"))
+				assert.Equal(ct, harnessImageNext, str(h, "spec", "workload", "image"))
 			})
 			c.eventually(t, agentGVK, ns, "cost-advisor", nil)
 		}

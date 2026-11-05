@@ -15,7 +15,6 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
-	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -37,15 +36,21 @@ import (
 )
 
 const (
-	chartDir         = "../../helm/agent-platform-operator"
+	chartDir = "../../helm/agent-platform-operator"
+	// crdsDir holds the kagent, Substrate and Flux CRDs at the versions a
+	// management cluster serves (`make envtest-crds`).
+	crdsDir          = "testdata/crds"
 	releaseNamespace = "agent-platform"
 	platformNS       = "kagent"
 	workerPolicy     = "substrate-workers-ingress"
 	helmSA           = "kagent-flux"
-	helmClusterRole  = "agent-platform-tenant-flux"
-	snapshotBucket   = "agent-snapshots"
-	appLabel         = "app"
-	workerApp        = "substrate-worker"
+	// agentChart names the agent chart's OCIRepository: the last element of
+	// the chart's URL.
+	agentChart      = "agent"
+	helmClusterRole = "agent-platform-tenant-flux"
+	snapshotBucket  = "agent-snapshots"
+	appLabel        = "app"
+	workerApp       = "substrate-worker"
 
 	// The curated objects of the platform namespace.
 	curatedPool      = "kagent-default"
@@ -58,7 +63,9 @@ const (
 	platformModel    = "default-model-config"
 	platformLocation = "s3://platform-snapshots/kagent"
 	workerImage      = "gsoci.azurecr.io/giantswarm/substrate-worker:1.0.0"
-	harnessImage     = "gsoci.azurecr.io/giantswarm/kagent/golang-adk@sha256:aaaa"
+	harnessImage     = "gsoci.azurecr.io/giantswarm/kagent/golang-adk@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	// harnessImageNext is the image a curated Harness moves to.
+	harnessImageNext = "gsoci.azurecr.io/giantswarm/kagent/golang-adk@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
 	// discoveryLabel is the label kagent reads to skip a RemoteMCPServer's
 	// tool discovery.
@@ -80,6 +87,8 @@ const (
 	// Kustomization in fluxNS, and the ClusterRole an organization's Flux
 	// ServiceAccount is bound to.
 	fluxSource          = "management-clusters-fleet"
+	fluxSourceKind      = "GitRepository"
+	fluxInterval        = "10m"
 	sopsSecret          = "sops-keys"
 	installationKS      = "flux"
 	organizationFluxCR  = "agent-platform:organization-flux"
@@ -128,8 +137,9 @@ type cluster struct {
 	bucket   *fakeBucket
 }
 
-// startEnvtest starts the API server, installs the chart's CRD and applies
-// its RBAC (templates/rbac.yaml), creates the platform namespace with the
+// startEnvtest starts the API server, installs the chart's CRD and the kagent,
+// Substrate and Flux CRDs of testdata/crds, applies the chart's RBAC
+// (templates/rbac.yaml), creates the platform namespace with the
 // worker network policy and the Flux namespace, and runs the reconciler, in
 // commit mode, as the chart's ServiceAccount. Skipped without envtest binaries: run via
 // `make test-envtest`, which resolves KUBEBUILDER_ASSETS with setup-envtest
@@ -157,19 +167,8 @@ func startEnvtest(t *testing.T) *cluster {
 	require.NoError(t, err, "helm template: %s", stderrOf(err))
 
 	env := &envtest.Environment{
-		CRDDirectoryPaths:     []string{chartDir + "/crds"},
+		CRDDirectoryPaths:     []string{chartDir + "/crds", crdsDir},
 		ErrorIfCRDPathMissing: true,
-		CRDs: []*apiextensionsv1.CustomResourceDefinition{
-			anyFieldsCRD(ociGVK, "ocirepositories"),
-			anyFieldsCRD(agentGVK, "agents"),
-			anyFieldsCRD(templateGVK, "agenttemplates"),
-			anyFieldsCRD(harnessGVK, "harnesses"),
-			anyFieldsCRD(modelGVK, "modelconfigs"),
-			anyFieldsCRD(serverGVK, "remotemcpservers"),
-			anyFieldsCRD(poolGVK, "workerpools"),
-			withStatus(anyFieldsCRD(kustomizationGVK, "kustomizations")),
-			anyFieldsCRD(helmReleaseGVK, "helmreleases"),
-		},
 	}
 	cfg, err := env.Start()
 	require.NoError(t, err, "start envtest")
@@ -262,8 +261,8 @@ func startEnvtest(t *testing.T) *cluster {
 		},
 		Flux: controller.FluxConfig{
 			Namespace: fluxNS, Kustomization: kustomizationGVK,
-			SourceKind: "GitRepository", SourceName: fluxSource, DecryptionSecret: sopsSecret,
-			Path: organizationPathFmt, Interval: "10m", ClusterRole: organizationFluxCR,
+			SourceKind: fluxSourceKind, SourceName: fluxSource, DecryptionSecret: sopsSecret,
+			Path: organizationPathFmt, Interval: fluxInterval, ClusterRole: organizationFluxCR,
 			Installation: types.NamespacedName{Namespace: fluxNS, Name: installationKS},
 		},
 	}}
@@ -307,7 +306,7 @@ func curatedSources() []*unstructured.Unstructured {
 			"workload": map[string]any{"image": harnessImage},
 			"kagent": map[string]any{
 				"memory":     map[string]any{"modelConfigRef": nameRef("embeddings"), "ttlDays": int64(15)},
-				"compaction": map[string]any{"tokenThreshold": int64(1000), "summarizer": map[string]any{"modelConfigRef": nameRef(platformModel)}},
+				"compaction": map[string]any{"tokenThreshold": int64(1000), "eventRetentionSize": int64(10), "summarizer": map[string]any{"modelConfigRef": nameRef(platformModel)}},
 			},
 			"substrate": map[string]any{
 				"workerPoolRef":  nameRef("platform-pool"),
@@ -356,11 +355,22 @@ func agentSpec(prompt string, fields map[string]any) map[string]any {
 	return map[string]any{"harnessRef": nameRef(curatedHarness), "template": templateSpec(prompt, fields)}
 }
 
+// helmReleaseSpec is the spec of a HelmRelease of the agent chart, from the
+// organization namespace's OCIRepository.
+var helmReleaseSpec = map[string]any{
+	intervalField: "30m",
+	"chartRef":    map[string]any{kindField: ociGVK.Kind, nameField: agentChart},
+}
+
 // nameRef is a reference to an object by name.
 func nameRef(name string) map[string]any { return map[string]any{nameField: name} }
 
-// nameField is the name field of a reference.
-const nameField = "name"
+// The fields of a reference and a Flux object's interval.
+const (
+	kindField     = "kind"
+	nameField     = "name"
+	intervalField = "interval"
+)
 
 // recordQuotaUsage does what kube-controller-manager's quota controller does
 // for a new ResourceQuota until ctx ends: it records the hard limits and the
@@ -418,34 +428,6 @@ func createNamespace(t *testing.T, c client.Client, name string) {
 	if !apierrors.IsAlreadyExists(err) {
 		require.NoError(t, err)
 	}
-}
-
-// anyFieldsCRD is a namespaced CustomResourceDefinition that takes any fields.
-func anyFieldsCRD(gvk schema.GroupVersionKind, plural string) *apiextensionsv1.CustomResourceDefinition {
-	preserve := true
-	return &apiextensionsv1.CustomResourceDefinition{
-		ObjectMeta: metav1.ObjectMeta{Name: plural + "." + gvk.Group},
-		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
-			Group: gvk.Group,
-			Names: apiextensionsv1.CustomResourceDefinitionNames{Kind: gvk.Kind, ListKind: gvk.Kind + "List", Plural: plural},
-			Scope: apiextensionsv1.NamespaceScoped,
-			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{{
-				Name: gvk.Version, Served: true, Storage: true,
-				Schema: &apiextensionsv1.CustomResourceValidation{OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{
-					Type: "object", XPreserveUnknownFields: &preserve,
-				}},
-			}},
-		},
-	}
-}
-
-// withStatus gives crd a status subresource, as Flux's Kustomization has: a
-// status write then leaves the generation as it is.
-func withStatus(crd *apiextensionsv1.CustomResourceDefinition) *apiextensionsv1.CustomResourceDefinition {
-	for i := range crd.Spec.Versions {
-		crd.Spec.Versions[i].Subresources = &apiextensionsv1.CustomResourceSubresources{Status: &apiextensionsv1.CustomResourceSubresourceStatus{}}
-	}
-	return crd
 }
 
 func stderrOf(err error) string {

@@ -79,7 +79,7 @@ func erasureCases(t *testing.T, c *cluster) {
 			Labels: map[string]string{v1alpha1.OrganizationUIDLabel: string(org.UID)},
 		}}
 		c.create(t, elsewhere)
-		c.create(t, newObject(helmReleaseGVK, ns, "triage", nil, map[string]any{"chart": map[string]any{}}))
+		c.create(t, newObject(helmReleaseGVK, ns, "triage", nil, helmReleaseSpec))
 		// An Agent written outside git, without the operator's label.
 		c.create(t, newObject(agentGVK, ns, "by-hand", nil, agentSpec("By hand.", nil)))
 		c.sessions.add(ns, "alice@example.com", "11111111-1111-1111-1111-111111111111")
@@ -201,7 +201,7 @@ func erasureCases(t *testing.T, c *cluster) {
 		org := c.organization(t, "org-parent-gone", "orphan")
 		ns := c.readyNamespace(t, org).Name
 		prefix := c.get(t, org).Status.SnapshotPrefix
-		c.create(t, newObject(helmReleaseGVK, ns, "triage", nil, map[string]any{"chart": map[string]any{}}))
+		c.create(t, newObject(helmReleaseGVK, ns, "triage", nil, helmReleaseSpec))
 		c.sessions.add(ns, "carol@example.com", "44444444-4444-4444-4444-444444444444")
 		c.bucket.objects[prefix] = 1
 		c.observeErasure(t, org, ns)
