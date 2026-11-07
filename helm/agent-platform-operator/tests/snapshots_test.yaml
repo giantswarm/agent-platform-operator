@@ -1,0 +1,56 @@
+suite: snapshots
+templates:
+  - templates/deployment.yaml
+tests:
+  - it: keeps AWS endpoint and credential chain defaults
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --snapshot-use-path-style
+      - notExists:
+          path: spec.template.spec.containers[0].env
+  - it: passes endpoint and addressing flags and credentials only as Secret references
+    set:
+      snapshots:
+        endpoint: http://snapshot-store.storage.svc:9000
+        usePathStyle: true
+        region: eu-west-1
+        credentials:
+          existingSecret: snapshots
+          accessKeyIdKey: access
+          secretAccessKeyKey: secret
+          sessionTokenKey: token
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --snapshot-endpoint=http://snapshot-store.storage.svc:9000
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --snapshot-use-path-style
+      - equal:
+          path: spec.template.spec.containers[0].env
+          value:
+            - name: AWS_REGION
+              value: eu-west-1
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef: {name: snapshots, key: access}
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef: {name: snapshots, key: secret}
+            - name: AWS_SESSION_TOKEN
+              valueFrom:
+                secretKeyRef: {name: snapshots, key: token}
+  - it: supports a static credential pair without a session token or region override
+    set:
+      snapshots.credentials.existingSecret: snapshots
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].env
+          value:
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef: {name: snapshots, key: accessKeyId}
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef: {name: snapshots, key: secretAccessKey}

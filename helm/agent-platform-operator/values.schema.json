@@ -158,7 +158,7 @@
                         },
                         "target": {
                             "type": "string",
-                            "description": "The kagent controller's gRPC API (`grpc://host:port` or `grpcs://host[:port]`), through which the erasure deletes a deleted organization's sessions, as the operator's ServiceAccount. Empty skips them; required with `curated.enabled`."
+                            "description": "The kagent controller's gRPC API (`grpc://host:port` or `grpcs://host[:port]`), through which cleanup deletes a deleted organization's sessions, as the operator's ServiceAccount. Empty skips them; required with `curated.enabled`."
                         }
                     }
                 },
@@ -168,7 +168,7 @@
                 },
                 "pollInterval": {
                     "type": "string",
-                    "description": "How often an erasure step that waits for something to be gone looks again."
+                    "description": "How often a cleanup step that waits for something to be gone looks again."
                 },
                 "snapshotDelay": {
                     "type": "string",
@@ -215,7 +215,7 @@
                         },
                         "target": {
                             "type": "string",
-                            "description": "Substrate's ate-api (`grpcs://host[:port]`), which the erasure asks until a deleted organization has no actor left. Empty skips the wait; required with `curated.enabled`."
+                            "description": "Substrate's ate-api (`grpcs://host[:port]`), which the operator asks until a deleted organization has no actor left. Empty skips the wait; required with `curated.enabled`."
                         }
                     }
                 }
@@ -480,7 +480,7 @@
             "properties": {
                 "annotations": {
                     "type": "object",
-                    "description": "Annotations of the operator's ServiceAccount, for example `eks.amazonaws.com/role-arn`: the IRSA role the erasure deletes snapshots under the organizations' prefixes of `snapshots.bucket` with.",
+                    "description": "Annotations of the operator's ServiceAccount, for example `eks.amazonaws.com/role-arn`: the IRSA role used to delete snapshots under the organizations' prefixes of `snapshots.bucket`.",
                     "additionalProperties": true
                 }
             }
@@ -529,9 +529,39 @@
                     "type": "string",
                     "description": "Bucket of the organizations' worker snapshots: an organization's `status.snapshotPrefix` is `s3://<bucket>/<uid>`. Empty leaves it empty."
                 },
+                "credentials": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "accessKeyIdKey": {
+                            "type": "string",
+                            "description": "Key of the access key ID in the Secret."
+                        },
+                        "existingSecret": {
+                            "type": "string",
+                            "description": "Secret in the operator namespace containing the S3 credential pair. Empty uses the default AWS credential chain."
+                        },
+                        "secretAccessKeyKey": {
+                            "type": "string",
+                            "description": "Key of the secret access key in the Secret."
+                        },
+                        "sessionTokenKey": {
+                            "type": "string",
+                            "description": "Optional key of a session token in the Secret."
+                        }
+                    }
+                },
+                "endpoint": {
+                    "type": "string",
+                    "description": "S3 endpoint URL; empty uses the AWS endpoint."
+                },
                 "region": {
                     "type": "string",
                     "description": "AWS region of the bucket, the AWS_REGION of the operator; empty takes the one the pod's environment sets, if any."
+                },
+                "usePathStyle": {
+                    "type": "boolean",
+                    "description": "Address buckets in the URL path instead of the hostname."
                 }
             }
         },

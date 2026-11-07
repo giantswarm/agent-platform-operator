@@ -67,6 +67,19 @@ snapshots:
   # -- AWS region of the bucket, the AWS_REGION of the operator; empty takes
   # the one the pod's environment sets, if any.
   region: ""
+  # -- S3 endpoint URL; empty uses the AWS endpoint.
+  endpoint: ""
+  # -- Address buckets in the URL path instead of the hostname.
+  usePathStyle: false
+  credentials:
+    # -- Secret in the operator namespace containing the S3 credential pair. Empty uses the default AWS credential chain.
+    existingSecret: ""
+    # -- Key of the access key ID in the Secret.
+    accessKeyIdKey: accessKeyId
+    # -- Key of the secret access key in the Secret.
+    secretAccessKeyKey: secretAccessKey
+    # -- Optional key of a session token in the Secret.
+    sessionTokenKey: ""
 
 curated:
   # -- Copy the curated objects of `platformNamespace`, read-only, into every
@@ -113,8 +126,8 @@ objectQuota:
 serviceAccount:
   # @schema additionalProperties: true
   # -- Annotations of the operator's ServiceAccount, for example
-  # `eks.amazonaws.com/role-arn`: the IRSA role the erasure deletes snapshots
-  # under the organizations' prefixes of `snapshots.bucket` with.
+  # `eks.amazonaws.com/role-arn`: the IRSA role used to delete snapshots
+  # under the organizations' prefixes of `snapshots.bucket`.
   annotations: {}
 
 erasure:
@@ -129,7 +142,7 @@ erasure:
   # workflow deadline, which ate-api sets to 5m by default, so an upload that
   # started before the organization's last actor went has ended.
   snapshotDelay: 5m
-  # -- How often an erasure step that waits for something to be gone looks
+  # -- How often a cleanup step that waits for something to be gone looks
   # again.
   pollInterval: 10s
   # -- kustomize.toolkit.fluxcd.io API version of the organizations' Flux
@@ -139,7 +152,7 @@ erasure:
   helmReleaseApiVersion: helm.toolkit.fluxcd.io/v2
   kagent:
     # -- The kagent controller's gRPC API (`grpc://host:port` or
-    # `grpcs://host[:port]`), through which the erasure deletes a deleted
+    # `grpcs://host[:port]`), through which cleanup deletes a deleted
     # organization's sessions, as the operator's ServiceAccount. Empty skips
     # them; required with `curated.enabled`.
     target: ""
@@ -147,7 +160,7 @@ erasure:
     # controller's machine audience.
     audience: kagent
   substrate:
-    # -- Substrate's ate-api (`grpcs://host[:port]`), which the erasure asks
+    # -- Substrate's ate-api (`grpcs://host[:port]`), which the operator asks
     # until a deleted organization has no actor left. Empty skips the wait;
     # required with `curated.enabled`.
     target: ""

@@ -45,6 +45,8 @@ func main() {
 func run() error {
 	var (
 		cfg                       controller.Config
+		snapshotEndpoint          string
+		snapshotUsePathStyle      bool
 		networkPolicyFlavor       string
 		networkPolicies           string
 		curatedCopies             bool
@@ -75,20 +77,22 @@ func run() error {
 	flag.StringVar(&cfg.HelmClusterRole, "helm-cluster-role", "agent-platform-tenant-flux", "ClusterRole bound to --helmrelease-service-account in every organization namespace")
 	flag.StringVar(&serviceAccountBindings, "service-account-bindings", "", `JSON list of {"clusterRole": ..., "serviceAccount": {"namespace": ..., "name": ...}}: each ClusterRole is bound to that ServiceAccount of another namespace in every organization namespace, by a RoleBinding named after the ClusterRole, so it holds the ClusterRole there and nowhere it is not bound (Substrate's credential providers); a ClusterRole removed from the list loses its bindings; empty binds none`)
 	flag.StringVar(&cfg.SnapshotBucket, "snapshot-bucket", "", "Bucket of the organizations' worker snapshots: status.snapshotPrefix is s3://<bucket>/<uid>; empty leaves it empty")
+	flag.StringVar(&snapshotEndpoint, "snapshot-endpoint", "", "S3 endpoint URL for snapshot cleanup; empty uses the AWS endpoint")
+	flag.BoolVar(&snapshotUsePathStyle, "snapshot-use-path-style", false, "Address snapshot buckets in the URL path")
 	flag.BoolVar(&curatedCopies, "curated-copies", false, "Copy the curated objects of --platform-namespace into every organization namespace: the Harnesses its spec.harnesses names, the WorkerPool --curated-worker-pool with its ServiceAccount, the Agents and AgentTemplates labelled "+v1alpha1.CuratedLabel+"=true and the RemoteMCPServers they name. Needs --snapshot-bucket")
 	flag.StringVar(&curatedWorkerPool, "curated-worker-pool", "kagent-default", "The curated WorkerPool in --platform-namespace every organization gets a copy of")
-	flag.StringVar(&kagentAPIVersion, "kagent-api-version", "api.kagent.dev/v1alpha3", "api.kagent.dev API version of the Agents, AgentTemplates, Harnesses, ModelConfigs and RemoteMCPServers; the erasure deletes a deleted organization's Agents of it")
+	flag.StringVar(&kagentAPIVersion, "kagent-api-version", "api.kagent.dev/v1alpha3", "api.kagent.dev API version of the Agents, AgentTemplates, Harnesses, ModelConfigs and RemoteMCPServers; cleanup deletes a deleted organization's Agents of it")
 	flag.StringVar(&workerPoolAPIVersion, "workerpool-api-version", "ate.dev/v1alpha1", "ate.dev API version of the WorkerPool")
 	flag.StringVar(&objectQuota, "object-quota", "", "Comma-separated <resource>=<count> hard limits of the ResourceQuota "+controller.ObjectQuotaName+" kept in every organization namespace, for example configmaps=500,count/agents.api.kagent.dev=200; empty keeps none")
 	flag.StringVar(&kustomizationAPIVersion, "flux-kustomization-api-version", "kustomize.toolkit.fluxcd.io/v1", "kustomize.toolkit.fluxcd.io API version of the organizations' Flux Kustomizations and of the installation's")
-	flag.StringVar(&helmReleaseAPIVersion, "flux-helmrelease-api-version", "helm.toolkit.fluxcd.io/v2", "helm.toolkit.fluxcd.io API version of the HelmReleases the erasure deletes")
-	flag.StringVar(&kagentSessions.Target, "kagent-target", "", "The kagent controller's gRPC API, grpc://host:port or grpcs://host[:port], through which the erasure deletes a deleted organization's sessions; empty skips them. Needed with --curated-copies")
+	flag.StringVar(&helmReleaseAPIVersion, "flux-helmrelease-api-version", "helm.toolkit.fluxcd.io/v2", "helm.toolkit.fluxcd.io API version of the HelmReleases cleanup deletes")
+	flag.StringVar(&kagentSessions.Target, "kagent-target", "", "The kagent controller's gRPC API, grpc://host:port or grpcs://host[:port], through which cleanup deletes a deleted organization's sessions; empty skips them. Needed with --curated-copies")
 	flag.StringVar(&kagentSessions.CAFile, "kagent-ca-file", "", "CA bundle of a grpcs --kagent-target; empty uses the system roots")
 	flag.StringVar(&kagentSessions.TokenFile, "kagent-token-file", "/var/run/secrets/agent-platform-operator/kagent/token", "Projected ServiceAccount token of the kagent controller's machine audience, sent to --kagent-target")
-	flag.StringVar(&substrateAPI.Target, "substrate-target", "", "Substrate's ate-api, grpcs://host[:port], which the erasure asks for a deleted organization's actors; empty skips the wait. Needed with --curated-copies")
+	flag.StringVar(&substrateAPI.Target, "substrate-target", "", "Substrate's ate-api, grpcs://host[:port], which the operator asks for a deleted organization's actors; empty skips the wait. Needed with --curated-copies")
 	flag.StringVar(&substrateAPI.CAFile, "substrate-ca-file", "", "CA bundle of --substrate-target; empty uses the system roots")
 	flag.StringVar(&substrateAPI.TokenFile, "substrate-token-file", "/var/run/secrets/agent-platform-operator/substrate/token", "Projected ServiceAccount token of an audience ate-api trusts, sent to --substrate-target")
-	flag.StringVar(&cfg.Flux.Namespace, "flux-namespace", "", "Namespace of the installation's Flux source and SOPS key, where an organization's Flux Kustomization and Flux ServiceAccount live, labelled "+v1alpha1.OrganizationUIDLabel+"=<its UID>; the erasure deletes them there. Empty: there are none")
+	flag.StringVar(&cfg.Flux.Namespace, "flux-namespace", "", "Namespace of the installation's Flux source and SOPS key, where an organization's Flux Kustomization and Flux ServiceAccount live, labelled "+v1alpha1.OrganizationUIDLabel+"=<its UID>; cleanup deletes them there. Empty: there are none")
 	flag.StringVar(&cfg.Flux.SourceKind, "flux-source-kind", "GitRepository", "Kind of the installation's Flux source in --flux-namespace: GitRepository or OCIRepository")
 	flag.StringVar(&cfg.Flux.SourceName, "flux-source-name", "", "The installation's Flux source in --flux-namespace. Set: commit mode, every organization gets, in --flux-namespace, a Kustomization applying its path from this source into its namespace and the Flux ServiceAccount that Kustomization runs as, both named after the organization namespace. Empty: none. Needs --flux-namespace")
 	flag.StringVar(&cfg.Flux.DecryptionSecret, "flux-decryption-secret", "", "The installation's SOPS key Secret in --flux-namespace, which the organizations' Kustomizations decrypt with; empty decrypts nothing")
@@ -97,7 +101,7 @@ func run() error {
 	flag.StringVar(&cfg.Flux.ClusterRole, "organization-flux-cluster-role", "agent-platform:organization-flux", "ClusterRole an organization's Flux ServiceAccount is bound to, in its organization namespace only")
 	flag.StringVar(&installationKustomization, "installation-kustomization", "", "<namespace>/<name> of the installation's Kustomization that applies the AgentPlatformOrganizations (a bare name is in --flux-namespace). An organization it applied is Orphaned while it is missing from its inventory. Empty: no Orphaned condition")
 	flag.DurationVar(&cfg.Erasure.SnapshotDelay, "snapshot-erase-delay", 5*time.Minute, "How long after the first deletion of a deleted organization's snapshot prefix it is deleted again: at least Substrate's --actor-workflow-deadline (5m by default), so an upload that started before the last actor went has ended")
-	flag.DurationVar(&cfg.Erasure.Poll, "erasure-poll-interval", 10*time.Second, "How often an erasure step that waits for something to be gone looks again")
+	flag.DurationVar(&cfg.Erasure.Poll, "erasure-poll-interval", 10*time.Second, "How often a cleanup step that waits for something to be gone looks again")
 	flag.DurationVar(&syncPeriod, "sync-period", 10*time.Minute, "How often every organization is reconciled without a change")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "Address the metrics endpoint binds to; 0 disables it")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "Address the health probes bind to")
@@ -158,7 +162,7 @@ func run() error {
 	cfg.Erasure.HelmRelease = helmReleaseGV.WithKind("HelmRelease")
 	if curatedCopies {
 		if kagentSessions.Target == "" || substrateAPI.Target == "" {
-			return errors.New("--curated-copies needs --kagent-target and --substrate-target: a deleted organization's sessions and actors are erased through them")
+			return errors.New("--curated-copies needs --kagent-target and --substrate-target: a deleted organization's sessions and actors are removed through them")
 		}
 		if cfg.SnapshotBucket == "" {
 			return errors.New("--curated-copies needs --snapshot-bucket: a Harness copy's snapshot location is s3://<bucket>/<uid>/<harness>")
@@ -190,7 +194,7 @@ func run() error {
 		cfg.Erasure.Actors = substrate.New(conn)
 	}
 	if cfg.SnapshotBucket != "" {
-		s3, err := snapshots.NewS3(context.Background())
+		s3, err := snapshots.NewS3(context.Background(), snapshotEndpoint, snapshotUsePathStyle)
 		if err != nil {
 			return err
 		}

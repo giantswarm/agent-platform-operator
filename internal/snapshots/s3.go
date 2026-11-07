@@ -27,16 +27,18 @@ const timeout = 5 * time.Minute
 type S3 struct{ client *s3.Client }
 
 // NewS3 is an S3 client with the default credential chain.
-func NewS3(ctx context.Context) (*S3, error) {
-	cfg, err := config.LoadDefaultConfig(ctx)
+func NewS3(ctx context.Context, endpoint string, usePathStyle bool) (*S3, error) {
+	configuration, err := config.LoadDefaultConfig(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("load the AWS configuration: %w", err)
 	}
-	return &S3{client: s3.NewFromConfig(cfg)}, nil
+	return &S3{client: s3.NewFromConfig(configuration, func(options *s3.Options) {
+		if endpoint != "" {
+			options.BaseEndpoint = aws.String(endpoint)
+		}
+		options.UsePathStyle = usePathStyle
+	})}, nil
 }
-
-// NewS3WithClient is an S3 on client.
-func NewS3WithClient(client *s3.Client) *S3 { return &S3{client: client} }
 
 // DeletePrefix deletes every object under prefix, s3://<bucket>/<path>: the
 // objects whose keys start with <path>/.
