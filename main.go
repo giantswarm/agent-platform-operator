@@ -45,6 +45,8 @@ func main() {
 func run() error {
 	var (
 		cfg                       controller.Config
+		snapshotEndpoint          string
+		snapshotUsePathStyle      bool
 		networkPolicyFlavor       string
 		networkPolicies           string
 		curatedCopies             bool
@@ -75,6 +77,8 @@ func run() error {
 	flag.StringVar(&cfg.HelmClusterRole, "helm-cluster-role", "agent-platform-tenant-flux", "ClusterRole bound to --helmrelease-service-account in every organization namespace")
 	flag.StringVar(&serviceAccountBindings, "service-account-bindings", "", `JSON list of {"clusterRole": ..., "serviceAccount": {"namespace": ..., "name": ...}}: each ClusterRole is bound to that ServiceAccount of another namespace in every organization namespace, by a RoleBinding named after the ClusterRole, so it holds the ClusterRole there and nowhere it is not bound (Substrate's credential providers); a ClusterRole removed from the list loses its bindings; empty binds none`)
 	flag.StringVar(&cfg.SnapshotBucket, "snapshot-bucket", "", "Bucket of the organizations' worker snapshots: status.snapshotPrefix is s3://<bucket>/<uid>; empty leaves it empty")
+	flag.StringVar(&snapshotEndpoint, "snapshot-endpoint", "", "S3 endpoint URL for snapshot erasure; empty uses the AWS endpoint")
+	flag.BoolVar(&snapshotUsePathStyle, "snapshot-use-path-style", false, "Address snapshot buckets in the URL path")
 	flag.BoolVar(&curatedCopies, "curated-copies", false, "Copy the curated objects of --platform-namespace into every organization namespace: the Harnesses its spec.harnesses names, the WorkerPool --curated-worker-pool with its ServiceAccount, the Agents and AgentTemplates labelled "+v1alpha1.CuratedLabel+"=true and the RemoteMCPServers they name. Needs --snapshot-bucket")
 	flag.StringVar(&curatedWorkerPool, "curated-worker-pool", "kagent-default", "The curated WorkerPool in --platform-namespace every organization gets a copy of")
 	flag.StringVar(&kagentAPIVersion, "kagent-api-version", "api.kagent.dev/v1alpha3", "api.kagent.dev API version of the Agents, AgentTemplates, Harnesses, ModelConfigs and RemoteMCPServers; the erasure deletes a deleted organization's Agents of it")
@@ -190,7 +194,7 @@ func run() error {
 		cfg.Erasure.Actors = substrate.New(conn)
 	}
 	if cfg.SnapshotBucket != "" {
-		s3, err := snapshots.NewS3(context.Background())
+		s3, err := snapshots.NewS3(context.Background(), snapshotEndpoint, snapshotUsePathStyle)
 		if err != nil {
 			return err
 		}
