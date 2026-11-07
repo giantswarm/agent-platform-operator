@@ -529,9 +529,39 @@
                     "type": "string",
                     "description": "Bucket of the organizations' worker snapshots: an organization's `status.snapshotPrefix` is `s3://<bucket>/<uid>`. Empty leaves it empty."
                 },
+                "credentials": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "accessKeyIdKey": {
+                            "type": "string",
+                            "description": "Key of the access key ID in the Secret."
+                        },
+                        "existingSecret": {
+                            "type": "string",
+                            "description": "Secret in the operator namespace containing the S3 credential pair. Empty uses the default AWS credential chain."
+                        },
+                        "secretAccessKeyKey": {
+                            "type": "string",
+                            "description": "Key of the secret access key in the Secret."
+                        },
+                        "sessionTokenKey": {
+                            "type": "string",
+                            "description": "Optional key of a session token in the Secret."
+                        }
+                    }
+                },
+                "endpoint": {
+                    "type": "string",
+                    "description": "S3 endpoint URL; empty uses the AWS endpoint."
+                },
                 "region": {
                     "type": "string",
                     "description": "AWS region of the bucket, the AWS_REGION of the operator; empty takes the one the pod's environment sets, if any."
+                },
+                "usePathStyle": {
+                    "type": "boolean",
+                    "description": "Address buckets in the URL path instead of the hostname."
                 }
             }
         },

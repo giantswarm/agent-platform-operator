@@ -11,9 +11,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/credentials"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -32,6 +29,10 @@ type fakeS3 struct {
 func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if r.URL.Path != "/agent-snapshots" || !strings.Contains(r.Header.Get("Authorization"), "Credential=id/") {
+		http.Error(w, "unexpected bucket path or credentials", http.StatusBadRequest)
+		return
+	}
 	q := r.URL.Query()
 	switch {
 	case r.Method == http.MethodGet && q.Get("list-type") == "2":
@@ -57,15 +58,15 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = fmt.Fprint(w, `</ListBucketResult>`)
 	case r.Method == http.MethodPost && q.Has("delete"):
 		body, _ := io.ReadAll(r.Body)
-		var req struct {
+		var request struct {
 			Objects []struct{ Key string } `xml:"Object"`
 		}
-		if err := xml.Unmarshal(body, &req); err != nil {
+		if err := xml.Unmarshal(body, &request); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		_, _ = fmt.Fprint(w, `<DeleteResult>`)
-		for _, o := range req.Objects {
+		for _, o := range request.Objects {
 			if f.refuse[o.Key] {
 				_, _ = fmt.Fprintf(w, `<Error><Key>%s</Key><Code>AccessDenied</Code><Message>Access Denied</Message></Error>`, o.Key)
 				continue
@@ -82,10 +83,13 @@ func client(t *testing.T, f *fakeS3) *snapshots.S3 {
 	t.Helper()
 	srv := httptest.NewServer(f)
 	t.Cleanup(srv.Close)
-	return snapshots.NewS3WithClient(s3.New(s3.Options{
-		BaseEndpoint: aws.String(srv.URL), UsePathStyle: true, Region: "eu-west-1",
-		Credentials: credentials.NewStaticCredentialsProvider("id", "secret", ""),
-	}))
+	t.Setenv("AWS_REGION", "eu-west-1")
+	t.Setenv("AWS_ACCESS_KEY_ID", "id")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	t.Setenv("AWS_SESSION_TOKEN", "")
+	client, err := snapshots.NewS3(t.Context(), srv.URL, true)
+	require.NoError(t, err)
+	return client
 }
 
 func TestDeletePrefixDeletesEveryObjectUnderThePrefixOnly(t *testing.T) {
@@ -108,5 +112,45 @@ func TestDeletePrefixReportsAKeyTheBucketRefused(t *testing.T) {
 func TestDeletePrefixRefusesAPrefixWithoutAPath(t *testing.T) {
 	for _, prefix := range []string{"s3://agent-snapshots", "s3://agent-snapshots/", "agent-snapshots/0b3c"} {
 		require.Error(t, client(t, &fakeS3{}).DeletePrefix(t.Context(), prefix), prefix)
+	}
+}
+
+func TestDefaultEndpointUsesSDKEnvironment(t *testing.T) {
+	store := &fakeS3{keys: []string{"organization/snapshot"}}
+	server := httptest.NewServer(store)
+	t.Cleanup(server.Close)
+	t.Setenv("AWS_ENDPOINT_URL_S3", server.URL)
+	t.Setenv("AWS_REGION", "eu-west-1")
+	t.Setenv("AWS_ACCESS_KEY_ID", "id")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	t.Setenv("AWS_SESSION_TOKEN", "")
+	client, err := snapshots.NewS3(t.Context(), "", false)
+	require.NoError(t, err)
+	require.NoError(t, client.DeletePrefix(t.Context(), "s3://agent-snapshots/organization"))
+	require.Equal(t, store.keys, store.deleted)
+}
+
+func TestDeletePrefixReportsProtocolFailures(t *testing.T) {
+	for _, method := range []string{http.MethodGet, http.MethodPost} {
+		t.Run(method, func(t *testing.T) {
+			store := &fakeS3{keys: []string{"organization/snapshot"}}
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				if request.Method == method {
+					writer.WriteHeader(http.StatusForbidden)
+					_, _ = io.WriteString(writer, "<Error><Code>AccessDenied</Code><Message>Access Denied</Message></Error>")
+					return
+				}
+				store.ServeHTTP(writer, request)
+			}))
+			t.Cleanup(server.Close)
+			t.Setenv("AWS_REGION", "eu-west-1")
+			t.Setenv("AWS_ACCESS_KEY_ID", "id")
+			t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+			t.Setenv("AWS_SESSION_TOKEN", "")
+			client, err := snapshots.NewS3(t.Context(), server.URL, true)
+			require.NoError(t, err)
+			require.ErrorContains(t, client.DeletePrefix(t.Context(), "s3://agent-snapshots/organization"), "AccessDenied")
+			require.Empty(t, store.deleted)
+		})
 	}
 }

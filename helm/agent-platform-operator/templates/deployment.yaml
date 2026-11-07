@@ -42,6 +42,12 @@ spec:
             {{- with .Values.snapshots.bucket }}
             - --snapshot-bucket={{ . }}
             {{- end }}
+            {{- with .Values.snapshots.endpoint }}
+            - {{ printf "--snapshot-endpoint=%s" . | quote }}
+            {{- end }}
+            {{- if .Values.snapshots.usePathStyle }}
+            - --snapshot-use-path-style
+            {{- end }}
             {{- if .Values.curated.enabled }}
             {{- if not (and .Values.erasure.kagent.target .Values.erasure.substrate.target) }}
             {{- fail "curated.enabled needs erasure.kagent.target and erasure.substrate.target: a deleted organization's sessions and actors are erased through them" }}
@@ -111,10 +117,33 @@ spec:
             {{- end }}
             - --sync-period={{ .Values.syncPeriod }}
             - --leader-election-namespace={{ .Release.Namespace }}
-          {{- with .Values.snapshots.region }}
+          {{- if or .Values.snapshots.region .Values.snapshots.credentials.existingSecret }}
           env:
+            {{- with .Values.snapshots.region }}
             - name: AWS_REGION
               value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.snapshots.credentials }}
+            {{- if .existingSecret }}
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .existingSecret | quote }}
+                  key: {{ .accessKeyIdKey | quote }}
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .existingSecret | quote }}
+                  key: {{ .secretAccessKeyKey | quote }}
+            {{- with .sessionTokenKey }}
+            - name: AWS_SESSION_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.snapshots.credentials.existingSecret | quote }}
+                  key: {{ . | quote }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
           {{- end }}
           ports:
             - name: metrics
