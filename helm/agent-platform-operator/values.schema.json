@@ -158,7 +158,7 @@
                         },
                         "target": {
                             "type": "string",
-                            "description": "The kagent controller's gRPC API (`grpc://host:port` or `grpcs://host[:port]`), through which the erasure deletes a deleted organization's sessions, as the operator's ServiceAccount. Empty skips them; required with `curated.enabled`."
+                            "description": "The kagent controller's gRPC API (`grpc://host:port` or `grpcs://host[:port]`), through which cleanup deletes a deleted organization's sessions, as the operator's ServiceAccount. Empty skips them; required with `curated.enabled`."
                         }
                     }
                 },
@@ -168,7 +168,7 @@
                 },
                 "pollInterval": {
                     "type": "string",
-                    "description": "How often an erasure step that waits for something to be gone looks again."
+                    "description": "How often a cleanup step that waits for something to be gone looks again."
                 },
                 "snapshotDelay": {
                     "type": "string",
@@ -215,7 +215,7 @@
                         },
                         "target": {
                             "type": "string",
-                            "description": "Substrate's ate-api (`grpcs://host[:port]`), which the erasure asks until a deleted organization has no actor left. Empty skips the wait; required with `curated.enabled`."
+                            "description": "Substrate's ate-api (`grpcs://host[:port]`), which the operator asks until a deleted organization has no actor left. Empty skips the wait; required with `curated.enabled`."
                         }
                     }
                 }
@@ -480,7 +480,7 @@
             "properties": {
                 "annotations": {
                     "type": "object",
-                    "description": "Annotations of the operator's ServiceAccount, for example `eks.amazonaws.com/role-arn`: the IRSA role the erasure deletes snapshots under the organizations' prefixes of `snapshots.bucket` with.",
+                    "description": "Annotations of the operator's ServiceAccount, for example `eks.amazonaws.com/role-arn`: the IRSA role used to delete snapshots under the organizations' prefixes of `snapshots.bucket`.",
                     "additionalProperties": true
                 }
             }

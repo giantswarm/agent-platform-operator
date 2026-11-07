@@ -121,14 +121,14 @@ func (r *OrganizationReconciler) erase(ctx context.Context, org *v1alpha1.AgentP
 	}
 
 	step := slices.Index(erasureSteps, status.ErasureStep) + 1
-	message := fmt.Sprintf("erasure step %d of %d (%s)", step, len(erasureSteps)+1, status.ErasureStep)
+	message := fmt.Sprintf("cleanup step %d of %d (%s)", step, len(erasureSteps)+1, status.ErasureStep)
 	switch {
 	case err != nil:
 		message += " failed: " + err.Error()
 	case wait != nil:
 		message += ": " + wait.message
 	default:
-		message = "erased; removing the finalizer"
+		message = "cleanup complete; removing the finalizer"
 	}
 	meta.SetStatusCondition(&status.Conditions, metav1.Condition{
 		Type: v1alpha1.ConditionReady, Status: metav1.ConditionFalse, Reason: reasonDeleting,
@@ -182,7 +182,7 @@ func (r *OrganizationReconciler) eraseStep(ctx context.Context, org *v1alpha1.Ag
 	case v1alpha1.ErasureOutsideObjects:
 		return r.eraseOutsideObjects(ctx, org, ns)
 	}
-	return nil, fmt.Errorf("unknown erasure step %q", status.ErasureStep)
+	return nil, fmt.Errorf("unknown cleanup step %q", status.ErasureStep)
 }
 
 // erasedNamespace is the name of the organization namespace: the one
