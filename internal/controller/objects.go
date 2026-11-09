@@ -318,12 +318,13 @@ func (r *OrganizationReconciler) ensureRoleBinding(ctx context.Context, want *rb
 	return r.create(ctx, want, "RoleBinding")
 }
 
-// mirrorAdmins keeps in ns a mirror of every organizations-admin RoleBinding
-// of parent: the same name and roleRef, with the User and Group subjects
-// whose names do not start with system:. ServiceAccounts are never mirrored,
-// so the parent's automation cannot bind itself into every organization, and
-// system: names are the API server's own identities. A mirror whose parent
-// binding is gone, or left without subjects, is deleted.
+// mirrorAdmins keeps in ns a mirror of every admin binding of parent
+// (isMirroredAdmin): the same name, the roleRef organizations-admin, and the
+// User and Group subjects whose names do not start with system:.
+// ServiceAccounts are never mirrored, so the parent's automation cannot bind
+// itself into every organization, and system: names are the API server's own
+// identities. A mirror whose parent binding is gone, or left without subjects,
+// is deleted.
 func (r *OrganizationReconciler) mirrorAdmins(ctx context.Context, parent, ns string) error {
 	parents := &rbacv1.RoleBindingList{}
 	if err := r.Client.List(ctx, parents, client.InNamespace(parent)); err != nil {
@@ -333,7 +334,7 @@ func (r *OrganizationReconciler) mirrorAdmins(ctx context.Context, parent, ns st
 	var errs []error
 	for i := range parents.Items {
 		pb := &parents.Items[i]
-		if !isOrganizationsAdmin(pb.RoleRef) || pb.DeletionTimestamp != nil {
+		if !isMirroredAdmin(pb) || pb.DeletionTimestamp != nil {
 			continue
 		}
 		if pb.Name == FluxRoleBinding && r.Config.Flux.commitMode() {
@@ -358,7 +359,9 @@ func (r *OrganizationReconciler) mirrorAdmins(ctx context.Context, parent, ns st
 				Labels:      ownLabels(ScopeAdminMirror),
 				Annotations: map[string]string{CopiedFromAnnotation: parent + "/" + pb.Name},
 			},
-			RoleRef:  pb.RoleRef,
+			// Never the parent's roleRef: an rbac-operator binding refers
+			// to cluster-admin, which the operator may not bind.
+			RoleRef:  organizationsAdminRoleRef,
 			Subjects: subjects,
 		}
 	}

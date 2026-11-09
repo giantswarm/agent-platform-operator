@@ -28,6 +28,7 @@ const (
 	kindClusterRole = "ClusterRole"
 	adminsBinding   = "platform-team"
 	namesParent     = "org-names"
+	customerAdmins  = "customer-admins"
 )
 
 func TestOrganizationEnvtest(t *testing.T) {
@@ -218,6 +219,59 @@ func TestOrganizationEnvtest(t *testing.T) {
 		require.EventuallyWithT(t, func(ct *assert.CollectT) {
 			err := c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns.Name, Name: adminsBinding}, &rbacv1.RoleBinding{})
 			assert.True(ct, apierrors.IsNotFound(err), "the mirror is still there: %v", err)
+		}, timeout, tick)
+	})
+
+	t.Run("the subjects of rbac-operator's cluster-admin bindings in the parent hold organizations-admin", func(t *testing.T) {
+		org := c.organization(t, "org-rbacop", "customer")
+		ns := c.readyNamespace(t, org)
+		clusterAdmin := rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: kindClusterRole, Name: "cluster-admin"}
+		// As rbac-operator's namespaceauth writes it in org-<name>.
+		customers := &rbacv1.RoleBinding{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "write-all-customer-group", Namespace: "org-rbacop",
+				Labels: map[string]string{"giantswarm.io/managed-by": "rbac-operator"},
+			},
+			RoleRef: clusterAdmin,
+			Subjects: []rbacv1.Subject{
+				{Kind: rbacv1.GroupKind, APIGroup: rbacv1.GroupName, Name: customerAdmins},
+				{Kind: rbacv1.GroupKind, APIGroup: rbacv1.GroupName, Name: "customer-sre"},
+				{Kind: rbacv1.ServiceAccountKind, Name: "automation", Namespace: "default"},
+			},
+		}
+		require.NoError(t, c.admin.Create(t.Context(), customers))
+		// A cluster-admin binding rbac-operator did not write is not mirrored.
+		require.NoError(t, c.admin.Create(t.Context(), &rbacv1.RoleBinding{
+			ObjectMeta: metav1.ObjectMeta{Name: "hand-written-admins", Namespace: "org-rbacop"},
+			RoleRef:    clusterAdmin,
+			Subjects:   []rbacv1.Subject{{Kind: rbacv1.UserKind, APIGroup: rbacv1.GroupName, Name: "dave@example.com"}},
+		}))
+
+		organizationsAdmin := rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: kindClusterRole, Name: controller.OrganizationsAdminClusterRole}
+		require.EventuallyWithT(t, func(ct *assert.CollectT) {
+			mirror := &rbacv1.RoleBinding{}
+			if !assert.NoError(ct, c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns.Name, Name: customers.Name}, mirror)) {
+				return
+			}
+			assert.Equal(ct, organizationsAdmin, mirror.RoleRef)
+			assert.Equal(ct, []rbacv1.Subject{
+				{Kind: rbacv1.GroupKind, APIGroup: rbacv1.GroupName, Name: customerAdmins},
+				{Kind: rbacv1.GroupKind, APIGroup: rbacv1.GroupName, Name: "customer-sre"},
+			}, mirror.Subjects)
+		}, timeout, tick)
+		err := c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns.Name, Name: "hand-written-admins"}, &rbacv1.RoleBinding{})
+		assert.True(t, apierrors.IsNotFound(err), "a cluster-admin binding without rbac-operator's label was mirrored: %v", err)
+
+		// A subject that leaves the parent binding leaves the mirror.
+		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKeyFromObject(customers), customers))
+		customers.Subjects = []rbacv1.Subject{customers.Subjects[0], customers.Subjects[2]}
+		require.NoError(t, c.admin.Update(t.Context(), customers))
+		require.EventuallyWithT(t, func(ct *assert.CollectT) {
+			mirror := &rbacv1.RoleBinding{}
+			if !assert.NoError(ct, c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns.Name, Name: customers.Name}, mirror)) {
+				return
+			}
+			assert.Equal(ct, []rbacv1.Subject{{Kind: rbacv1.GroupKind, APIGroup: rbacv1.GroupName, Name: customerAdmins}}, mirror.Subjects)
 		}, timeout, tick)
 	})
 
