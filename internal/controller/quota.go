@@ -21,7 +21,8 @@ const ObjectQuotaName = "agent-platform-organization-objects"
 
 // ParseObjectQuota reads the hard limits of ObjectQuotaName as
 // comma-separated <resource>=<count> pairs, for example
-// configmaps=500,count/agents.api.kagent.dev=200; empty is none.
+// configmaps=500,count/agents.api.kagent.dev=200; empty is none. A resource
+// listed twice takes its last count.
 func ParseObjectQuota(s string) (corev1.ResourceList, error) {
 	var out corev1.ResourceList
 	for pair := range strings.SplitSeq(s, ",") {
@@ -36,9 +37,6 @@ func ParseObjectQuota(s string) (corev1.ResourceList, error) {
 		q, err := resource.ParseQuantity(strings.TrimSpace(count))
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", name, err)
-		}
-		if _, dup := out[corev1.ResourceName(name)]; dup {
-			return nil, fmt.Errorf("%s is listed twice", name)
 		}
 		if out == nil {
 			out = corev1.ResourceList{}

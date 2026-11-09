@@ -32,7 +32,7 @@ func TestParseObjectQuota(t *testing.T) {
 		},
 		{name: "a pair without a count", in: "configmaps", wantErr: `"configmaps" is not <resource>=<count>`},
 		{name: "a pair without a resource", in: "=5", wantErr: `"=5" is not <resource>=<count>`},
-		{name: "a resource listed twice", in: "configmaps=5,configmaps=6", wantErr: "configmaps is listed twice"},
+		{name: "a resource listed twice takes its last count", in: "configmaps=5, configmaps=6", want: corev1.ResourceList{corev1.ResourceConfigMaps: resource.MustParse("6")}},
 		{name: "a count that is not a quantity", in: "configmaps=many", wantErr: "configmaps: ", wantIs: resource.ErrFormatWrong},
 	}
 	for _, tc := range tests {
