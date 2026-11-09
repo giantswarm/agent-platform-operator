@@ -12,9 +12,7 @@ import (
 	"strings"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
-	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -126,8 +124,8 @@ func run() error {
 			return fmt.Errorf("--service-account-bindings: the RoleBinding of ClusterRole %q would take the name of the operator's Helm or Flux binding", b.ClusterRole)
 		}
 	}
-	if cfg.ObjectQuota, err = parseQuota(objectQuota); err != nil {
-		return err
+	if cfg.ObjectQuota, err = controller.ParseObjectQuota(objectQuota); err != nil {
+		return fmt.Errorf("--object-quota: %w", err)
 	}
 	kagentGV, err := schema.ParseGroupVersion(kagentAPIVersion)
 	if err != nil {
@@ -275,26 +273,6 @@ func networkPolicyGVK(flavor string) (schema.GroupVersionKind, error) {
 		return schema.GroupVersionKind{Group: "cilium.io", Version: "v2", Kind: "CiliumNetworkPolicy"}, nil
 	}
 	return schema.GroupVersionKind{}, fmt.Errorf("--network-policy-flavor %q: kubernetes, cilium or empty", flavor)
-}
-
-// parseQuota reads <resource>=<count> pairs, comma-separated.
-func parseQuota(s string) (corev1.ResourceList, error) {
-	var out corev1.ResourceList
-	for _, pair := range splitList(s) {
-		name, count, ok := strings.Cut(pair, "=")
-		if !ok {
-			return nil, fmt.Errorf("--object-quota: %q is not <resource>=<count>", pair)
-		}
-		q, err := resource.ParseQuantity(strings.TrimSpace(count))
-		if err != nil {
-			return nil, fmt.Errorf("--object-quota: %s: %w", name, err)
-		}
-		if out == nil {
-			out = corev1.ResourceList{}
-		}
-		out[corev1.ResourceName(strings.TrimSpace(name))] = q
-	}
-	return out, nil
 }
 
 func splitList(s string) []string {

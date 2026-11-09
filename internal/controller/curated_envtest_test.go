@@ -2,7 +2,6 @@ package controller_test
 
 import (
 	"context"
-	"fmt"
 	"maps"
 	"testing"
 
@@ -12,9 +11,11 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/giantswarm/agent-platform-operator/api/v1alpha1"
@@ -306,7 +307,6 @@ func curatedCases(t *testing.T, c *cluster) {
 		quota := &corev1.ResourceQuota{}
 		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns, Name: controller.ObjectQuotaName}, quota))
 		assert.True(t, equality.Semantic.DeepEqual(c.config.ObjectQuota, quota.Spec.Hard), "hard: %v", quota.Spec.Hard)
-		// No other case writes ConfigMaps.
 		configMapQuota := quota.Spec.Hard[corev1.ResourceConfigMaps]
 		require.False(t, configMapQuota.IsZero(), "the chart's default quota counts no ConfigMaps")
 		// From the recorded usage on, the quota admission counts.
@@ -317,9 +317,17 @@ func curatedCases(t *testing.T, c *cluster) {
 			}
 		}, timeout, tick)
 
-		for i := range configMapQuota.Value() {
-			require.NoError(t, c.admin.Create(t.Context(), &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("cm-%d", i), Namespace: ns}}))
-		}
+		// Record one ConfigMap short of the count as used, as the quota
+		// controller would after that many, instead of creating them.
+		require.NoError(t, retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			got := &corev1.ResourceQuota{}
+			if err := c.admin.Get(t.Context(), client.ObjectKeyFromObject(quota), got); err != nil {
+				return err
+			}
+			got.Status.Used[corev1.ResourceConfigMaps] = *resource.NewQuantity(configMapQuota.Value()-1, resource.DecimalSI)
+			return c.admin.Status().Update(t.Context(), got)
+		}))
+		require.NoError(t, c.admin.Create(t.Context(), &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "the-last", Namespace: ns}}), "the last ConfigMap the quota allows was refused")
 		err := c.admin.Create(t.Context(), &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "one-too-many", Namespace: ns}})
 		require.True(t, apierrors.IsForbidden(err), "a ConfigMap over the quota was not refused: %v", err)
 		assert.Contains(t, err.Error(), "exceeded quota: "+controller.ObjectQuotaName)
