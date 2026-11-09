@@ -226,6 +226,14 @@ func TestOrganizationEnvtest(t *testing.T) {
 		org := c.organization(t, "org-rbacop", "customer")
 		ns := c.readyNamespace(t, org)
 		clusterAdmin := rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: kindClusterRole, Name: "cluster-admin"}
+		// A cluster-admin binding rbac-operator did not write is not mirrored. It exists
+		// before the rbac-operator binding, so the reconcile that mirrors that
+		// one lists it too.
+		require.NoError(t, c.admin.Create(t.Context(), &rbacv1.RoleBinding{
+			ObjectMeta: metav1.ObjectMeta{Name: "hand-written-admins", Namespace: "org-rbacop"},
+			RoleRef:    clusterAdmin,
+			Subjects:   []rbacv1.Subject{{Kind: rbacv1.UserKind, APIGroup: rbacv1.GroupName, Name: "dave@example.com"}},
+		}))
 		// As rbac-operator's namespaceauth writes it in org-<name>.
 		customers := &rbacv1.RoleBinding{
 			ObjectMeta: metav1.ObjectMeta{
@@ -240,12 +248,6 @@ func TestOrganizationEnvtest(t *testing.T) {
 			},
 		}
 		require.NoError(t, c.admin.Create(t.Context(), customers))
-		// A cluster-admin binding rbac-operator did not write is not mirrored.
-		require.NoError(t, c.admin.Create(t.Context(), &rbacv1.RoleBinding{
-			ObjectMeta: metav1.ObjectMeta{Name: "hand-written-admins", Namespace: "org-rbacop"},
-			RoleRef:    clusterAdmin,
-			Subjects:   []rbacv1.Subject{{Kind: rbacv1.UserKind, APIGroup: rbacv1.GroupName, Name: "dave@example.com"}},
-		}))
 
 		organizationsAdmin := rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: kindClusterRole, Name: controller.OrganizationsAdminClusterRole}
 		require.EventuallyWithT(t, func(ct *assert.CollectT) {

@@ -159,8 +159,9 @@ type Config struct {
 // CacheOptions limit what the manager caches: the organization namespaces,
 // the reconciler's own ServiceAccounts, ResourceQuotas and, in the Flux
 // namespace, Kustomizations, the installation's Kustomization, every RoleBinding
-// (a parent's organizations-admin bindings carry no label to select them by,
-// and its rbac-operator bindings are selected by their roleRef as well),
+// (a parent's admin bindings carry no label common to all of them: its
+// organizations-admin bindings have none, and its rbac-operator bindings are
+// told apart by roleRef and label, isMirroredAdmin),
 // the metadata of every ModelConfig and, of the network policies and the
 // curated kinds, the platform namespace's and the reconciler's copies.
 //

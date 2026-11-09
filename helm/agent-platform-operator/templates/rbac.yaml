@@ -50,9 +50,9 @@ rules:
   - apiGroups: [""]
     resources: ["namespaces"]
     verbs: ["get", "list", "watch", "create", "delete"]
-  # The parents' organizations-admin bindings and rbac-operator's cluster-admin
-  # bindings are read; the mirrors and the
-  # Helm ServiceAccount's binding are written.
+  # The parents' organizations-admin bindings and rbac-operator's
+  # cluster-admin bindings are read; the mirrors and the Helm ServiceAccount's
+  # binding are written.
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["rolebindings"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
