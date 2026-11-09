@@ -56,6 +56,8 @@ In the namespace the operator keeps, from the first reconcile on:
 
   These parent bindings are not mirrored: a `cluster-admin` RoleBinding without that label (one written by hand in the parent namespace), and a binding to any other role. The operator never binds `cluster-admin` in the organization namespace.
 
+  The rule is the Go package `github.com/giantswarm/agent-platform-operator/pkg/adminmirror` (`IsMirroredAdmin`, `MirroredSubjects`, and the table `Cases`). It is the contract this operator and agent-manager follow: agent-manager's `create_organization` pre-write check (giantswarm/agent-manager#335) predicts the organization's first admins with these functions only, and both repositories' tests run `Cases`. The package imports only the Kubernetes API types.
+
 - the ResourceQuota `agent-platform-organization-objects` on object counts (`objectQuota`), so one organization cannot flood the API server with objects;
 - in commit mode, the RoleBinding `organization-flux` that binds the organization's Flux ServiceAccount to `commitMode.clusterRole` (`agent-platform:organization-flux`).
 

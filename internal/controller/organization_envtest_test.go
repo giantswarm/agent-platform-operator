@@ -2,6 +2,7 @@ package controller_test
 
 import (
 	"context"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/giantswarm/agent-platform-operator/api/v1alpha1"
 	"github.com/giantswarm/agent-platform-operator/internal/controller"
+	"github.com/giantswarm/agent-platform-operator/pkg/adminmirror"
 )
 
 const (
@@ -28,7 +30,9 @@ const (
 	kindClusterRole = "ClusterRole"
 	adminsBinding   = "platform-team"
 	namesParent     = "org-names"
-	customerAdmins  = "customer-admins"
+	// customerGroupBinding is rbac-operator's binding of the customer admin
+	// groups, a case of adminmirror.Cases.
+	customerGroupBinding = "write-all-customer-group"
 )
 
 func TestOrganizationEnvtest(t *testing.T) {
@@ -222,58 +226,55 @@ func TestOrganizationEnvtest(t *testing.T) {
 		}, timeout, tick)
 	})
 
-	t.Run("the subjects of rbac-operator's cluster-admin bindings in the parent hold organizations-admin", func(t *testing.T) {
-		org := c.organization(t, "org-rbacop", "customer")
+	t.Run("the parent bindings of adminmirror.Cases are mirrored as the table says", func(t *testing.T) {
+		const parent = "org-rbacop"
+		org := c.organization(t, parent, "customer")
 		ns := c.readyNamespace(t, org)
-		clusterAdmin := rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: kindClusterRole, Name: "cluster-admin"}
-		// A cluster-admin binding rbac-operator did not write is not mirrored. It exists
-		// before the rbac-operator binding, so the reconcile that mirrors that
-		// one lists it too.
-		require.NoError(t, c.admin.Create(t.Context(), &rbacv1.RoleBinding{
-			ObjectMeta: metav1.ObjectMeta{Name: "hand-written-admins", Namespace: "org-rbacop"},
-			RoleRef:    clusterAdmin,
-			Subjects:   []rbacv1.Subject{{Kind: rbacv1.UserKind, APIGroup: rbacv1.GroupName, Name: "dave@example.com"}},
-		}))
-		// As rbac-operator's namespaceauth writes it in org-<name>.
-		customers := &rbacv1.RoleBinding{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: "write-all-customer-group", Namespace: "org-rbacop",
-				Labels: map[string]string{"giantswarm.io/managed-by": "rbac-operator"},
-			},
-			RoleRef: clusterAdmin,
-			Subjects: []rbacv1.Subject{
-				{Kind: rbacv1.GroupKind, APIGroup: rbacv1.GroupName, Name: customerAdmins},
-				{Kind: rbacv1.GroupKind, APIGroup: rbacv1.GroupName, Name: "customer-sre"},
-				{Kind: rbacv1.ServiceAccountKind, Name: "automation", Namespace: "default"},
-			},
+		cases := adminmirror.Cases()
+		// The bindings without a mirror first, so the reconcile that writes
+		// the first mirror lists them too.
+		sort.SliceStable(cases, func(i, j int) bool { return len(cases[i].Mirrored) < len(cases[j].Mirrored) })
+		for _, tc := range cases {
+			rb := tc.Binding.DeepCopy()
+			rb.Namespace = parent
+			require.NoError(t, c.admin.Create(t.Context(), rb))
 		}
-		require.NoError(t, c.admin.Create(t.Context(), customers))
 
-		organizationsAdmin := rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: kindClusterRole, Name: controller.OrganizationsAdminClusterRole}
+		organizationsAdmin := rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: kindClusterRole, Name: adminmirror.OrganizationsAdminClusterRole}
 		require.EventuallyWithT(t, func(ct *assert.CollectT) {
-			mirror := &rbacv1.RoleBinding{}
-			if !assert.NoError(ct, c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns.Name, Name: customers.Name}, mirror)) {
-				return
+			for _, tc := range cases {
+				if len(tc.Mirrored) == 0 {
+					continue
+				}
+				mirror := &rbacv1.RoleBinding{}
+				if !assert.NoError(ct, c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns.Name, Name: tc.Binding.Name}, mirror)) {
+					continue
+				}
+				assert.Equal(ct, organizationsAdmin, mirror.RoleRef, tc.Binding.Name)
+				assert.Equal(ct, tc.Mirrored, mirror.Subjects, tc.Binding.Name)
 			}
-			assert.Equal(ct, organizationsAdmin, mirror.RoleRef)
-			assert.Equal(ct, []rbacv1.Subject{
-				{Kind: rbacv1.GroupKind, APIGroup: rbacv1.GroupName, Name: customerAdmins},
-				{Kind: rbacv1.GroupKind, APIGroup: rbacv1.GroupName, Name: "customer-sre"},
-			}, mirror.Subjects)
 		}, timeout, tick)
-		err := c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns.Name, Name: "hand-written-admins"}, &rbacv1.RoleBinding{})
-		assert.True(t, apierrors.IsNotFound(err), "a cluster-admin binding without rbac-operator's label was mirrored: %v", err)
+		for _, tc := range cases {
+			if len(tc.Mirrored) > 0 {
+				continue
+			}
+			err := c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns.Name, Name: tc.Binding.Name}, &rbacv1.RoleBinding{})
+			assert.True(t, apierrors.IsNotFound(err), "%s has a mirror: %v", tc.Binding.Name, err)
+		}
 
-		// A subject that leaves the parent binding leaves the mirror.
-		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKeyFromObject(customers), customers))
-		customers.Subjects = []rbacv1.Subject{customers.Subjects[0], customers.Subjects[2]}
+		// A subject that leaves rbac-operator's binding leaves the mirror.
+		customers := &rbacv1.RoleBinding{}
+		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKey{Namespace: parent, Name: customerGroupBinding}, customers))
+		left := customers.Subjects[0]
+		customers.Subjects = customers.Subjects[1:]
 		require.NoError(t, c.admin.Update(t.Context(), customers))
 		require.EventuallyWithT(t, func(ct *assert.CollectT) {
 			mirror := &rbacv1.RoleBinding{}
-			if !assert.NoError(ct, c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns.Name, Name: customers.Name}, mirror)) {
+			if !assert.NoError(ct, c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns.Name, Name: customerGroupBinding}, mirror)) {
 				return
 			}
-			assert.Equal(ct, []rbacv1.Subject{{Kind: rbacv1.GroupKind, APIGroup: rbacv1.GroupName, Name: customerAdmins}}, mirror.Subjects)
+			assert.NotContains(ct, mirror.Subjects, left)
+			assert.Equal(ct, adminmirror.MirroredSubjects(customers.Subjects), mirror.Subjects)
 		}, timeout, tick)
 	})
 

@@ -86,6 +86,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/giantswarm/agent-platform-operator/api/v1alpha1"
+	"github.com/giantswarm/agent-platform-operator/pkg/adminmirror"
 )
 
 const (
@@ -98,16 +99,9 @@ const (
 	ScopeAdminMirror = "organizations-admin-mirror"
 	// CopiedFromAnnotation names the object a copy or a mirror was made from.
 	CopiedFromAnnotation = "agent-platform.giantswarm.io/copied-from"
-	// OrganizationsAdminClusterRole is the ClusterRole whose RoleBindings in a
-	// parent namespace are mirrored into its organization namespaces.
-	OrganizationsAdminClusterRole = "agent-platform:organizations-admin"
-	// rbacOperatorLabel is the label rbac-operator sets, with the value
-	// rbac-operator, on every RoleBinding it writes; its cluster-admin
-	// bindings in a parent namespace are mirrored as organizations-admin.
-	rbacOperatorLabel = "giantswarm.io/managed-by"
-	rbacOperatorValue = "rbac-operator"
-	// clusterAdminClusterRole is the role of rbac-operator's admin bindings.
-	clusterAdminClusterRole = "cluster-admin"
+	// OrganizationsAdminClusterRole is the ClusterRole of every mirror of a
+	// parent namespace's admin bindings (adminmirror).
+	OrganizationsAdminClusterRole = adminmirror.OrganizationsAdminClusterRole
 	// NamespacePrefix starts the generateName of an organization namespace.
 	NamespacePrefix = "agents-"
 
@@ -161,7 +155,7 @@ type Config struct {
 // namespace, Kustomizations, the installation's Kustomization, every RoleBinding
 // (a parent's admin bindings carry no label common to all of them: its
 // organizations-admin bindings have none, and its rbac-operator bindings are
-// told apart by roleRef and label, isMirroredAdmin),
+// told apart by roleRef and label, adminmirror.IsMirroredAdmin),
 // the metadata of every ModelConfig and, of the network policies and the
 // curated kinds, the platform namespace's and the reconciler's copies.
 //
@@ -318,7 +312,7 @@ func (r *OrganizationReconciler) organizationsOf(ctx context.Context, namespace 
 
 func (r *OrganizationReconciler) organizationsOfBinding(ctx context.Context, o client.Object) []reconcile.Request {
 	var reqs []reconcile.Request
-	if rb, ok := o.(*rbacv1.RoleBinding); ok && isMirroredAdmin(rb) {
+	if rb, ok := o.(*rbacv1.RoleBinding); ok && adminmirror.IsMirroredAdmin(rb) {
 		reqs = r.organizationsOf(ctx, rb.Namespace)
 	}
 	// Any binding in an organization namespace: the reconciler's own, or
@@ -340,23 +334,6 @@ func (r *OrganizationReconciler) organizationsOfCopy(ctx context.Context, o clie
 
 // organizationsAdminRoleRef is the roleRef of every mirror.
 var organizationsAdminRoleRef = rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: kindClusterRole, Name: OrganizationsAdminClusterRole}
-
-// isMirroredAdmin reports whether a parent namespace's RoleBinding makes its
-// subjects admins of the parent's organizations: a binding to
-// organizations-admin, or a binding to cluster-admin that rbac-operator wrote
-// (rbacOperatorLabel). In a Giant Swarm Organization's namespace rbac-operator
-// writes the cluster-admin binding of the installation's customer admin groups
-// (write-all-customer-group) and a copy of every RoleBindingTemplate that
-// selects the organization; a cluster-admin binding written by hand is not
-// mirrored.
-func isMirroredAdmin(rb *rbacv1.RoleBinding) bool {
-	ref := rb.RoleRef
-	if ref.APIGroup != rbacv1.GroupName || ref.Kind != kindClusterRole {
-		return false
-	}
-	return ref.Name == OrganizationsAdminClusterRole ||
-		(ref.Name == clusterAdminClusterRole && rb.Labels[rbacOperatorLabel] == rbacOperatorValue)
-}
 
 // Reconcile keeps one organization.
 func (r *OrganizationReconciler) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
