@@ -29,17 +29,21 @@ func ParseObjectQuota(s string) (corev1.ResourceList, error) {
 			continue
 		}
 		name, count, ok := strings.Cut(pair, "=")
-		if !ok {
+		name = strings.TrimSpace(name)
+		if !ok || name == "" {
 			return nil, fmt.Errorf("%q is not <resource>=<count>", pair)
 		}
 		q, err := resource.ParseQuantity(strings.TrimSpace(count))
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", name, err)
 		}
+		if _, dup := out[corev1.ResourceName(name)]; dup {
+			return nil, fmt.Errorf("%s is listed twice", name)
+		}
 		if out == nil {
 			out = corev1.ResourceList{}
 		}
-		out[corev1.ResourceName(strings.TrimSpace(name))] = q
+		out[corev1.ResourceName(name)] = q
 	}
 	return out, nil
 }

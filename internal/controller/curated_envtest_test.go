@@ -327,7 +327,11 @@ func curatedCases(t *testing.T, c *cluster) {
 			got.Status.Used[corev1.ResourceConfigMaps] = *resource.NewQuantity(configMapQuota.Value()-1, resource.DecimalSI)
 			return c.admin.Status().Update(t.Context(), got)
 		}))
-		require.NoError(t, c.admin.Create(t.Context(), &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "the-last", Namespace: ns}}), "the last ConfigMap the quota allows was refused")
+		// The quota admission reads the quota from its informer: until that
+		// has the usage above, it answers Conflict.
+		require.NoError(t, retry.OnError(retry.DefaultBackoff, apierrors.IsConflict, func() error {
+			return c.admin.Create(t.Context(), &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "the-last", Namespace: ns}})
+		}), "the last ConfigMap the quota allows was refused")
 		err := c.admin.Create(t.Context(), &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "one-too-many", Namespace: ns}})
 		require.True(t, apierrors.IsForbidden(err), "a ConfigMap over the quota was not refused: %v", err)
 		assert.Contains(t, err.Error(), "exceeded quota: "+controller.ObjectQuotaName)

@@ -18,6 +18,7 @@ func TestParseObjectQuota(t *testing.T) {
 		in      string
 		want    corev1.ResourceList
 		wantErr string
+		wantIs  error
 	}{
 		{name: "empty", in: ""},
 		{name: "only separators", in: " , ,"},
@@ -30,7 +31,9 @@ func TestParseObjectQuota(t *testing.T) {
 			},
 		},
 		{name: "a pair without a count", in: "configmaps", wantErr: `"configmaps" is not <resource>=<count>`},
-		{name: "a count that is not a quantity", in: "configmaps=many", wantErr: "configmaps: quantities must match"},
+		{name: "a pair without a resource", in: "=5", wantErr: `"=5" is not <resource>=<count>`},
+		{name: "a resource listed twice", in: "configmaps=5,configmaps=6", wantErr: "configmaps is listed twice"},
+		{name: "a count that is not a quantity", in: "configmaps=many", wantErr: "configmaps: ", wantIs: resource.ErrFormatWrong},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -38,6 +41,9 @@ func TestParseObjectQuota(t *testing.T) {
 			if tc.wantErr != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tc.wantErr)
+				if tc.wantIs != nil {
+					assert.ErrorIs(t, err, tc.wantIs)
+				}
 				return
 			}
 			require.NoError(t, err)
