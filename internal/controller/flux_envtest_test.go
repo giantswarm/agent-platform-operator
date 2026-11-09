@@ -305,6 +305,8 @@ func fluxCases(t *testing.T, c *cluster) {
 		}))
 		// The status kustomize-controller records: settled (Ready for its
 		// generation), or reconciling, with the inventory of the last apply.
+		// revision is the lastAppliedRevision the next status records.
+		revision := "main@sha1:1111111111111111111111111111111111111111"
 		setStatus := func(settled bool, entries ...any) {
 			if entries == nil {
 				entries = []any{}
@@ -317,9 +319,10 @@ func fluxCases(t *testing.T, c *cluster) {
 				}
 				condition["lastTransitionTime"] = metav1.Now().UTC().Format(time.RFC3339)
 				got.Object["status"] = map[string]any{
-					"observedGeneration": got.GetGeneration(),
-					"conditions":         []any{condition},
-					"inventory":          map[string]any{"entries": entries},
+					"observedGeneration":  got.GetGeneration(),
+					"conditions":          []any{condition},
+					"inventory":           map[string]any{"entries": entries},
+					"lastAppliedRevision": revision,
 				}
 				assert.NoError(ct, c.admin.Status().Update(t.Context(), got))
 			}, timeout, tick)
@@ -337,7 +340,21 @@ func fluxCases(t *testing.T, c *cluster) {
 		ns := c.readyNamespace(t, org).Name
 		c.modelConfig(t, ns, "anthropic", false)
 		c.orphaned(t, org, metav1.ConditionFalse, v1alpha1.ReasonInInventory)
+		c.lastRevisionInGit(t, org, revision)
 		c.replicas(t, ns, 3)
+
+		// A new revision with the same inventory is recorded.
+		revision = "main@sha1:4444444444444444444444444444444444444444"
+		setInventory(entry("treasury"))
+		c.lastRevisionInGit(t, org, revision)
+		inGit := revision
+
+		// A settled status without an applied revision keeps the last one.
+		revision = ""
+		setInventory(entry("treasury"))
+		assert.Never(t, func() bool {
+			return c.get(t, org).Status.LastRevisionInGit != inGit
+		}, 2*time.Second, tick, "a status without lastAppliedRevision changed the last revision in git")
 
 		// While Flux reconciles, an organization it labelled may not be in the
 		// inventory yet: it is not Orphaned for that.
@@ -347,9 +364,12 @@ func fluxCases(t *testing.T, c *cluster) {
 			return cond == nil || cond.Status != metav1.ConditionFalse
 		}, 2*time.Second, tick, "Orphaned changed while the installation Kustomization reconciled")
 
-		// The file is gone from git: Orphaned, and the workers stop.
+		// The file is gone from git: Orphaned, and the workers stop. The
+		// last revision that held it stays.
+		revision = "main@sha1:2222222222222222222222222222222222222222"
 		setInventory()
 		c.orphaned(t, org, metav1.ConditionTrue, v1alpha1.ReasonMissingFromGit)
+		c.lastRevisionInGit(t, org, inGit)
 		c.replicas(t, ns, 0)
 
 		// agent-manager's delete pull request marked it: the delete merged.
@@ -362,8 +382,10 @@ func fluxCases(t *testing.T, c *cluster) {
 		c.replicas(t, ns, 0)
 
 		// The file is back: no longer Orphaned, and the workers run again.
+		revision = "main@sha1:3333333333333333333333333333333333333333"
 		setInventory(entry("treasury"))
 		c.orphaned(t, org, metav1.ConditionFalse, v1alpha1.ReasonInInventory)
+		c.lastRevisionInGit(t, org, revision)
 		c.replicas(t, ns, 3)
 
 		// The two-step delete: the delete pull request merged (DeleteMerged,
@@ -398,6 +420,7 @@ func fluxCases(t *testing.T, c *cluster) {
 		c.modelConfig(t, appliedNS, "anthropic", false)
 		c.replicas(t, appliedNS, 3)
 		assert.Nil(t, meta.FindStatusCondition(c.get(t, applied).Status.Conditions, v1alpha1.ConditionOrphaned))
+		assert.Empty(t, c.get(t, applied).Status.LastRevisionInGit)
 	})
 }
 
@@ -444,6 +467,15 @@ func (c *cluster) orphaned(t *testing.T, org *v1alpha1.AgentPlatformOrganization
 			assert.Equal(ct, status, cond.Status)
 			assert.Equal(ct, reason, cond.Reason)
 		}
+	}, timeout, tick)
+}
+
+// lastRevisionInGit waits until org's status records revision as the last
+// revision that held its file.
+func (c *cluster) lastRevisionInGit(t *testing.T, org *v1alpha1.AgentPlatformOrganization, revision string) {
+	t.Helper()
+	require.EventuallyWithT(t, func(ct *assert.CollectT) {
+		assert.Equal(ct, revision, c.get(ct, org).Status.LastRevisionInGit)
 	}, timeout, tick)
 }
 
