@@ -19,7 +19,9 @@
 //     ServiceAccount in another namespace (Config.ServiceAccountBindings),
 //     named after the ClusterRole, deleted when it is no longer configured;
 //   - a mirror of every RoleBinding of the parent namespace to the ClusterRole
-//     agent-platform:organizations-admin, with its User and Group subjects
+//     agent-platform:organizations-admin, and of every rbac-operator
+//     RoleBinding there to cluster-admin, bound to
+//     agent-platform:organizations-admin with the User and Group subjects
 //     only, removed when the parent binding goes;
 //   - read-only copies of the curated objects of the platform namespace
 //     (Config.Curated): the Harnesses the organization's spec.harnesses names,
@@ -84,6 +86,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/giantswarm/agent-platform-operator/api/v1alpha1"
+	"github.com/giantswarm/agent-platform-operator/pkg/adminmirror"
 )
 
 const (
@@ -96,9 +99,9 @@ const (
 	ScopeAdminMirror = "organizations-admin-mirror"
 	// CopiedFromAnnotation names the object a copy or a mirror was made from.
 	CopiedFromAnnotation = "agent-platform.giantswarm.io/copied-from"
-	// OrganizationsAdminClusterRole is the ClusterRole whose RoleBindings in a
-	// parent namespace are mirrored into its organization namespaces.
-	OrganizationsAdminClusterRole = "agent-platform:organizations-admin"
+	// OrganizationsAdminClusterRole is the ClusterRole of every mirror of a
+	// parent namespace's admin bindings (adminmirror).
+	OrganizationsAdminClusterRole = adminmirror.OrganizationsAdminClusterRole
 	// NamespacePrefix starts the generateName of an organization namespace.
 	NamespacePrefix = "agents-"
 
@@ -150,7 +153,9 @@ type Config struct {
 // CacheOptions limit what the manager caches: the organization namespaces,
 // the reconciler's own ServiceAccounts, ResourceQuotas and, in the Flux
 // namespace, Kustomizations, the installation's Kustomization, every RoleBinding
-// (a parent's organizations-admin bindings carry no label to select them by),
+// (a parent's admin bindings carry no label common to all of them: its
+// organizations-admin bindings have none, and its rbac-operator bindings are
+// told apart by roleRef and label, adminmirror.IsMirroredAdmin),
 // the metadata of every ModelConfig and, of the network policies and the
 // curated kinds, the platform namespace's and the reconciler's copies.
 //
@@ -307,7 +312,7 @@ func (r *OrganizationReconciler) organizationsOf(ctx context.Context, namespace 
 
 func (r *OrganizationReconciler) organizationsOfBinding(ctx context.Context, o client.Object) []reconcile.Request {
 	var reqs []reconcile.Request
-	if rb, ok := o.(*rbacv1.RoleBinding); ok && isOrganizationsAdmin(rb.RoleRef) {
+	if rb, ok := o.(*rbacv1.RoleBinding); ok && adminmirror.IsMirroredAdmin(rb) {
 		reqs = r.organizationsOf(ctx, rb.Namespace)
 	}
 	// Any binding in an organization namespace: the reconciler's own, or
@@ -327,9 +332,8 @@ func (r *OrganizationReconciler) organizationsOfCopy(ctx context.Context, o clie
 	return nil
 }
 
-func isOrganizationsAdmin(ref rbacv1.RoleRef) bool {
-	return ref.APIGroup == rbacv1.GroupName && ref.Kind == kindClusterRole && ref.Name == OrganizationsAdminClusterRole
-}
+// organizationsAdminRoleRef is the roleRef of every mirror.
+var organizationsAdminRoleRef = rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: kindClusterRole, Name: OrganizationsAdminClusterRole}
 
 // Reconcile keeps one organization.
 func (r *OrganizationReconciler) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {

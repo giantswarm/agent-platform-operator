@@ -18,6 +18,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+
+	"github.com/giantswarm/agent-platform-operator/pkg/adminmirror"
 )
 
 // ChartSource is the agent chart's OCIRepository, as agent-manager composes
@@ -318,12 +320,14 @@ func (r *OrganizationReconciler) ensureRoleBinding(ctx context.Context, want *rb
 	return r.create(ctx, want, "RoleBinding")
 }
 
-// mirrorAdmins keeps in ns a mirror of every organizations-admin RoleBinding
-// of parent: the same name and roleRef, with the User and Group subjects
-// whose names do not start with system:. ServiceAccounts are never mirrored,
-// so the parent's automation cannot bind itself into every organization, and
-// system: names are the API server's own identities. A mirror whose parent
-// binding is gone, or left without subjects, is deleted.
+// mirrorAdmins keeps in ns a mirror of every admin binding of parent
+// (adminmirror.IsMirroredAdmin): the same name, the roleRef
+// organizations-admin, and the subjects adminmirror.MirroredSubjects keeps:
+// Users and Groups whose names do not start with system:.
+// ServiceAccounts are never mirrored, so the parent's automation cannot bind
+// itself into every organization, and system: names are the API server's own
+// identities. A mirror whose parent binding is gone, or left without subjects,
+// is deleted.
 func (r *OrganizationReconciler) mirrorAdmins(ctx context.Context, parent, ns string) error {
 	parents := &rbacv1.RoleBindingList{}
 	if err := r.Client.List(ctx, parents, client.InNamespace(parent)); err != nil {
@@ -333,7 +337,7 @@ func (r *OrganizationReconciler) mirrorAdmins(ctx context.Context, parent, ns st
 	var errs []error
 	for i := range parents.Items {
 		pb := &parents.Items[i]
-		if !isOrganizationsAdmin(pb.RoleRef) || pb.DeletionTimestamp != nil {
+		if !adminmirror.IsMirroredAdmin(pb) || pb.DeletionTimestamp != nil {
 			continue
 		}
 		if pb.Name == FluxRoleBinding && r.Config.Flux.commitMode() {
@@ -348,7 +352,7 @@ func (r *OrganizationReconciler) mirrorAdmins(ctx context.Context, parent, ns st
 			errs = append(errs, &notReadyError{reason: reasonNameTaken, message: fmt.Sprintf("the RoleBinding %s/%s has the name the operator keeps for its binding of the ClusterRole %s, so it is not mirrored; rename it", parent, pb.Name, pb.Name)})
 			continue
 		}
-		subjects := mirroredSubjects(pb.Subjects)
+		subjects := adminmirror.MirroredSubjects(pb.Subjects)
 		if len(subjects) == 0 {
 			continue
 		}
@@ -358,7 +362,9 @@ func (r *OrganizationReconciler) mirrorAdmins(ctx context.Context, parent, ns st
 				Labels:      ownLabels(ScopeAdminMirror),
 				Annotations: map[string]string{CopiedFromAnnotation: parent + "/" + pb.Name},
 			},
-			RoleRef:  pb.RoleRef,
+			// Never the parent's roleRef: an rbac-operator binding refers
+			// to cluster-admin, which the operator may not bind.
+			RoleRef:  organizationsAdminRoleRef,
 			Subjects: subjects,
 		}
 	}
@@ -381,15 +387,4 @@ func (r *OrganizationReconciler) mirrorAdmins(ctx context.Context, parent, ns st
 		errs = append(errs, r.ensureRoleBinding(ctx, rb))
 	}
 	return errors.Join(errs...)
-}
-
-func mirroredSubjects(in []rbacv1.Subject) []rbacv1.Subject {
-	var out []rbacv1.Subject
-	for _, s := range in {
-		if (s.Kind != rbacv1.UserKind && s.Kind != rbacv1.GroupKind) || strings.HasPrefix(s.Name, "system:") {
-			continue
-		}
-		out = append(out, rbacv1.Subject{Kind: s.Kind, APIGroup: rbacv1.GroupName, Name: s.Name})
-	}
-	return out
 }
