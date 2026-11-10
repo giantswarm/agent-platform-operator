@@ -302,11 +302,13 @@ func (r *OrganizationReconciler) setOrphaned(ctx context.Context, org *v1alpha1.
 		// Without the installation Kustomization nothing sets it: one left
 		// from an earlier configuration would stop the workers for good.
 		meta.RemoveStatusCondition(&status.Conditions, v1alpha1.ConditionOrphaned)
+		status.LastRevisionInGit = ""
 		return nil
 	}
 	l := org.GetLabels()
 	if l[v1alpha1.FluxNameLabel] != f.Installation.Name || l[v1alpha1.FluxNamespaceLabel] != f.Installation.Namespace {
 		meta.RemoveStatusCondition(&status.Conditions, v1alpha1.ConditionOrphaned)
+		status.LastRevisionInGit = ""
 		return nil
 	}
 	ks := object(f.Kustomization)
@@ -340,7 +342,13 @@ func (r *OrganizationReconciler) setOrphaned(ctx context.Context, org *v1alpha1.
 		Message:            fmt.Sprintf("in the inventory of the Kustomization %s", f.Installation),
 		ObservedGeneration: org.Generation,
 	}
-	if !inInventory(entries, id) {
+	if inInventory(entries, id) {
+		// A settled Kustomization's inventory is the one of its last applied
+		// revision, so that revision's tree holds the organization's file.
+		if revision, _, _ := unstructured.NestedString(ks.Object, "status", "lastAppliedRevision"); revision != "" {
+			status.LastRevisionInGit = revision
+		}
+	} else {
 		cond.Status, cond.Reason = metav1.ConditionTrue, v1alpha1.ReasonMissingFromGit
 		cond.Message = fmt.Sprintf("missing from the inventory of the Kustomization %s: its file is gone from git; the workers are stopped", f.Installation)
 		if pr := org.GetAnnotations()[v1alpha1.DeletePullRequestAnnotation]; pr != "" {
@@ -451,10 +459,10 @@ func (r *OrganizationReconciler) isInstallation(o client.Object) bool {
 	return r.Config.Flux.orphans() && o.GetNamespace() == r.Config.Flux.Installation.Namespace && o.GetName() == r.Config.Flux.Installation.Name
 }
 
-// kustomizationChanged passes the installation Kustomization's inventory
-// changes and its moves into and out of settled, and an organization
-// Kustomization's spec and label changes, not the rest of the status
-// kustomize-controller records on every reconcile.
+// kustomizationChanged passes the installation Kustomization's inventory and
+// last applied revision changes and its moves into and out of settled, and an
+// organization Kustomization's spec and label changes, not the rest of the
+// status kustomize-controller records on every reconcile.
 func (r *OrganizationReconciler) kustomizationChanged() predicate.Funcs {
 	return predicate.Funcs{UpdateFunc: func(e event.UpdateEvent) bool {
 		if r.isInstallation(e.ObjectNew) {
@@ -464,9 +472,15 @@ func (r *OrganizationReconciler) kustomizationChanged() predicate.Funcs {
 				return true
 			}
 			// kustomize-controller patches the conditions several times per
-			// reconcile: only a move into or out of settled, or a new
-			// inventory, can change an organization's Orphaned condition.
+			// reconcile: only a move into or out of settled, a new inventory
+			// or a new applied revision can change an organization's
+			// Orphaned condition or its last revision in git.
 			if (unsettled(o) == "") != (unsettled(n) == "") {
+				return true
+			}
+			or, _, _ := unstructured.NestedString(o.Object, "status", "lastAppliedRevision")
+			nr, _, _ := unstructured.NestedString(n.Object, "status", "lastAppliedRevision")
+			if or != nr {
 				return true
 			}
 			oi, _, _ := unstructured.NestedFieldNoCopy(o.Object, "status", "inventory")

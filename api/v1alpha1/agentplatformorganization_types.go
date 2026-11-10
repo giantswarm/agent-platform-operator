@@ -153,6 +153,17 @@ type AgentPlatformOrganizationStatus struct {
 	// +optional
 	SnapshotsErasedAt *metav1.MicroTime `json:"snapshotsErasedAt,omitempty"`
 
+	// LastRevisionInGit is the installation Kustomization's
+	// status.lastAppliedRevision (e.g. <branch>@sha1:<sha> for a
+	// GitRepository) from the last time the organization was in that
+	// Kustomization's settled inventory: a revision whose tree holds the
+	// organization's file. Kept while the organization is Orphaned, so a file
+	// gone from git can be found. Empty when no such revision was recorded:
+	// on an organization applied without git, and on one already missing from
+	// the inventory when the operator first ran with this field.
+	// +optional
+	LastRevisionInGit string `json:"lastRevisionInGit,omitempty"`
+
 	// Conditions: Ready, DefaultModelConfigured and Orphaned. While the
 	// organization is erased, Ready is False with reason Deleting and its
 	// message names the step.
