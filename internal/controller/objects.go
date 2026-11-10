@@ -215,9 +215,9 @@ func subset(have, want map[string]string) bool {
 }
 
 // mirroredLabels are the labels an object holding have gets: want on top of
-// have. With mirrorsKagent, as for a curated copy, its labels mirrored from
-// its source (kagentLabelPrefix) are want's only, so a label the source lost
-// goes; labels other writers add stay.
+// have. With mirrorsKagent, as for a curated copy, the labels the copy takes
+// from its source (kagentLabelPrefix) are want's only, so a label the source
+// lost goes; labels other writers add stay.
 func mirroredLabels(have, want map[string]string, mirrorsKagent bool) map[string]string {
 	merged := make(map[string]string, len(have)+len(want))
 	for k, v := range have {
