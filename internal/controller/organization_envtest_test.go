@@ -238,6 +238,20 @@ func TestOrganizationEnvtest(t *testing.T) {
 			rb := tc.Binding.DeepCopy()
 			rb.Namespace = parent
 			require.NoError(t, c.admin.Create(t.Context(), rb))
+			if tc.Binding.DeletionTimestamp == nil {
+				continue
+			}
+			// The API server drops a deletion timestamp on create: a delete
+			// sets it, and the case's finalizer keeps the binding.
+			require.NoError(t, c.admin.Delete(t.Context(), rb))
+			t.Cleanup(func() {
+				held := &rbacv1.RoleBinding{}
+				if err := c.admin.Get(context.Background(), client.ObjectKeyFromObject(rb), held); err != nil {
+					return
+				}
+				held.Finalizers = nil
+				assert.NoError(t, client.IgnoreNotFound(c.admin.Update(context.Background(), held)))
+			})
 		}
 
 		organizationsAdmin := rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: kindClusterRole, Name: adminmirror.OrganizationsAdminClusterRole}
@@ -254,13 +268,17 @@ func TestOrganizationEnvtest(t *testing.T) {
 				assert.Equal(ct, tc.Mirrored, mirror.Subjects, tc.Binding.Name)
 			}
 		}, timeout, tick)
-		for _, tc := range cases {
-			if len(tc.Mirrored) > 0 {
-				continue
+		// Eventually: a binding being deleted may be mirrored by a reconcile
+		// that ran before its delete, and the delete event removes the mirror.
+		require.EventuallyWithT(t, func(ct *assert.CollectT) {
+			for _, tc := range cases {
+				if len(tc.Mirrored) > 0 {
+					continue
+				}
+				err := c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns.Name, Name: tc.Binding.Name}, &rbacv1.RoleBinding{})
+				assert.True(ct, apierrors.IsNotFound(err), "%s has a mirror: %v", tc.Binding.Name, err)
 			}
-			err := c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns.Name, Name: tc.Binding.Name}, &rbacv1.RoleBinding{})
-			assert.True(t, apierrors.IsNotFound(err), "%s has a mirror: %v", tc.Binding.Name, err)
-		}
+		}, timeout, tick)
 
 		// A subject that leaves rbac-operator's binding leaves the mirror.
 		customers := &rbacv1.RoleBinding{}

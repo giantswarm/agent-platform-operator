@@ -320,14 +320,14 @@ func (r *OrganizationReconciler) ensureRoleBinding(ctx context.Context, want *rb
 	return r.create(ctx, want, "RoleBinding")
 }
 
-// mirrorAdmins keeps in ns a mirror of every admin binding of parent
-// (adminmirror.IsMirroredAdmin): the same name, the roleRef
-// organizations-admin, and the subjects adminmirror.MirroredSubjects keeps:
-// Users and Groups whose names do not start with system:.
-// ServiceAccounts are never mirrored, so the parent's automation cannot bind
-// itself into every organization, and system: names are the API server's own
-// identities. A mirror whose parent binding is gone, or left without subjects,
-// is deleted.
+// mirrorAdmins keeps in ns a mirror of every admin binding of parent that
+// counts now (adminmirror.Mirrors: one being deleted does not): the same
+// name, the roleRef organizations-admin, and the subjects
+// adminmirror.MirroredSubjects keeps: Users and Groups whose names do not
+// start with system:. ServiceAccounts are never mirrored, so the parent's
+// automation cannot bind itself into every organization, and system: names
+// are the API server's own identities. A mirror whose parent binding is gone,
+// being deleted, or left without subjects, is deleted.
 func (r *OrganizationReconciler) mirrorAdmins(ctx context.Context, parent, ns string) error {
 	parents := &rbacv1.RoleBindingList{}
 	if err := r.Client.List(ctx, parents, client.InNamespace(parent)); err != nil {
@@ -337,7 +337,7 @@ func (r *OrganizationReconciler) mirrorAdmins(ctx context.Context, parent, ns st
 	var errs []error
 	for i := range parents.Items {
 		pb := &parents.Items[i]
-		if !adminmirror.IsMirroredAdmin(pb) || pb.DeletionTimestamp != nil {
+		if !adminmirror.Mirrors(pb) {
 			continue
 		}
 		if pb.Name == FluxRoleBinding && r.Config.Flux.commitMode() {

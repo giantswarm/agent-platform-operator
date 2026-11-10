@@ -1,8 +1,9 @@
 // Package adminmirror is the rule by which the operator mirrors the admins of a
 // parent namespace into its organization namespaces: which parent RoleBindings
-// are mirrored (IsMirroredAdmin) and which of their subjects the mirror binds
-// (MirroredSubjects). A mirror is bound to the ClusterRole
-// agent-platform:organizations-admin, never to the parent binding's role.
+// are mirrored (IsMirroredAdmin), which of them count now (Mirrors) and which
+// of their subjects the mirror binds (MirroredSubjects). A mirror is bound to
+// the ClusterRole agent-platform:organizations-admin, never to the parent
+// binding's role.
 //
 // The rule is a contract between this operator and agent-manager:
 // create_organization's pre-write check (giantswarm/agent-manager#335)
@@ -48,6 +49,20 @@ func IsMirroredAdmin(rb *rbacv1.RoleBinding) bool {
 	}
 	return ref.Name == OrganizationsAdminClusterRole ||
 		(ref.Name == ClusterAdminClusterRole && rb.Labels[RBACOperatorLabel] == RBACOperatorValue)
+}
+
+// Mirrors reports whether the operator writes a mirror of the parent binding
+// rb now: IsMirroredAdmin, and rb is not being deleted.
+//
+// The two differ on purpose. IsMirroredAdmin selects the bindings the operator
+// watches and mirrors, a binding with a deletion timestamp included, so that
+// its delete event reconciles the mirror away. Mirrors says whether the
+// binding counts right now: the operator's mirror writer skips a binding that
+// is being deleted, and agent-manager's pre-write check must not count it
+// either. A finalizer can keep such a binding, and its right in RBAC, for a
+// while, but no mirror of it is written.
+func Mirrors(rb *rbacv1.RoleBinding) bool {
+	return IsMirroredAdmin(rb) && rb.DeletionTimestamp == nil
 }
 
 // MirroredSubjects are the subjects a mirror binds: the Users and Groups whose

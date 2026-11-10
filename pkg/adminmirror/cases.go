@@ -1,6 +1,8 @@
 package adminmirror
 
 import (
+	"time"
+
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -12,8 +14,13 @@ type Case struct {
 	Binding rbacv1.RoleBinding
 	// IsMirroredAdmin is what IsMirroredAdmin returns for Binding.
 	IsMirroredAdmin bool
+	// Mirrors is what Mirrors returns for Binding: whether the binding
+	// counts now, a bool (Mirrored is the subject list). It differs from
+	// IsMirroredAdmin only for a binding that is being deleted.
+	Mirrors bool
 	// Mirrored are the subjects of the mirror in the organization namespace,
-	// bound to OrganizationsAdminClusterRole; empty means no mirror.
+	// bound to OrganizationsAdminClusterRole; empty means no mirror. It is
+	// MirroredSubjects of the Binding's subjects when Mirrors, else empty.
 	Mirrored []rbacv1.Subject
 }
 
@@ -37,6 +44,14 @@ func Cases() []Case {
 		return rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: labels}, RoleRef: ref, Subjects: subjects}
 	}
 	rbacOperator := func() map[string]string { return map[string]string{RBACOperatorLabel: RBACOperatorValue} }
+	// deleting marks rb as being deleted, held by a finalizer as the API
+	// server holds it. The time is fixed, so two calls return equal cases.
+	deleting := func(rb rbacv1.RoleBinding) rbacv1.RoleBinding {
+		at := metav1.NewTime(time.Unix(0, 0).UTC())
+		rb.DeletionTimestamp = &at
+		rb.Finalizers = []string{"example.com/hold"}
+		return rb
+	}
 
 	return []Case{
 		{
@@ -45,6 +60,7 @@ func Cases() []Case {
 				user("alice@example.com"), group("acme-platform"), sa("org-acme", "automation"),
 				group("system:authenticated"), user("system:serviceaccount:org-acme:automation")),
 			IsMirroredAdmin: true,
+			Mirrors:         true,
 			Mirrored:        []rbacv1.Subject{user("alice@example.com"), group("acme-platform")},
 		},
 		{
@@ -52,17 +68,32 @@ func Cases() []Case {
 			Binding: binding("write-all-customer-group", rbacOperator(), clusterRole(ClusterAdminClusterRole),
 				group("customer-admins"), group("customer-sre"), sa("default", "automation")),
 			IsMirroredAdmin: true,
+			Mirrors:         true,
 			Mirrored:        []rbacv1.Subject{group("customer-admins"), group("customer-sre")},
 		},
 		{
 			// rbac-operator's copy of a per-organization admin RoleBindingTemplate.
 			Binding:         binding("acme-admins", rbacOperator(), clusterRole(ClusterAdminClusterRole), user("bob@example.com")),
 			IsMirroredAdmin: true,
+			Mirrors:         true,
 			Mirrored:        []rbacv1.Subject{user("bob@example.com")},
 		},
 		{
 			// rbac-operator's write-all-customer-sa: ServiceAccounts only, no mirror.
 			Binding:         binding("write-all-customer-sa", rbacOperator(), clusterRole(ClusterAdminClusterRole), sa("org-acme", "automation"), sa("default", "automation")),
+			IsMirroredAdmin: true,
+			Mirrors:         true,
+		},
+		{
+			// An organizations-admin binding being deleted: the watch still
+			// selects it, so its delete event removes the mirror, but it no
+			// longer counts and has no mirror.
+			Binding:         deleting(binding("leaving-team", nil, clusterRole(OrganizationsAdminClusterRole), user("heidi@example.com"))),
+			IsMirroredAdmin: true,
+		},
+		{
+			// rbac-operator's copy of a RoleBindingTemplate being deleted.
+			Binding:         deleting(binding("leaving-admins", rbacOperator(), clusterRole(ClusterAdminClusterRole), group("leaving-admins"))),
 			IsMirroredAdmin: true,
 		},
 		{
