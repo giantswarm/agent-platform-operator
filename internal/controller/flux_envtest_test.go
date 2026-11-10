@@ -342,7 +342,6 @@ func fluxCases(t *testing.T, c *cluster) {
 		c.orphaned(t, org, metav1.ConditionFalse, v1alpha1.ReasonInInventory)
 		c.lastAppliedRevision(t, org, revision)
 		c.replicas(t, ns, 3)
-		c.orphanedAnnotation(t, ns, "")
 
 		// A new revision with the same inventory is recorded.
 		revision = "main@sha1:4444444444444444444444444444444444444444"
@@ -372,7 +371,6 @@ func fluxCases(t *testing.T, c *cluster) {
 		c.orphaned(t, org, metav1.ConditionTrue, v1alpha1.ReasonMissingFromGit)
 		c.lastAppliedRevision(t, org, held)
 		c.replicas(t, ns, 0)
-		c.orphanedAnnotation(t, ns, v1alpha1.ReasonMissingFromGit)
 
 		// agent-manager's delete pull request marked it: the delete merged.
 		require.EventuallyWithT(t, func(ct *assert.CollectT) {
@@ -382,7 +380,6 @@ func fluxCases(t *testing.T, c *cluster) {
 		}, timeout, tick)
 		c.orphaned(t, org, metav1.ConditionTrue, v1alpha1.ReasonDeleteMerged)
 		c.replicas(t, ns, 0)
-		c.orphanedAnnotation(t, ns, v1alpha1.ReasonDeleteMerged)
 
 		// The file is back: no longer Orphaned, and the workers run again.
 		revision = "main@sha1:3333333333333333333333333333333333333333"
@@ -390,7 +387,6 @@ func fluxCases(t *testing.T, c *cluster) {
 		c.orphaned(t, org, metav1.ConditionFalse, v1alpha1.ReasonInInventory)
 		c.lastAppliedRevision(t, org, revision)
 		c.replicas(t, ns, 3)
-		c.orphanedAnnotation(t, ns, "")
 
 		// Without the ownership labels it was not applied from git: no
 		// Orphaned condition and no last applied revision, until they are back.
@@ -486,20 +482,6 @@ func (c *cluster) orphaned(t *testing.T, org *v1alpha1.AgentPlatformOrganization
 		if assert.NotNil(ct, cond) {
 			assert.Equal(ct, status, cond.Status)
 			assert.Equal(ct, reason, cond.Reason)
-		}
-	}, timeout, tick)
-}
-
-// orphanedAnnotation waits until the namespace ns carries OrphanedAnnotation
-// with reason, or none when reason is empty.
-func (c *cluster) orphanedAnnotation(t *testing.T, ns, reason string) {
-	t.Helper()
-	require.EventuallyWithT(t, func(ct *assert.CollectT) {
-		got := &corev1.Namespace{}
-		if assert.NoError(ct, c.admin.Get(t.Context(), client.ObjectKey{Name: ns}, got)) {
-			value, found := got.Annotations[v1alpha1.OrphanedAnnotation]
-			assert.Equal(ct, reason != "", found)
-			assert.Equal(ct, reason, value)
 		}
 	}, timeout, tick)
 }

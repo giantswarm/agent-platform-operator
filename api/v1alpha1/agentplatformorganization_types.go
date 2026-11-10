@@ -43,13 +43,6 @@ const (
 	// from git, the organization is Orphaned with reason DeleteMerged.
 	DeletePullRequestAnnotation = "agent-platform.giantswarm.io/delete-pull-request"
 
-	// OrphanedAnnotation is on an organization namespace while its
-	// AgentPlatformOrganization is Orphaned: the condition's reason,
-	// DeleteMerged or MissingFromGit. It is for readers who may read the
-	// namespace but not the AgentPlatformOrganization, such as the
-	// organization's members. The condition stays the source of truth.
-	OrphanedAnnotation = "agent-platform.giantswarm.io/orphaned"
-
 	// FluxNameLabel and FluxNamespaceLabel are the ownership labels Flux's
 	// kustomize-controller puts on what a Kustomization applies: the
 	// Kustomization's name and namespace.
