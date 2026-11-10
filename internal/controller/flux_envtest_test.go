@@ -340,21 +340,21 @@ func fluxCases(t *testing.T, c *cluster) {
 		ns := c.readyNamespace(t, org).Name
 		c.modelConfig(t, ns, "anthropic", false)
 		c.orphaned(t, org, metav1.ConditionFalse, v1alpha1.ReasonInInventory)
-		c.lastRevisionInGit(t, org, revision)
+		c.lastAppliedRevision(t, org, revision)
 		c.replicas(t, ns, 3)
 
 		// A new revision with the same inventory is recorded.
 		revision = "main@sha1:4444444444444444444444444444444444444444"
 		setInventory(entry("treasury"))
-		c.lastRevisionInGit(t, org, revision)
-		inGit := revision
+		c.lastAppliedRevision(t, org, revision)
+		held := revision
 
 		// A settled status without an applied revision keeps the last one.
 		revision = ""
 		setInventory(entry("treasury"))
 		assert.Never(t, func() bool {
-			return c.get(t, org).Status.LastRevisionInGit != inGit
-		}, 2*time.Second, tick, "a status without lastAppliedRevision changed the last revision in git")
+			return c.get(t, org).Status.LastAppliedRevision != held
+		}, 2*time.Second, tick, "a status without lastAppliedRevision changed the organization's last applied revision")
 
 		// While Flux reconciles, an organization it labelled may not be in the
 		// inventory yet: it is not Orphaned for that.
@@ -369,7 +369,7 @@ func fluxCases(t *testing.T, c *cluster) {
 		revision = "main@sha1:2222222222222222222222222222222222222222"
 		setInventory()
 		c.orphaned(t, org, metav1.ConditionTrue, v1alpha1.ReasonMissingFromGit)
-		c.lastRevisionInGit(t, org, inGit)
+		c.lastAppliedRevision(t, org, held)
 		c.replicas(t, ns, 0)
 
 		// agent-manager's delete pull request marked it: the delete merged.
@@ -385,11 +385,11 @@ func fluxCases(t *testing.T, c *cluster) {
 		revision = "main@sha1:3333333333333333333333333333333333333333"
 		setInventory(entry("treasury"))
 		c.orphaned(t, org, metav1.ConditionFalse, v1alpha1.ReasonInInventory)
-		c.lastRevisionInGit(t, org, revision)
+		c.lastAppliedRevision(t, org, revision)
 		c.replicas(t, ns, 3)
 
 		// Without the ownership labels it was not applied from git: no
-		// Orphaned condition and no last revision, until they are back.
+		// Orphaned condition and no last applied revision, until they are back.
 		setLabels := func(labels map[string]string) {
 			require.EventuallyWithT(t, func(ct *assert.CollectT) {
 				got := c.get(ct, org)
@@ -398,11 +398,11 @@ func fluxCases(t *testing.T, c *cluster) {
 			}, timeout, tick)
 		}
 		setLabels(nil)
-		c.lastRevisionInGit(t, org, "")
+		c.lastAppliedRevision(t, org, "")
 		assert.Nil(t, meta.FindStatusCondition(c.get(t, org).Status.Conditions, v1alpha1.ConditionOrphaned))
 		setLabels(fromGit)
 		c.orphaned(t, org, metav1.ConditionFalse, v1alpha1.ReasonInInventory)
-		c.lastRevisionInGit(t, org, revision)
+		c.lastAppliedRevision(t, org, revision)
 
 		// The two-step delete: the delete pull request merged (DeleteMerged,
 		// no workers), then the organization is deleted. Its workers run
@@ -436,7 +436,7 @@ func fluxCases(t *testing.T, c *cluster) {
 		c.modelConfig(t, appliedNS, "anthropic", false)
 		c.replicas(t, appliedNS, 3)
 		assert.Nil(t, meta.FindStatusCondition(c.get(t, applied).Status.Conditions, v1alpha1.ConditionOrphaned))
-		assert.Empty(t, c.get(t, applied).Status.LastRevisionInGit)
+		assert.Empty(t, c.get(t, applied).Status.LastAppliedRevision)
 	})
 }
 
@@ -486,12 +486,12 @@ func (c *cluster) orphaned(t *testing.T, org *v1alpha1.AgentPlatformOrganization
 	}, timeout, tick)
 }
 
-// lastRevisionInGit waits until org's status records revision as the last
+// lastAppliedRevision waits until org's status records revision as the last
 // revision that held its file.
-func (c *cluster) lastRevisionInGit(t *testing.T, org *v1alpha1.AgentPlatformOrganization, revision string) {
+func (c *cluster) lastAppliedRevision(t *testing.T, org *v1alpha1.AgentPlatformOrganization, revision string) {
 	t.Helper()
 	require.EventuallyWithT(t, func(ct *assert.CollectT) {
-		assert.Equal(ct, revision, c.get(ct, org).Status.LastRevisionInGit)
+		assert.Equal(ct, revision, c.get(ct, org).Status.LastAppliedRevision)
 	}, timeout, tick)
 }
 
