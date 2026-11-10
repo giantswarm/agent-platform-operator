@@ -2,6 +2,7 @@ package controller_test
 
 import (
 	"context"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/giantswarm/agent-platform-operator/api/v1alpha1"
 	"github.com/giantswarm/agent-platform-operator/internal/controller"
+	"github.com/giantswarm/agent-platform-operator/pkg/adminmirror"
 )
 
 const (
@@ -28,6 +30,9 @@ const (
 	kindClusterRole = "ClusterRole"
 	adminsBinding   = "platform-team"
 	namesParent     = "org-names"
+	// customerGroupBinding is rbac-operator's binding of the customer admin
+	// groups, a case of adminmirror.Cases.
+	customerGroupBinding = "write-all-customer-group"
 )
 
 func TestOrganizationEnvtest(t *testing.T) {
@@ -218,6 +223,76 @@ func TestOrganizationEnvtest(t *testing.T) {
 		require.EventuallyWithT(t, func(ct *assert.CollectT) {
 			err := c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns.Name, Name: adminsBinding}, &rbacv1.RoleBinding{})
 			assert.True(ct, apierrors.IsNotFound(err), "the mirror is still there: %v", err)
+		}, timeout, tick)
+	})
+
+	t.Run("the parent bindings of adminmirror.Cases are mirrored as the table says", func(t *testing.T) {
+		const parent = "org-rbacop"
+		org := c.organization(t, parent, "customer")
+		ns := c.readyNamespace(t, org)
+		cases := adminmirror.Cases()
+		// The bindings without a mirror first, so the reconcile that writes
+		// the first mirror lists them too.
+		sort.SliceStable(cases, func(i, j int) bool { return len(cases[i].Mirrored) < len(cases[j].Mirrored) })
+		for _, tc := range cases {
+			rb := tc.Binding.DeepCopy()
+			rb.Namespace = parent
+			require.NoError(t, c.admin.Create(t.Context(), rb))
+			if tc.Binding.DeletionTimestamp == nil {
+				continue
+			}
+			// The API server drops a deletion timestamp on create: a delete
+			// sets it, and the case's finalizer keeps the binding.
+			require.NoError(t, c.admin.Delete(t.Context(), rb))
+			t.Cleanup(func() {
+				held := &rbacv1.RoleBinding{}
+				if err := c.admin.Get(context.Background(), client.ObjectKeyFromObject(rb), held); err != nil {
+					return
+				}
+				held.Finalizers = nil
+				assert.NoError(t, client.IgnoreNotFound(c.admin.Update(context.Background(), held)))
+			})
+		}
+
+		organizationsAdmin := rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: kindClusterRole, Name: adminmirror.OrganizationsAdminClusterRole}
+		require.EventuallyWithT(t, func(ct *assert.CollectT) {
+			for _, tc := range cases {
+				if len(tc.Mirrored) == 0 {
+					continue
+				}
+				mirror := &rbacv1.RoleBinding{}
+				if !assert.NoError(ct, c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns.Name, Name: tc.Binding.Name}, mirror)) {
+					continue
+				}
+				assert.Equal(ct, organizationsAdmin, mirror.RoleRef, tc.Binding.Name)
+				assert.Equal(ct, tc.Mirrored, mirror.Subjects, tc.Binding.Name)
+			}
+		}, timeout, tick)
+		// Eventually: a binding being deleted may be mirrored by a reconcile
+		// that ran before its delete, and the delete event removes the mirror.
+		require.EventuallyWithT(t, func(ct *assert.CollectT) {
+			for _, tc := range cases {
+				if len(tc.Mirrored) > 0 {
+					continue
+				}
+				err := c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns.Name, Name: tc.Binding.Name}, &rbacv1.RoleBinding{})
+				assert.True(ct, apierrors.IsNotFound(err), "%s has a mirror: %v", tc.Binding.Name, err)
+			}
+		}, timeout, tick)
+
+		// A subject that leaves rbac-operator's binding leaves the mirror.
+		customers := &rbacv1.RoleBinding{}
+		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKey{Namespace: parent, Name: customerGroupBinding}, customers))
+		left := customers.Subjects[0]
+		customers.Subjects = customers.Subjects[1:]
+		require.NoError(t, c.admin.Update(t.Context(), customers))
+		require.EventuallyWithT(t, func(ct *assert.CollectT) {
+			mirror := &rbacv1.RoleBinding{}
+			if !assert.NoError(ct, c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns.Name, Name: customerGroupBinding}, mirror)) {
+				return
+			}
+			assert.NotContains(ct, mirror.Subjects, left)
+			assert.Equal(ct, adminmirror.MirroredSubjects(customers.Subjects), mirror.Subjects)
 		}, timeout, tick)
 	})
 

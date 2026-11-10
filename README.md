@@ -2,6 +2,10 @@
 
 Operator of the Agent Platform's organizations: reconciles each AgentPlatformOrganization (agent-platform.giantswarm.io) into its organization namespace, curated copies and organization cleanup
 
+## Terms
+
+The operator writes two kinds of derived objects into an organization namespace, and each has its own word. A **curated copy** is an object that the operator keeps equal to a curated source in `platformNamespace`, apart from the rewrites for each organization (see "Curated copies"); the network policies (`networkPolicy.names`) are copies too, but not curated ones. An **admin mirror** is a RoleBinding that the operator derives from an admin binding of the parent namespace: it always binds `agent-platform:organizations-admin`, whatever the parent's role, and filters the subjects, so it is not a copy (see `pkg/adminmirror`). "Mirror" never names a curated copy, and "copy" never names an admin mirror. Two names keep their old spelling: the annotation `agent-platform.giantswarm.io/copied-from` is on both kinds, and the Go function `mirroredLabels` serves the curated copies.
+
 ## The AgentPlatformOrganization
 
 An `AgentPlatformOrganization` (`agent-platform.giantswarm.io/v1alpha1`, namespaced) is a share of the installation's Agent Platform for one team. It lives in a **parent namespace**: on a Giant Swarm installation the Giant Swarm Organization's `org-<name>`. Its agents, MCP servers, models, credentials and members live in its **organization namespace**, which the operator creates.
@@ -51,7 +55,13 @@ In the namespace the operator keeps, from the first reconcile on:
 - the network policies `networkPolicy.names`, copied from `platformNamespace`;
 - the agent chart's OCIRepository (`agentChart.*`), named after the chart (`agent`);
 - the Helm ServiceAccount `helmReleaseServiceAccount`, which the organization's HelmReleases run as, with a RoleBinding to the ClusterRole `agent-platform-tenant-flux`;
-- a mirror of every RoleBinding in the parent namespace to the ClusterRole `agent-platform:organizations-admin`: the same name and roleRef, with the `User` and `Group` subjects only. The operator skips ServiceAccount subjects and subjects whose name starts with `system:`. The mirror goes when the parent binding goes.
+- a mirror of each admin binding in the parent namespace: the same name, the roleRef `agent-platform:organizations-admin`, and the `User` and `Group` subjects only. The operator skips ServiceAccount subjects and subjects whose name starts with `system:`. A subject that leaves the parent binding leaves the mirror, and the mirror goes when the parent binding goes or its deletion starts (a finalizer may hold it). These parent bindings are mirrored:
+  - every RoleBinding to the ClusterRole `agent-platform:organizations-admin`;
+  - every RoleBinding to the ClusterRole `cluster-admin` labelled `giantswarm.io/managed-by: rbac-operator`. In a Giant Swarm Organization's namespace `org-<name>`, rbac-operator writes `write-all-customer-group` (the installation's customer admin groups), `write-all-customer-sa` (the automation ServiceAccount) and `flux-namespace-reconciler` (Flux's controllers), and a copy of each RoleBindingTemplate that selects the organization (a per-organization admin binding written as a RoleBindingTemplate to `cluster-admin` is mirrored). `write-all-customer-sa` and `flux-namespace-reconciler` have ServiceAccount subjects only, so they yield no mirror.
+
+  These parent bindings are not mirrored: a `cluster-admin` RoleBinding without that label (one written by hand in the parent namespace), and a binding to any other role. The operator never binds `cluster-admin` in the organization namespace.
+
+  The rule is the Go package `github.com/giantswarm/agent-platform-operator/pkg/adminmirror` (`IsMirroredAdmin`, `Mirrors`, `MirroredSubjects`, and the table `Cases`). `IsMirroredAdmin` selects the parent bindings the operator watches, a binding being deleted included, so its delete event removes the mirror; `Mirrors` is whether a binding counts now: the operator writes no mirror of a binding with a deletion timestamp. It is the contract this operator and agent-manager follow: agent-manager's `create_organization` pre-write check (giantswarm/agent-manager#335) predicts the organization's first admins with these functions only, and both repositories' tests run `Cases`. The package imports only the Kubernetes API types.
 
 - the ResourceQuota `agent-platform-organization-objects` on object counts (`objectQuota`), so one organization cannot flood the API server with objects;
 - in commit mode, the RoleBinding `organization-flux` that binds the organization's Flux ServiceAccount to `commitMode.clusterRole` (`agent-platform:organization-flux`).
