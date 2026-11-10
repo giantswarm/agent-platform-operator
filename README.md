@@ -2,6 +2,10 @@
 
 Operator of the Agent Platform's organizations: reconciles each AgentPlatformOrganization (agent-platform.giantswarm.io) into its organization namespace, curated copies and organization cleanup
 
+## Terms
+
+The operator writes two kinds of derived objects into an organization namespace, and each has its own word. A **curated copy** is an object that the operator keeps equal to a curated source in `platformNamespace`, apart from fixed rewrites (see "Curated copies"); the network policies are copies in the same way. An **admin mirror** is a RoleBinding that the operator derives from an admin binding of the parent namespace: it changes the role to `agent-platform:organizations-admin` and filters the subjects, so it is not a copy (see `pkg/adminmirror`). "Mirror" never names a curated copy, and "copy" never names an admin mirror.
+
 ## The AgentPlatformOrganization
 
 An `AgentPlatformOrganization` (`agent-platform.giantswarm.io/v1alpha1`, namespaced) is a share of the installation's Agent Platform for one team. It lives in a **parent namespace**: on a Giant Swarm installation the Giant Swarm Organization's `org-<name>`. Its agents, MCP servers, models, credentials and members live in its **organization namespace**, which the operator creates.
