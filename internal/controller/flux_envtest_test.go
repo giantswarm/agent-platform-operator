@@ -388,6 +388,22 @@ func fluxCases(t *testing.T, c *cluster) {
 		c.lastRevisionInGit(t, org, revision)
 		c.replicas(t, ns, 3)
 
+		// Without the ownership labels it was not applied from git: no
+		// Orphaned condition and no last revision, until they are back.
+		setLabels := func(labels map[string]string) {
+			require.EventuallyWithT(t, func(ct *assert.CollectT) {
+				got := c.get(ct, org)
+				got.Labels = labels
+				assert.NoError(ct, c.admin.Update(t.Context(), got))
+			}, timeout, tick)
+		}
+		setLabels(nil)
+		c.lastRevisionInGit(t, org, "")
+		assert.Nil(t, meta.FindStatusCondition(c.get(t, org).Status.Conditions, v1alpha1.ConditionOrphaned))
+		setLabels(fromGit)
+		c.orphaned(t, org, metav1.ConditionFalse, v1alpha1.ReasonInInventory)
+		c.lastRevisionInGit(t, org, revision)
+
 		// The two-step delete: the delete pull request merged (DeleteMerged,
 		// no workers), then the organization is deleted. Its workers run
 		// again until its sessions are gone, so kagent can suspend its

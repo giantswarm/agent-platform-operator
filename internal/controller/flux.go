@@ -459,11 +459,10 @@ func (r *OrganizationReconciler) isInstallation(o client.Object) bool {
 	return r.Config.Flux.orphans() && o.GetNamespace() == r.Config.Flux.Installation.Namespace && o.GetName() == r.Config.Flux.Installation.Name
 }
 
-// kustomizationChanged passes the installation Kustomization's inventory
-// and last applied revision changes and its moves into and out of settled,
-// and an organization
-// Kustomization's spec and label changes, not the rest of the status
-// kustomize-controller records on every reconcile.
+// kustomizationChanged passes the installation Kustomization's inventory and
+// last applied revision changes and its moves into and out of settled, and an
+// organization Kustomization's spec and label changes, not the rest of the
+// status kustomize-controller records on every reconcile.
 func (r *OrganizationReconciler) kustomizationChanged() predicate.Funcs {
 	return predicate.Funcs{UpdateFunc: func(e event.UpdateEvent) bool {
 		if r.isInstallation(e.ObjectNew) {
