@@ -1,8 +1,9 @@
 // Package adminmirror is the rule by which the operator mirrors the admins of a
 // parent namespace into its organization namespaces: which parent RoleBindings
 // are mirrored (IsMirroredAdmin), which of them count now (Mirrors) and which
-// of their subjects the mirror binds (MirroredSubjects). A mirror is bound to the ClusterRole
-// agent-platform:organizations-admin, never to the parent binding's role.
+// of their subjects the mirror binds (MirroredSubjects). A mirror is bound to
+// the ClusterRole agent-platform:organizations-admin, never to the parent
+// binding's role.
 //
 // The rule is a contract between this operator and agent-manager:
 // create_organization's pre-write check (giantswarm/agent-manager#335)

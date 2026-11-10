@@ -1,6 +1,8 @@
 package adminmirror
 
 import (
+	"time"
+
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -12,7 +14,8 @@ type Case struct {
 	Binding rbacv1.RoleBinding
 	// IsMirroredAdmin is what IsMirroredAdmin returns for Binding.
 	IsMirroredAdmin bool
-	// Mirrors is what Mirrors returns for Binding. It differs from
+	// Mirrors is what Mirrors returns for Binding: whether the binding
+	// counts now, a bool (Mirrored is the subject list). It differs from
 	// IsMirroredAdmin only for a binding that is being deleted.
 	Mirrors bool
 	// Mirrored are the subjects of the mirror in the organization namespace,
@@ -42,10 +45,10 @@ func Cases() []Case {
 	}
 	rbacOperator := func() map[string]string { return map[string]string{RBACOperatorLabel: RBACOperatorValue} }
 	// deleting marks rb as being deleted, held by a finalizer as the API
-	// server holds it.
+	// server holds it. The time is fixed, so two calls return equal cases.
 	deleting := func(rb rbacv1.RoleBinding) rbacv1.RoleBinding {
-		now := metav1.Now()
-		rb.DeletionTimestamp = &now
+		at := metav1.NewTime(time.Unix(0, 0).UTC())
+		rb.DeletionTimestamp = &at
 		rb.Finalizers = []string{"example.com/hold"}
 		return rb
 	}
