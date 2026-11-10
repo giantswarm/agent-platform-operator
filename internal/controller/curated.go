@@ -283,8 +283,8 @@ func (r *OrganizationReconciler) curatedSources(ctx context.Context, gvk schema.
 // copyWorkerPool copies the curated WorkerPool with replicas and its own
 // placement labels, and the ServiceAccount its workers run as. The copy's
 // spec is the curated spec but replicas: admission
-// (agent-platform-tenant-workerpool-copy) refuses a WorkerPool copy with a
-// field the curated one does not have.
+// (agent-platform-organization-workerpool-copy) refuses a WorkerPool copy
+// with a field the curated one does not have.
 func (r *OrganizationReconciler) copyWorkerPool(ctx context.Context, ns string, replicas int64, k *curated) error {
 	c := r.Config.Curated
 	k.kept(c.pool(), c.WorkerPool)
