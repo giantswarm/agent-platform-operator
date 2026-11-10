@@ -4,7 +4,7 @@ Operator of the Agent Platform's organizations: reconciles each AgentPlatformOrg
 
 ## Terms
 
-The operator writes two kinds of derived objects into an organization namespace, and each has its own word. A **curated copy** is an object that the operator keeps equal to a curated source in `platformNamespace`, apart from fixed rewrites (see "Curated copies"); the network policies are copies in the same way. An **admin mirror** is a RoleBinding that the operator derives from an admin binding of the parent namespace: it changes the role to `agent-platform:organizations-admin` and filters the subjects, so it is not a copy (see `pkg/adminmirror`). "Mirror" never names a curated copy, and "copy" never names an admin mirror.
+The operator writes two kinds of derived objects into an organization namespace, and each has its own word. A **curated copy** is an object that the operator keeps equal to a curated source in `platformNamespace`, apart from the rewrites for each organization (see "Curated copies"); the network policies (`networkPolicy.names`) are copies too, but not curated ones. An **admin mirror** is a RoleBinding that the operator derives from an admin binding of the parent namespace: it always binds `agent-platform:organizations-admin`, whatever the parent's role, and filters the subjects, so it is not a copy (see `pkg/adminmirror`). "Mirror" never names a curated copy, and "copy" never names an admin mirror. Two names keep their old spelling: the annotation `agent-platform.giantswarm.io/copied-from` is on both kinds, and the Go function `mirroredLabels` serves the curated copies.
 
 ## The AgentPlatformOrganization
 

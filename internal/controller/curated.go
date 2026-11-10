@@ -22,8 +22,9 @@ import (
 
 // This file keeps the curated copies: objects in an organization namespace
 // that the operator keeps equal to a curated source of the platform namespace,
-// apart from fixed rewrites. They are not the admin mirrors (pkg/adminmirror),
-// which are RoleBindings derived from a parent namespace's admin bindings.
+// apart from the rewrites for each organization that keepCurated applies.
+// They are not the admin mirrors (pkg/adminmirror), which are RoleBindings
+// derived from a parent namespace's admin bindings.
 
 const (
 	// ScopeCurated marks, as the value of ObjectLabel, a read-only copy of a

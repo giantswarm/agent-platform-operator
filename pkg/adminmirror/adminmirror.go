@@ -5,7 +5,7 @@
 // the ClusterRole agent-platform:organizations-admin, never to the parent
 // binding's role. A mirror is not a copy: the curated copies
 // (internal/controller/curated.go) stay equal to their source, while a mirror
-// changes the role and filters the subjects.
+// always binds OrganizationsAdminClusterRole and filters the subjects.
 //
 // The rule is a contract between this operator and agent-manager:
 // create_organization's pre-write check (giantswarm/agent-manager#335)
