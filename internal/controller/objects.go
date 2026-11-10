@@ -146,7 +146,7 @@ func (r *OrganizationReconciler) ensureScoped(ctx context.Context, ns, scope str
 		logf.FromContext(ctx).V(1).Info("leaving an object the reconciler did not write", "namespace", ns, "kind", kind, "name", obj.GetName())
 		return nil
 	}
-	merged := mirroredLabels(existing.GetLabels(), want, scope == ScopeCurated)
+	merged := copiedLabels(existing.GetLabels(), want, scope == ScopeCurated)
 	if same(existing.Object["spec"], obj.Object["spec"]) && maps.Equal(merged, existing.GetLabels()) {
 		return nil
 	}
@@ -214,14 +214,14 @@ func subset(have, want map[string]string) bool {
 	return true
 }
 
-// mirroredLabels are the labels an object holding have gets: want on top of
-// have. With mirrorsKagent, as for a curated copy, the labels the copy takes
-// from its source (kagentLabelPrefix) are want's only, so a label the source
-// lost goes; labels other writers add stay.
-func mirroredLabels(have, want map[string]string, mirrorsKagent bool) map[string]string {
+// copiedLabels are the labels an object holding have gets: want on top of
+// have. With takesSourceKagentLabels, as for a curated copy, the labels the
+// copy takes from its source (kagentLabelPrefix) are want's only, so a label
+// the source lost goes; labels other writers add stay.
+func copiedLabels(have, want map[string]string, takesSourceKagentLabels bool) map[string]string {
 	merged := make(map[string]string, len(have)+len(want))
 	for k, v := range have {
-		if mirrorsKagent && strings.HasPrefix(k, kagentLabelPrefix) {
+		if takesSourceKagentLabels && strings.HasPrefix(k, kagentLabelPrefix) {
 			continue
 		}
 		merged[k] = v
