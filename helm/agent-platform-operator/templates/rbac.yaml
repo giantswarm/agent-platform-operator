@@ -46,10 +46,10 @@ rules:
     resources: ["agentplatformorganizations/status"]
     verbs: ["get", "update", "patch"]
   # The organization namespaces: created from generateName, found by label,
-  # deleted by the erasure.
+  # annotated with the organization's Orphaned reason, deleted by the erasure.
   - apiGroups: [""]
     resources: ["namespaces"]
-    verbs: ["get", "list", "watch", "create", "delete"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete"]
   # The parents' organizations-admin bindings and rbac-operator's
   # cluster-admin bindings are read; the mirrors and the Helm ServiceAccount's
   # binding are written.

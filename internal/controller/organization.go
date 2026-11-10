@@ -381,7 +381,7 @@ func (r *OrganizationReconciler) reconcile(ctx context.Context, org *v1alpha1.Ag
 	if ns.DeletionTimestamp != nil || ns.Status.Phase == corev1.NamespaceTerminating {
 		return &notReadyError{reason: reasonNamespaceTerminating, message: fmt.Sprintf("the organization namespace %s is terminating", ns.Name)}
 	}
-	var errs []error
+	errs := []error{r.keepOrphanedAnnotation(ctx, ns, status)}
 	if r.Config.Chart.URL != "" {
 		errs = append(errs, r.ensureExists(ctx, ns.Name, r.Config.Chart.object(ns.Name)))
 	}
@@ -405,6 +405,32 @@ func (r *OrganizationReconciler) reconcile(ctx context.Context, org *v1alpha1.Ag
 	// every object it counts.
 	errs = append(errs, r.ensureObjectQuota(ctx, ns.Name))
 	return errors.Join(errs...)
+}
+
+// keepOrphanedAnnotation sets OrphanedAnnotation on the organization
+// namespace to the reason of the Orphaned condition in status while it is
+// True, and removes it otherwise.
+func (r *OrganizationReconciler) keepOrphanedAnnotation(ctx context.Context, ns *corev1.Namespace, status *v1alpha1.AgentPlatformOrganizationStatus) error {
+	want := ""
+	if cond := meta.FindStatusCondition(status.Conditions, v1alpha1.ConditionOrphaned); cond != nil && cond.Status == metav1.ConditionTrue {
+		want = cond.Reason
+	}
+	if ns.Annotations[v1alpha1.OrphanedAnnotation] == want {
+		return nil
+	}
+	patch := client.MergeFrom(ns.DeepCopy())
+	if want == "" {
+		delete(ns.Annotations, v1alpha1.OrphanedAnnotation)
+	} else {
+		if ns.Annotations == nil {
+			ns.Annotations = map[string]string{}
+		}
+		ns.Annotations[v1alpha1.OrphanedAnnotation] = want
+	}
+	if err := r.Client.Patch(ctx, ns, patch, client.FieldOwner(fieldManager)); err != nil {
+		return fmt.Errorf("set %s on the organization namespace %s: %w", v1alpha1.OrphanedAnnotation, ns.Name, err)
+	}
+	return nil
 }
 
 // notReadyError is a cause of Ready=False that a retry does not change: the
