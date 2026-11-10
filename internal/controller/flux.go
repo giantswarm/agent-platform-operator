@@ -302,13 +302,13 @@ func (r *OrganizationReconciler) setOrphaned(ctx context.Context, org *v1alpha1.
 		// Without the installation Kustomization nothing sets it: one left
 		// from an earlier configuration would stop the workers for good.
 		meta.RemoveStatusCondition(&status.Conditions, v1alpha1.ConditionOrphaned)
-		status.LastRevisionInGit = ""
+		status.LastAppliedRevision = ""
 		return nil
 	}
 	l := org.GetLabels()
 	if l[v1alpha1.FluxNameLabel] != f.Installation.Name || l[v1alpha1.FluxNamespaceLabel] != f.Installation.Namespace {
 		meta.RemoveStatusCondition(&status.Conditions, v1alpha1.ConditionOrphaned)
-		status.LastRevisionInGit = ""
+		status.LastAppliedRevision = ""
 		return nil
 	}
 	ks := object(f.Kustomization)
@@ -346,7 +346,7 @@ func (r *OrganizationReconciler) setOrphaned(ctx context.Context, org *v1alpha1.
 		// A settled Kustomization's inventory is the one of its last applied
 		// revision, so that revision's tree holds the organization's file.
 		if revision, _, _ := unstructured.NestedString(ks.Object, "status", "lastAppliedRevision"); revision != "" {
-			status.LastRevisionInGit = revision
+			status.LastAppliedRevision = revision
 		}
 	} else {
 		cond.Status, cond.Reason = metav1.ConditionTrue, v1alpha1.ReasonMissingFromGit
@@ -474,7 +474,7 @@ func (r *OrganizationReconciler) kustomizationChanged() predicate.Funcs {
 			// kustomize-controller patches the conditions several times per
 			// reconcile: only a move into or out of settled, a new inventory
 			// or a new applied revision can change an organization's
-			// Orphaned condition or its last revision in git.
+			// Orphaned condition or its last applied revision.
 			if (unsettled(o) == "") != (unsettled(n) == "") {
 				return true
 			}
