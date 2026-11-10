@@ -434,12 +434,8 @@ func chartObjectQuota(t *testing.T) corev1.ResourceList {
 			if !ok {
 				continue
 			}
-			quota := corev1.ResourceList{}
-			for _, pair := range strings.Split(value, ",") {
-				name, count, ok := strings.Cut(pair, "=")
-				require.True(t, ok, "--object-quota: %q is not <resource>=<count>", pair)
-				quota[corev1.ResourceName(name)] = resource.MustParse(count)
-			}
+			quota, err := controller.ParseObjectQuota(value)
+			require.NoError(t, err, "--object-quota")
 			return quota
 		}
 	}

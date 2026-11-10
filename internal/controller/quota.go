@@ -3,10 +3,12 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -16,6 +18,33 @@ import (
 // in every organization namespace, so one organization cannot flood the API
 // server with objects.
 const ObjectQuotaName = "agent-platform-organization-objects"
+
+// ParseObjectQuota reads the hard limits of ObjectQuotaName as
+// comma-separated <resource>=<count> pairs, for example
+// configmaps=500,count/agents.api.kagent.dev=200; empty is none. A resource
+// listed twice takes its last count.
+func ParseObjectQuota(s string) (corev1.ResourceList, error) {
+	var out corev1.ResourceList
+	for pair := range strings.SplitSeq(s, ",") {
+		if pair = strings.TrimSpace(pair); pair == "" {
+			continue
+		}
+		name, count, ok := strings.Cut(pair, "=")
+		name = strings.TrimSpace(name)
+		if !ok || name == "" {
+			return nil, fmt.Errorf("%q is not <resource>=<count>", pair)
+		}
+		q, err := resource.ParseQuantity(strings.TrimSpace(count))
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", name, err)
+		}
+		if out == nil {
+			out = corev1.ResourceList{}
+		}
+		out[corev1.ResourceName(name)] = q
+	}
+	return out, nil
+}
 
 // ensureObjectQuota keeps the ResourceQuota ObjectQuotaName in ns with
 // Config.ObjectQuota as its hard limits, and removes its own when the limits
