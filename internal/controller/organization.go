@@ -14,7 +14,8 @@
 //   - the network policies copied from the platform namespace;
 //   - the agent chart's OCIRepository;
 //   - the Helm ServiceAccount the organization's HelmReleases run as, with its
-//     RoleBinding to the tenant Flux ClusterRole;
+//     RoleBinding to the ClusterRole Config.HelmClusterRole
+//     (agent-platform-tenant-flux by default);
 //   - a RoleBinding of each ServiceAccountBinding's ClusterRole to its
 //     ServiceAccount in another namespace (Config.ServiceAccountBindings),
 //     named after the ClusterRole, deleted when it is no longer configured;
