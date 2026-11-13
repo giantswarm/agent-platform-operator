@@ -30,6 +30,9 @@ type Sessions interface {
 	// List returns the IDs of every creator's sessions of the Agents in
 	// namespace.
 	List(ctx context.Context, namespace string) ([]string, error)
+	// Any reports whether a creator holds a session of the Agents in
+	// namespace; it stops at the first one (the worker replica rule).
+	Any(ctx context.Context, namespace string) (bool, error)
 	// Delete deletes one session; one already gone is no error.
 	Delete(ctx context.Context, id string) error
 }

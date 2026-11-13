@@ -306,6 +306,15 @@ type fakeSessions struct {
 	// onList runs at each listing, before it, with the namespace asked for
 	// (empty: every namespace).
 	onList func(namespace string)
+	// unavailable: kagent answers every listing Unavailable.
+	unavailable bool
+}
+
+// failing makes every listing fail (Unavailable) while down.
+func (f *fakeSessions) failing(down bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.unavailable = down
 }
 
 func (f *fakeSessions) add(namespace, creator, id string) {
@@ -353,10 +362,13 @@ func (f *fakeSessions) handle(call grpcwiretest.Call) ([]byte, error) {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	f.mu.Lock()
-	pkg := f.pkg
+	pkg, unavailable := f.pkg, f.unavailable
 	f.mu.Unlock()
 	switch call.Method {
 	case "/" + pkg + ".SessionService/ListSessions":
+		if unavailable {
+			return nil, status.Error(codes.Unavailable, "kagent is down")
+		}
 		if pkg == pkgV1 {
 			// No namespace filter: an unknown field is ignored.
 			return f.list(pkg, ""), nil

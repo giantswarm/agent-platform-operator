@@ -131,9 +131,7 @@ type Workers struct {
 	// Orphaned. A deleted organization runs Replicas until its sessions are
 	// gone, so kagent can suspend its actors, and 0 after.
 	//
-	// Not set means 1 (DefaultWorkerReplicas); 0 set on purpose runs no
-	// worker. The CRD writes the default into an object without the field,
-	// and the operator applies it too where the CRD is older.
+	// Not set means 1; 0 set on purpose runs no worker.
 	// +optional
 	// +kubebuilder:default=1
 	// +kubebuilder:validation:Minimum=0
@@ -141,6 +139,9 @@ type Workers struct {
 }
 
 // ReplicasOrDefault is Replicas, or DefaultWorkerReplicas when it is not set.
+// The CRD writes that default into an object without the field (or without a
+// workers block or a spec); a reader applies it too, for an object read from
+// an API server whose CRD is older.
 func (w Workers) ReplicasOrDefault() int32 {
 	if w.Replicas == nil {
 		return DefaultWorkerReplicas

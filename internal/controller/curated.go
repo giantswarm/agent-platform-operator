@@ -254,7 +254,8 @@ func orphaned(org *v1alpha1.AgentPlatformOrganization) bool {
 // holds an Agent (curated: a curated Agent is copied into it), or kagent
 // holds a session of it, whose actor kagent needs a worker to suspend. The
 // sessions are those the erasure deletes (Erasure.Sessions), Agents that are
-// gone included; they are listed only when ns holds no Agent. When the
+// gone included; they are listed only when ns holds no Agent, up to the
+// first one (Sessions.Any). When the
 // operator cannot tell, the workers stay: inUse is true, with the error.
 func (r *OrganizationReconciler) inUse(ctx context.Context, ns string, curated bool) (bool, error) {
 	if curated {
@@ -275,11 +276,11 @@ func (r *OrganizationReconciler) inUse(ctx context.Context, ns string, curated b
 	if sessions == nil {
 		return true, nil
 	}
-	ids, err := sessions.List(ctx, ns)
+	held, err := sessions.Any(ctx, ns)
 	if err != nil {
 		return true, fmt.Errorf("list the sessions of %s: %w", ns, err)
 	}
-	return len(ids) > 0, nil
+	return held, nil
 }
 
 // modelConfigs are the ModelConfigs of ns that are not going away.

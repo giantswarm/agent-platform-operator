@@ -160,6 +160,22 @@ func curatedCases(t *testing.T, c *cluster) {
 		c.modelConfig(t, ns, "anthropic", false)
 		c.replicas(t, ns, 1)
 
+		// No spec at all.
+		bare := &unstructured.Unstructured{}
+		bare.SetGroupVersionKind(v1alpha1.GroupVersion.WithKind("AgentPlatformOrganization"))
+		bare.SetNamespace("org-workers-bare")
+		bare.SetName("bare")
+		createNamespace(t, c.admin, "org-workers-bare")
+		require.NoError(t, c.admin.Create(t.Context(), bare))
+		org = &v1alpha1.AgentPlatformOrganization{}
+		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKeyFromObject(bare), org))
+		if assert.NotNil(t, org.Spec.Workers.Replicas, "the CRD wrote no default into an organization without a spec") {
+			assert.Equal(t, v1alpha1.DefaultWorkerReplicas, *org.Spec.Workers.Replicas)
+		}
+		bareNS := c.readyNamespace(t, org).Name
+		c.modelConfig(t, bareNS, "anthropic", false)
+		c.replicas(t, bareNS, 1)
+
 		zero := c.organizationWith(t, "org-workers-zero", "zero", v1alpha1.AgentPlatformOrganizationSpec{Workers: withReplicas(0)})
 		zeroNS := c.readyNamespace(t, zero).Name
 		c.modelConfig(t, zeroNS, "anthropic", false)
@@ -213,6 +229,29 @@ func curatedCases(t *testing.T, c *cluster) {
 
 		// The session goes: so does the worker, at the next reconcile.
 		c.sessions.delete(session)
+		require.EventuallyWithT(t, func(ct *assert.CollectT) {
+			c.poke(t, org)
+			pool := c.read(t, poolGVK, ns, curatedPool)
+			got, _, _ := unstructured.NestedInt64(pool.Object, "spec", "replicas")
+			assert.Zero(ct, got)
+		}, timeout, tick)
+
+		// kagent cannot list the sessions: the operator cannot tell, so the
+		// worker comes back and the organization says why it is not Ready.
+		c.sessions.failing(true)
+		t.Cleanup(func() { c.sessions.failing(false) })
+		c.poke(t, org)
+		c.replicas(t, ns, 1)
+		require.EventuallyWithT(t, func(ct *assert.CollectT) {
+			ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, v1alpha1.ConditionReady)
+			if assert.NotNil(ct, ready) {
+				assert.Equal(ct, metav1.ConditionFalse, ready.Status)
+				assert.Contains(ct, ready.Message, "list the sessions of "+ns)
+			}
+		}, timeout, tick)
+
+		// kagent answers again: no session, no worker.
+		c.sessions.failing(false)
 		require.EventuallyWithT(t, func(ct *assert.CollectT) {
 			c.poke(t, org)
 			pool := c.read(t, poolGVK, ns, curatedPool)

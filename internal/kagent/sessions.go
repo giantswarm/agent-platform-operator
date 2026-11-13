@@ -109,6 +109,20 @@ func (s *Sessions) invoke(ctx context.Context, method string, req func(api) []by
 // every namespace's sessions, as kagent.api.v1 does, so the namespace's are
 // kept here too.
 func (s *Sessions) List(ctx context.Context, namespace string) ([]string, error) {
+	return s.list(ctx, namespace, 0)
+}
+
+// Any reports whether a creator holds a session of the Agents in namespace,
+// Agents that are gone included, as List finds them. It stops at the page
+// that holds the first one.
+func (s *Sessions) Any(ctx context.Context, namespace string) (bool, error) {
+	ids, err := s.list(ctx, namespace, 1)
+	return len(ids) > 0, err
+}
+
+// list lists as List does, and stops after the page on which it holds enough
+// IDs (0: every page).
+func (s *Sessions) list(ctx context.Context, namespace string, enough int) ([]string, error) {
 	var ids []string
 	token := ""
 	for range maxPages {
@@ -141,7 +155,7 @@ func (s *Sessions) List(ctx context.Context, namespace string) ([]string, error)
 		if err != nil {
 			return nil, fmt.Errorf("kagent ListSessions: %w", err)
 		}
-		if token = string(grpcwire.First(next, fieldNextPageToken)); token == "" {
+		if token = string(grpcwire.First(next, fieldNextPageToken)); token == "" || (enough > 0 && len(ids) >= enough) {
 			return ids, nil
 		}
 	}

@@ -80,9 +80,7 @@ spec:
                       Orphaned. A deleted organization runs Replicas until its sessions are
                       gone, so kagent can suspend its actors, and 0 after.
 
-                      Not set means 1 (DefaultWorkerReplicas); 0 set on purpose runs no
-                      worker. The CRD writes the default into an object without the field,
-                      and the operator applies it too where the CRD is older.
+                      Not set means 1; 0 set on purpose runs no worker.
                     format: int32
                     minimum: 0
                     type: integer
