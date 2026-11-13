@@ -25,7 +25,7 @@ spec:
 ```
 
 - `spec.harnesses`: the curated Harnesses the organization gets.
-- `spec.workers.replicas`: the warm workers of the organization's WorkerPool, while it can use them (see "Curated copies").
+- `spec.workers.replicas`: the warm workers of the organization's WorkerPool, while it uses them (see "Curated copies"). Not set (also with no `workers` block) means 1, and the CRD writes that default into the object; 0 set on purpose runs no worker.
 - The annotation `agent-platform.giantswarm.io/display-name` holds the name people see. It is not a spec field.
 - The name is at most 50 characters and holds no dot, because the organization namespace name `agents-<name>-…` must be a DNS label. The CRD refuses other names.
 
@@ -88,7 +88,17 @@ With `curated.enabled` (it needs `snapshots.bucket`), the operator also keeps re
 
 A copy carries its source's `kagent.dev/` labels (`kagent.dev/discovery: disabled` on the muster server), and no other label of the source.
 
-**The worker replica rule**: the WorkerPool copy runs `spec.workers.replicas`, except 0 replicas while the organization namespace holds no ModelConfig (of any name) and while the organization is `Orphaned`. A deleted organization runs `spec.workers.replicas` until its sessions are gone, whatever else holds, since kagent needs a worker to suspend an actor, and 0 after (see "Organization cleanup").
+**The worker replica rule**: the WorkerPool copy runs the warm workers that the organization uses, so an agent's first start can build its golden snapshot without a person setting a number:
+
+| State of the organization | Warm workers |
+|---|---|
+| No ModelConfig (of any name) in the organization namespace, or no Agent and no session | 0 |
+| A ModelConfig and one Agent or more (a curated copy counts) | `spec.workers.replicas`, 1 when it is not set |
+| A ModelConfig and a session, but no Agent | `spec.workers.replicas`, 1 when it is not set |
+| `Orphaned` | 0 |
+| Deleted | `spec.workers.replicas` until its sessions are gone, whatever else holds, then 0 (see "Organization cleanup") |
+
+Any Agent of the organization namespace counts, not only one from git: its creation and its deletion reconcile the organization. A session keeps the workers after the last Agent goes, because kagent needs a worker to suspend a session's actor. The operator lists the sessions through kagent (`erasure.kagent.target`, as cleanup does) only while the namespace holds a ModelConfig and no Agent; kagent keeps a session of an Agent that is gone until someone deletes it, so such a session keeps one worker. Nothing tells the operator that a session went: the pool goes to 0 at the next reconcile, within the sync period (`syncPeriod`, 10 minutes by default). While the operator cannot read the Agents or the sessions, the pool runs `spec.workers.replicas` and the organization is `Ready=False` with the error. There is no hold: when an Agent that never had a session is the last to go, the pool goes to 0 at once, and the next Agent starts a worker again.
 
 A copy follows its source: a change in `platformNamespace`, a move of the default mark, or a change of `spec.harnesses` re-copies it into every organization it concerns. A copy whose source is no longer curated for the organization goes. An edit of a copy is reverted. The copies carry `agent-platform.giantswarm.io/organization-object: curated`, which the admission policy that refuses edits to them selects, and `agent-platform.giantswarm.io/copied-from: <platformNamespace>/<name>`.
 

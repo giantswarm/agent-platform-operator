@@ -60,7 +60,7 @@ const (
 func erasureCases(t *testing.T, c *cluster) {
 	t.Run("a deleted organization is erased in order", func(t *testing.T) {
 		org := c.organizationWith(t, "org-erase", "erase", v1alpha1.AgentPlatformOrganizationSpec{
-			Harnesses: []string{curatedHarness}, Workers: v1alpha1.Workers{Replicas: 2},
+			Harnesses: []string{curatedHarness}, Workers: withReplicas(2),
 		})
 		ns := c.readyNamespace(t, org).Name
 		org = c.get(t, org)
@@ -134,7 +134,7 @@ func erasureCases(t *testing.T, c *cluster) {
 		assert.Greater(t, slices.Index(events, workers[2]), firstIndex(events, evNoActor))
 
 		t.Run("an organization re-created with the same parent and name starts empty", func(t *testing.T) {
-			again := c.organizationWith(t, "org-erase", "erase", v1alpha1.AgentPlatformOrganizationSpec{Workers: v1alpha1.Workers{Replicas: 2}})
+			again := c.organizationWith(t, "org-erase", "erase", v1alpha1.AgentPlatformOrganizationSpec{Workers: withReplicas(2)})
 			againNS := c.readyNamespace(t, again).Name
 			again = c.get(t, again)
 			assert.NotEqual(t, org.UID, again.UID)

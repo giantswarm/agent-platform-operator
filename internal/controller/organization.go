@@ -157,8 +157,9 @@ type Config struct {
 // (a parent's admin bindings carry no label common to all of them: its
 // organizations-admin bindings have none, and its rbac-operator bindings are
 // told apart by roleRef and label, adminmirror.IsMirroredAdmin),
-// the metadata of every ModelConfig and, of the network policies and the
-// curated kinds, the platform namespace's and the reconciler's copies.
+// the metadata of every ModelConfig and every Agent and, of the network
+// policies and the other curated kinds, the platform namespace's and the
+// reconciler's copies.
 //
 // The network policies and the curated kinds are cached for their watch
 // only. The reconciler reads them, and the OCIRepository, as unstructured
@@ -180,7 +181,13 @@ func CacheOptions(cfg Config, syncPeriod time.Duration) cache.Options {
 	}
 	if cfg.Curated.Enabled() {
 		for _, gvk := range cfg.Curated.copied() {
-			byObject[object(gvk)] = sourcesAndCopies
+			// The Agents are watched by their metadata in every namespace:
+			// any Agent of an organization namespace counts for the worker
+			// replica rule. The cache is keyed by kind, so an entry here
+			// would narrow that watch too.
+			if gvk != cfg.Curated.agent() {
+				byObject[object(gvk)] = sourcesAndCopies
+			}
 		}
 	}
 	if f := cfg.Flux; f.watched() {
@@ -242,13 +249,23 @@ func (r *OrganizationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if !r.Config.NetworkPolicyGVK.Empty() {
 		copied = append(copied, r.Config.NetworkPolicyGVK)
 	}
-	if r.Config.Curated.Enabled() {
-		copied = append(copied, r.Config.Curated.copied()...)
+	if c := r.Config.Curated; c.Enabled() {
+		for _, gvk := range c.copied() {
+			if gvk != c.agent() {
+				copied = append(copied, gvk)
+			}
+		}
 		// Any ModelConfig of an organization namespace: its creation, its
 		// deletion and a move of the default mark.
 		mc := &metav1.PartialObjectMetadata{}
-		mc.SetGroupVersionKind(r.Config.Curated.modelConfig())
+		mc.SetGroupVersionKind(c.modelConfig())
 		b = b.Watches(mc, inOrganization, builder.OnlyMetadata, builder.WithPredicates(predicate.AnnotationChangedPredicate{}))
+		// Any Agent of an organization namespace (its creation and deletion
+		// change the worker replica rule's count), a curated source and a
+		// curated copy.
+		agent := &metav1.PartialObjectMetadata{}
+		agent.SetGroupVersionKind(c.agent())
+		b = b.Watches(agent, handler.EnqueueRequestsFromMapFunc(r.organizationsOfAgent), builder.OnlyMetadata, builder.WithPredicates(specOrLabels))
 	}
 	if r.Config.Flux.watched() {
 		b = b.Watches(object(r.Config.Flux.Kustomization), handler.EnqueueRequestsFromMapFunc(r.organizationsOfKustomization), builder.WithPredicates(r.kustomizationChanged()))
@@ -331,6 +348,16 @@ func (r *OrganizationReconciler) organizationsOfCopy(ctx context.Context, o clie
 		return r.organizationOfNamespace(ctx, o)
 	}
 	return nil
+}
+
+// organizationsOfAgent maps an Agent of the platform namespace (a curated
+// source) to every organization, and any other Agent, a curated copy or not,
+// to the organization of its namespace.
+func (r *OrganizationReconciler) organizationsOfAgent(ctx context.Context, o client.Object) []reconcile.Request {
+	if o.GetNamespace() == r.Config.PlatformNamespace {
+		return r.organizationsOf(ctx, "")
+	}
+	return r.organizationOfNamespace(ctx, o)
 }
 
 // organizationsAdminRoleRef is the roleRef of every mirror.

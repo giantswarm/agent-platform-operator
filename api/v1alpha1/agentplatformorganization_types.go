@@ -113,19 +113,39 @@ type AgentPlatformOrganizationSpec struct {
 
 	// Workers sizes the organization's WorkerPool.
 	// +optional
+	// +kubebuilder:default={}
 	Workers Workers `json:"workers,omitempty"`
 }
+
+// DefaultWorkerReplicas is the number of warm workers of an organization
+// whose spec.workers.replicas is not set.
+const DefaultWorkerReplicas int32 = 1
 
 // Workers sizes the organization's WorkerPool.
 type Workers struct {
 	// Replicas is the number of warm workers of the organization's WorkerPool
-	// while the organization can use them: the pool runs 0 while the
-	// organization namespace holds no ModelConfig and while the organization
-	// is Orphaned. A deleted organization runs Replicas until its sessions
-	// are gone, so kagent can suspend its actors, and 0 after.
+	// while the organization uses them: while its namespace holds a
+	// ModelConfig and an Agent (a curated copy counts), or a ModelConfig and
+	// a session. The pool runs 0 while the namespace holds no ModelConfig,
+	// while it holds no Agent and no session, and while the organization is
+	// Orphaned. A deleted organization runs Replicas until its sessions are
+	// gone, so kagent can suspend its actors, and 0 after.
+	//
+	// Not set means 1 (DefaultWorkerReplicas); 0 set on purpose runs no
+	// worker. The CRD writes the default into an object without the field,
+	// and the operator applies it too where the CRD is older.
 	// +optional
+	// +kubebuilder:default=1
 	// +kubebuilder:validation:Minimum=0
-	Replicas int32 `json:"replicas,omitempty"`
+	Replicas *int32 `json:"replicas,omitempty"`
+}
+
+// ReplicasOrDefault is Replicas, or DefaultWorkerReplicas when it is not set.
+func (w Workers) ReplicasOrDefault() int32 {
+	if w.Replicas == nil {
+		return DefaultWorkerReplicas
+	}
+	return *w.Replicas
 }
 
 // AgentPlatformOrganizationStatus is what the operator observed.
@@ -192,6 +212,7 @@ type AgentPlatformOrganization struct {
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
 	// +optional
+	// +kubebuilder:default={}
 	Spec AgentPlatformOrganizationSpec `json:"spec,omitempty"`
 	// +optional
 	Status AgentPlatformOrganizationStatus `json:"status,omitempty"`

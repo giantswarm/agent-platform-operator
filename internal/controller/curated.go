@@ -128,10 +128,20 @@ func (r *OrganizationReconciler) keepCurated(ctx context.Context, org *v1alpha1.
 		return errors.New("the curated Harnesses are not copied: the operator has no snapshot bucket")
 	}
 	k := &curated{keep: map[schema.GroupVersionKind]map[string]bool{}, complete: map[schema.GroupVersionKind]bool{}}
+	var errs []error
+	agents, agentsErr := r.curatedSources(ctx, c.agent())
 	// The rule reads the Orphaned condition this reconcile set.
 	current := org.DeepCopy()
 	current.Status = *status
-	errs := []error{r.copyWorkerPool(ctx, ns, workerReplicas(current, len(models) > 0), k)}
+	use := usage{models: len(models) > 0}
+	if use.models && !orphaned(current) {
+		// A curated Agent counts before its copy exists: this reconcile
+		// writes it.
+		var err error
+		use.inUse, err = r.inUse(ctx, ns, len(agents) > 0)
+		errs = append(errs, err)
+	}
+	errs = append(errs, r.copyWorkerPool(ctx, ns, workerReplicas(current, use), k))
 
 	for _, name := range org.Spec.Harnesses {
 		k.kept(c.harness(), name)
@@ -142,9 +152,8 @@ func (r *OrganizationReconciler) keepCurated(ctx context.Context, org *v1alpha1.
 	k.complete[c.harness()] = true
 
 	var servers []string
-	agents, err := r.curatedSources(ctx, c.agent())
-	if err != nil {
-		errs = append(errs, err)
+	if agentsErr != nil {
+		errs = append(errs, agentsErr)
 	} else {
 		k.complete[c.agent()] = true
 	}
@@ -206,22 +215,71 @@ func (r *OrganizationReconciler) keepCurated(ctx context.Context, org *v1alpha1.
 	return errors.Join(errs...)
 }
 
+// usage is what the organization namespace holds that the worker replica rule
+// reads.
+type usage struct {
+	// models: the namespace holds a ModelConfig.
+	models bool
+	// inUse: the namespace holds an Agent (a curated copy counts) or the
+	// organization has a session, or the operator could not tell.
+	inUse bool
+}
+
 // workerReplicas is the worker replica rule: the organization's
-// spec.workers.replicas, but 0 while its namespace holds no ModelConfig (no
-// agent can run without a model) and while it is Orphaned. A deleted
-// organization runs its replicas until its sessions are gone, whatever else
-// holds, since kagent needs a worker to suspend an actor, and 0 after.
-func workerReplicas(org *v1alpha1.AgentPlatformOrganization, holdsModelConfig bool) int64 {
+// spec.workers.replicas (1 when it is not set) while its namespace holds a
+// ModelConfig and an Agent or a session; 0 while it holds no ModelConfig (no
+// agent can run without a model), while it holds no Agent and no session
+// (nothing needs a worker), and while it is Orphaned. A deleted organization
+// runs its replicas until its sessions are gone, whatever else holds, since
+// kagent needs a worker to suspend an actor, and 0 after.
+func workerReplicas(org *v1alpha1.AgentPlatformOrganization, use usage) int64 {
+	replicas := int64(org.Spec.Workers.ReplicasOrDefault())
 	if org.DeletionTimestamp != nil {
 		if sessionsGone(org.Status.ErasureStep) {
 			return 0
 		}
-		return int64(org.Spec.Workers.Replicas)
+		return replicas
 	}
-	if !holdsModelConfig || meta.IsStatusConditionTrue(org.Status.Conditions, v1alpha1.ConditionOrphaned) {
+	if !use.models || !use.inUse || orphaned(org) {
 		return 0
 	}
-	return int64(org.Spec.Workers.Replicas)
+	return replicas
+}
+
+func orphaned(org *v1alpha1.AgentPlatformOrganization) bool {
+	return meta.IsStatusConditionTrue(org.Status.Conditions, v1alpha1.ConditionOrphaned)
+}
+
+// inUse reports whether the organization namespace ns needs its workers: it
+// holds an Agent (curated: a curated Agent is copied into it), or kagent
+// holds a session of it, whose actor kagent needs a worker to suspend. The
+// sessions are those the erasure deletes (Erasure.Sessions), Agents that are
+// gone included; they are listed only when ns holds no Agent. When the
+// operator cannot tell, the workers stay: inUse is true, with the error.
+func (r *OrganizationReconciler) inUse(ctx context.Context, ns string, curated bool) (bool, error) {
+	if curated {
+		return true, nil
+	}
+	gvk := r.Config.Curated.agent()
+	list := &metav1.PartialObjectMetadataList{}
+	list.SetGroupVersionKind(gvk.GroupVersion().WithKind(gvk.Kind + "List"))
+	if err := r.APIReader.List(ctx, list, client.InNamespace(ns)); err != nil {
+		return true, fmt.Errorf("list the Agents in %s: %w", ns, err)
+	}
+	for _, a := range list.Items {
+		if a.DeletionTimestamp == nil {
+			return true, nil
+		}
+	}
+	sessions := r.Config.Erasure.Sessions
+	if sessions == nil {
+		return true, nil
+	}
+	ids, err := sessions.List(ctx, ns)
+	if err != nil {
+		return true, fmt.Errorf("list the sessions of %s: %w", ns, err)
+	}
+	return len(ids) > 0, nil
 }
 
 // modelConfigs are the ModelConfigs of ns that are not going away.

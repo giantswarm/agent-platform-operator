@@ -218,7 +218,8 @@ func (r *OrganizationReconciler) scaleWorkers(ctx context.Context, org *v1alpha1
 	}
 	erasing := org.DeepCopy()
 	erasing.Status = *status
-	want := workerReplicas(erasing, true)
+	// A deleted organization's rule reads its erasure step only.
+	want := workerReplicas(erasing, usage{})
 	if have, _, _ := unstructured.NestedInt64(pool.Object, "spec", "replicas"); have == want {
 		return nil
 	}
