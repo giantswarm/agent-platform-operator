@@ -88,7 +88,7 @@ func TestOrganizationEnvtest(t *testing.T) {
 		// A spec change reconciles the organization once more; its Ready
 		// condition observes the new generation after that reconcile.
 		org = c.get(t, org)
-		org.Spec.Workers.Replicas = 2
+		org.Spec.Workers = withReplicas(2)
 		require.NoError(t, c.admin.Update(t.Context(), org))
 		c.readyAt(t, org, org.Generation)
 
@@ -345,7 +345,7 @@ func TestOrganizationEnvtest(t *testing.T) {
 // organization creates an AgentPlatformOrganization in a new parent namespace.
 func (c *cluster) organization(t *testing.T, parent, name string) *v1alpha1.AgentPlatformOrganization {
 	t.Helper()
-	return c.organizationWith(t, parent, name, v1alpha1.AgentPlatformOrganizationSpec{Workers: v1alpha1.Workers{Replicas: 1}})
+	return c.organizationWith(t, parent, name, v1alpha1.AgentPlatformOrganizationSpec{Workers: withReplicas(1)})
 }
 
 // organizationWith creates an AgentPlatformOrganization of spec in a new

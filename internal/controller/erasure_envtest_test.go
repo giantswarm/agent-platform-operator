@@ -60,7 +60,7 @@ const (
 func erasureCases(t *testing.T, c *cluster) {
 	t.Run("a deleted organization is erased in order", func(t *testing.T) {
 		org := c.organizationWith(t, "org-erase", "erase", v1alpha1.AgentPlatformOrganizationSpec{
-			Harnesses: []string{curatedHarness}, Workers: v1alpha1.Workers{Replicas: 2},
+			Harnesses: []string{curatedHarness}, Workers: withReplicas(2),
 		})
 		ns := c.readyNamespace(t, org).Name
 		org = c.get(t, org)
@@ -134,7 +134,7 @@ func erasureCases(t *testing.T, c *cluster) {
 		assert.Greater(t, slices.Index(events, workers[2]), firstIndex(events, evNoActor))
 
 		t.Run("an organization re-created with the same parent and name starts empty", func(t *testing.T) {
-			again := c.organizationWith(t, "org-erase", "erase", v1alpha1.AgentPlatformOrganizationSpec{Workers: v1alpha1.Workers{Replicas: 2}})
+			again := c.organizationWith(t, "org-erase", "erase", v1alpha1.AgentPlatformOrganizationSpec{Workers: withReplicas(2)})
 			againNS := c.readyNamespace(t, again).Name
 			again = c.get(t, again)
 			assert.NotEqual(t, org.UID, again.UID)
@@ -306,6 +306,15 @@ type fakeSessions struct {
 	// onList runs at each listing, before it, with the namespace asked for
 	// (empty: every namespace).
 	onList func(namespace string)
+	// unavailable: kagent answers every listing Unavailable.
+	unavailable bool
+}
+
+// failing makes every listing fail (Unavailable) while down.
+func (f *fakeSessions) failing(down bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.unavailable = down
 }
 
 func (f *fakeSessions) add(namespace, creator, id string) {
@@ -353,10 +362,13 @@ func (f *fakeSessions) handle(call grpcwiretest.Call) ([]byte, error) {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	f.mu.Lock()
-	pkg := f.pkg
+	pkg, unavailable := f.pkg, f.unavailable
 	f.mu.Unlock()
 	switch call.Method {
 	case "/" + pkg + ".SessionService/ListSessions":
+		if unavailable {
+			return nil, status.Error(codes.Unavailable, "kagent is down")
+		}
 		if pkg == pkgV1 {
 			// No namespace filter: an unknown field is ignored.
 			return f.list(pkg, ""), nil

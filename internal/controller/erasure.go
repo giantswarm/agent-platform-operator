@@ -30,6 +30,9 @@ type Sessions interface {
 	// List returns the IDs of every creator's sessions of the Agents in
 	// namespace.
 	List(ctx context.Context, namespace string) ([]string, error)
+	// Any reports whether a creator holds a session of the Agents in
+	// namespace; it stops at the first one (the worker replica rule).
+	Any(ctx context.Context, namespace string) (bool, error)
 	// Delete deletes one session; one already gone is no error.
 	Delete(ctx context.Context, id string) error
 }
@@ -218,7 +221,8 @@ func (r *OrganizationReconciler) scaleWorkers(ctx context.Context, org *v1alpha1
 	}
 	erasing := org.DeepCopy()
 	erasing.Status = *status
-	want := workerReplicas(erasing, true)
+	// A deleted organization's rule reads its erasure step only.
+	want := workerReplicas(erasing, usage{})
 	if have, _, _ := unstructured.NestedInt64(pool.Object, "spec", "replicas"); have == want {
 		return nil
 	}

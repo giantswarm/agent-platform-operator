@@ -4,6 +4,7 @@ import (
 	"context"
 	"maps"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -15,6 +16,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -132,13 +134,130 @@ func curatedCases(t *testing.T, c *cluster) {
 		}
 	})
 
-	t.Run("the pool runs no workers without a ModelConfig", func(t *testing.T) {
-		org := c.organizationWith(t, "org-workers", "workers", v1alpha1.AgentPlatformOrganizationSpec{Workers: v1alpha1.Workers{Replicas: 3}})
+	t.Run("the pool runs no workers without a ModelConfig, and its replicas once a ModelConfig and the curated Agent's copy are there", func(t *testing.T) {
+		org := c.organizationWith(t, "org-workers", "workers", v1alpha1.AgentPlatformOrganizationSpec{Workers: withReplicas(3)})
 		ns := c.readyNamespace(t, org).Name
 		c.replicas(t, ns, 0)
 
+		// The curated Agent's copy is the namespace's only Agent: it counts.
 		c.modelConfig(t, ns, "anthropic", false)
 		c.replicas(t, ns, 3)
+		agents := c.agentsIn(t, ns)
+		assert.Equal(t, []string{curatedAgent}, agents, "the namespace holds other Agents than the curated copy")
+	})
+
+	t.Run("an organization without a workers block runs one worker, and one with 0 set runs none", func(t *testing.T) {
+		// As git and agent-manager write it: no workers block at all.
+		unset := newObject(v1alpha1.GroupVersion.WithKind("AgentPlatformOrganization"), "org-workers-unset", "unset", nil, map[string]any{"harnesses": []any{curatedHarness}})
+		createNamespace(t, c.admin, "org-workers-unset")
+		require.NoError(t, c.admin.Create(t.Context(), unset))
+		org := &v1alpha1.AgentPlatformOrganization{}
+		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKeyFromObject(unset), org))
+		if assert.NotNil(t, org.Spec.Workers.Replicas, "the CRD wrote no default") {
+			assert.Equal(t, v1alpha1.DefaultWorkerReplicas, *org.Spec.Workers.Replicas)
+		}
+		ns := c.readyNamespace(t, org).Name
+		c.modelConfig(t, ns, "anthropic", false)
+		c.replicas(t, ns, 1)
+
+		// No spec at all.
+		bare := &unstructured.Unstructured{}
+		bare.SetGroupVersionKind(v1alpha1.GroupVersion.WithKind("AgentPlatformOrganization"))
+		bare.SetNamespace("org-workers-bare")
+		bare.SetName("bare")
+		createNamespace(t, c.admin, "org-workers-bare")
+		require.NoError(t, c.admin.Create(t.Context(), bare))
+		org = &v1alpha1.AgentPlatformOrganization{}
+		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKeyFromObject(bare), org))
+		if assert.NotNil(t, org.Spec.Workers.Replicas, "the CRD wrote no default into an organization without a spec") {
+			assert.Equal(t, v1alpha1.DefaultWorkerReplicas, *org.Spec.Workers.Replicas)
+		}
+		bareNS := c.readyNamespace(t, org).Name
+		c.modelConfig(t, bareNS, "anthropic", false)
+		c.replicas(t, bareNS, 1)
+
+		zero := c.organizationWith(t, "org-workers-zero", "zero", v1alpha1.AgentPlatformOrganizationSpec{Workers: withReplicas(0)})
+		zeroNS := c.readyNamespace(t, zero).Name
+		c.modelConfig(t, zeroNS, "anthropic", false)
+		c.eventually(t, agentGVK, zeroNS, curatedAgent, nil)
+		got := c.get(t, zero)
+		if assert.NotNil(t, got.Spec.Workers.Replicas) {
+			assert.Zero(t, *got.Spec.Workers.Replicas, "an explicit 0 was not kept")
+		}
+		c.replicas(t, zeroNS, 0)
+		c.poke(t, zero)
+		c.stays(t, zeroNS, 0)
+	})
+
+	t.Run("the pool follows the organization's own Agents and sessions where no Agent is curated", func(t *testing.T) {
+		// No curated Agent: the curated source loses its label for this
+		// case, and every copy of it goes.
+		setCurated := func(ctx context.Context, curated bool) {
+			c.editSource(ctx, t, agentGVK, curatedAgent, func(source *unstructured.Unstructured) error {
+				if curated {
+					source.SetLabels(curatedLabels)
+				} else {
+					source.SetLabels(nil)
+				}
+				return nil
+			})
+		}
+		setCurated(t.Context(), false)
+		t.Cleanup(func() { setCurated(context.WithoutCancel(t.Context()), true) })
+
+		org := c.organization(t, "org-workers-agents", "agents")
+		ns := c.readyNamespace(t, org).Name
+		c.eventuallyAbsent(t, agentGVK, ns, curatedAgent)
+		// A model and no Agent: no worker.
+		c.modelConfig(t, ns, "anthropic", false)
+		c.replicas(t, ns, 0)
+		c.stays(t, ns, 0)
+
+		// The first Agent brings the default, one worker.
+		agent := newObject(agentGVK, ns, "triage", nil, agentSpec("Triage.", nil))
+		require.NoError(t, c.admin.Create(t.Context(), agent))
+		c.replicas(t, ns, 1)
+
+		// The last Agent goes while a session of it is open: the worker
+		// stays, so kagent can suspend the session's actor.
+		const session = "a0a0a0a0-a0a0-a0a0-a0a0-a0a0a0a0a0a0"
+		c.sessions.addOf(ns, "triage", "alice@example.com", session)
+		require.NoError(t, c.admin.Delete(t.Context(), agent))
+		c.eventuallyAbsent(t, agentGVK, ns, "triage")
+		c.poke(t, org)
+		c.stays(t, ns, 1)
+
+		// The session goes: so does the worker, at the next reconcile.
+		c.sessions.delete(session)
+		require.EventuallyWithT(t, func(ct *assert.CollectT) {
+			c.poke(t, org)
+			pool := c.read(t, poolGVK, ns, curatedPool)
+			got, _, _ := unstructured.NestedInt64(pool.Object, "spec", "replicas")
+			assert.Zero(ct, got)
+		}, timeout, tick)
+
+		// kagent cannot list the sessions: the operator cannot tell, so the
+		// worker comes back and the organization says why it is not Ready.
+		c.sessions.failing(true)
+		t.Cleanup(func() { c.sessions.failing(false) })
+		c.poke(t, org)
+		c.replicas(t, ns, 1)
+		require.EventuallyWithT(t, func(ct *assert.CollectT) {
+			ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, v1alpha1.ConditionReady)
+			if assert.NotNil(ct, ready) {
+				assert.Equal(ct, metav1.ConditionFalse, ready.Status)
+				assert.Contains(ct, ready.Message, "list the sessions of "+ns)
+			}
+		}, timeout, tick)
+
+		// kagent answers again: no session, no worker.
+		c.sessions.failing(false)
+		require.EventuallyWithT(t, func(ct *assert.CollectT) {
+			c.poke(t, org)
+			pool := c.read(t, poolGVK, ns, curatedPool)
+			got, _, _ := unstructured.NestedInt64(pool.Object, "spec", "replicas")
+			assert.Zero(ct, got)
+		}, timeout, tick)
 	})
 
 	t.Run("the curated Agents run on the one ModelConfig marked as the default", func(t *testing.T) {
@@ -268,7 +387,7 @@ func curatedCases(t *testing.T, c *cluster) {
 			{desc: "the Helm ServiceAccount", parent: "org-sa-helm", name: "sa-helm", sa: helmSA},
 		} {
 			t.Run(tc.desc, func(t *testing.T) {
-				org := c.organizationWith(t, tc.parent, tc.name, v1alpha1.AgentPlatformOrganizationSpec{Workers: v1alpha1.Workers{Replicas: 2}})
+				org := c.organizationWith(t, tc.parent, tc.name, v1alpha1.AgentPlatformOrganizationSpec{Workers: withReplicas(2)})
 				ns := c.readyNamespace(t, org).Name
 				model := c.modelConfig(t, ns, "anthropic", false)
 				c.replicas(t, ns, 2)
@@ -411,6 +530,45 @@ func (c *cluster) replicas(t *testing.T, ns string, n int64) {
 		assert.Equal(ct, n, got)
 	})
 }
+
+// stays asserts that the organization's pool copy in ns keeps n replicas for
+// a while: the reconciles the last change started have run.
+func (c *cluster) stays(t *testing.T, ns string, n int64) {
+	t.Helper()
+	require.Never(t, func() bool {
+		pool := &unstructured.Unstructured{}
+		pool.SetGroupVersionKind(poolGVK)
+		if err := c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns, Name: curatedPool}, pool); err != nil {
+			return true
+		}
+		got, _, _ := unstructured.NestedInt64(pool.Object, "spec", "replicas")
+		return got != n
+	}, 2*time.Second, tick, "the pool in %s did not stay at %d replicas", ns, n)
+}
+
+// poke reconciles org: an annotation change is an event of its own. It stands
+// for the sync period, which reconciles every organization.
+func (c *cluster) poke(t require.TestingT, org *v1alpha1.AgentPlatformOrganization) {
+	patch := []byte(`{"metadata":{"annotations":{"test.giantswarm.io/poke":"` + time.Now().Format(time.RFC3339Nano) + `"}}}`)
+	got := &v1alpha1.AgentPlatformOrganization{ObjectMeta: metav1.ObjectMeta{Name: org.Name, Namespace: org.Namespace}}
+	require.NoError(t, c.admin.Patch(context.Background(), got, client.RawPatch(types.MergePatchType, patch)))
+}
+
+// agentsIn are the names of the Agents in ns.
+func (c *cluster) agentsIn(t *testing.T, ns string) []string {
+	t.Helper()
+	list := &unstructured.UnstructuredList{}
+	list.SetGroupVersionKind(agentGVK.GroupVersion().WithKind("AgentList"))
+	require.NoError(t, c.admin.List(t.Context(), list, client.InNamespace(ns)))
+	names := make([]string, 0, len(list.Items))
+	for i := range list.Items {
+		names = append(names, list.Items[i].GetName())
+	}
+	return names
+}
+
+// workers is a workers block with replicas set to n.
+func withReplicas(n int32) v1alpha1.Workers { return v1alpha1.Workers{Replicas: &n} }
 
 // modelConfig creates a ModelConfig in ns, marked as the default when
 // marked.

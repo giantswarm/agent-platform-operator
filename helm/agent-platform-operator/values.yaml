@@ -153,8 +153,11 @@ erasure:
   kagent:
     # -- The kagent controller's gRPC API (`grpc://host:port` or
     # `grpcs://host[:port]`), through which cleanup deletes a deleted
-    # organization's sessions, as the operator's ServiceAccount. Empty skips
-    # them; required with `curated.enabled`.
+    # organization's sessions, and the worker replica rule asks whether an
+    # organization with a ModelConfig and no Agent still has a session, as
+    # the operator's ServiceAccount. While it cannot answer, such an
+    # organization keeps its workers and is not Ready. Empty skips them;
+    # required with `curated.enabled`.
     target: ""
     # -- The audience of the ServiceAccount token sent to kagent: the
     # controller's machine audience.

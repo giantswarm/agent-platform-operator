@@ -156,6 +156,34 @@ func TestListReadsEveryCreatorsSessionsOfTheNamespaceOnEveryPage(t *testing.T) {
 	}
 }
 
+// TestAnyStopsAtThePageOfTheFirstSession: without the namespace filter
+// (kagent.api.v1) a listing reads every namespace's sessions, so Any stops at
+// the first page that holds one of the namespace, and reads on while none
+// does.
+func TestAnyStopsAtThePageOfTheFirstSession(t *testing.T) {
+	served := []string{v1}
+	pages := map[string][]byte{
+		"":       listResponse("page-2", session("x", "agents-other-abcde")),
+		"page-2": listResponse("page-3", session("a", "agents-acme-x7k2q")),
+		"page-3": listResponse("", session("b", "agents-acme-x7k2q")),
+	}
+	srv, conn := grpcwiretest.Start(t, "operator-token", serving(&served, func(c grpcwiretest.Call) ([]byte, error) {
+		_, _, token, _ := request(t, c.Request)
+		return pages[token], nil
+	}))
+	sessions := kagent.New(conn)
+
+	held, err := sessions.Any(t.Context(), "agents-acme-x7k2q")
+	require.NoError(t, err)
+	assert.True(t, held)
+	assert.Len(t, srv.Calls(), 2, "Any read past the page of the first session")
+
+	held, err = sessions.Any(t.Context(), "agents-none-zzzzz")
+	require.NoError(t, err)
+	assert.False(t, held)
+	assert.Len(t, srv.Calls(), 5, "Any did not read every page of a namespace without a session")
+}
+
 func TestListFollowsTheSessionServicePackageTheControllerServes(t *testing.T) {
 	served := []string{v1alpha1}
 	srv, conn := grpcwiretest.Start(t, "operator-token", serving(&served, func(c grpcwiretest.Call) ([]byte, error) {

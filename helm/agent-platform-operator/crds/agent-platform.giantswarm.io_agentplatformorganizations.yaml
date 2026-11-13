@@ -55,6 +55,7 @@ spec:
           metadata:
             type: object
           spec:
+            default: {}
             description: AgentPlatformOrganizationSpec is what the organization gets.
             properties:
               harnesses:
@@ -65,15 +66,21 @@ spec:
                 type: array
                 x-kubernetes-list-type: set
               workers:
+                default: {}
                 description: Workers sizes the organization's WorkerPool.
                 properties:
                   replicas:
+                    default: 1
                     description: |-
                       Replicas is the number of warm workers of the organization's WorkerPool
-                      while the organization can use them: the pool runs 0 while the
-                      organization namespace holds no ModelConfig and while the organization
-                      is Orphaned. A deleted organization runs Replicas until its sessions
-                      are gone, so kagent can suspend its actors, and 0 after.
+                      while the organization uses them: while its namespace holds a
+                      ModelConfig and an Agent (a curated copy counts), or a ModelConfig and
+                      a session. The pool runs 0 while the namespace holds no ModelConfig,
+                      while it holds no Agent and no session, and while the organization is
+                      Orphaned. A deleted organization runs Replicas until its sessions are
+                      gone, so kagent can suspend its actors, and 0 after.
+
+                      Not set means 1; 0 set on purpose runs no worker.
                     format: int32
                     minimum: 0
                     type: integer

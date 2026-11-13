@@ -127,7 +127,7 @@ func fluxCases(t *testing.T, c *cluster) {
 		// A spec change reconciles the organization: the stripped
 		// ServiceAccount no longer does.
 		org = c.get(t, org)
-		org.Spec.Workers.Replicas = 2
+		org.Spec.Workers = withReplicas(2)
 		require.NoError(t, c.admin.Update(t.Context(), org))
 		c.readyAt(t, org, org.Generation)
 		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKey{Namespace: fluxNS, Name: ns}, sa))
@@ -334,7 +334,7 @@ func fluxCases(t *testing.T, c *cluster) {
 		fromGit := map[string]string{v1alpha1.FluxNameLabel: installationKS, v1alpha1.FluxNamespaceLabel: fluxNS}
 		org := &v1alpha1.AgentPlatformOrganization{
 			ObjectMeta: metav1.ObjectMeta{Name: "treasury", Namespace: parent, Labels: fromGit},
-			Spec:       v1alpha1.AgentPlatformOrganizationSpec{Workers: v1alpha1.Workers{Replicas: 3}},
+			Spec:       v1alpha1.AgentPlatformOrganizationSpec{Workers: withReplicas(3)},
 		}
 		c.create(t, org)
 		ns := c.readyNamespace(t, org).Name
@@ -431,7 +431,7 @@ func fluxCases(t *testing.T, c *cluster) {
 
 		// An organization applied without git, missing from the same
 		// inventory, is never Orphaned.
-		applied := c.organizationWith(t, parent, "applied", v1alpha1.AgentPlatformOrganizationSpec{Workers: v1alpha1.Workers{Replicas: 3}})
+		applied := c.organizationWith(t, parent, "applied", v1alpha1.AgentPlatformOrganizationSpec{Workers: withReplicas(3)})
 		appliedNS := c.readyNamespace(t, applied).Name
 		c.modelConfig(t, appliedNS, "anthropic", false)
 		c.replicas(t, appliedNS, 3)
