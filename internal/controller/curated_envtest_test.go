@@ -135,7 +135,7 @@ func curatedCases(t *testing.T, c *cluster) {
 	})
 
 	t.Run("the pool runs no workers without a ModelConfig, and its replicas once a ModelConfig and the curated Agent's copy are there", func(t *testing.T) {
-		org := c.organizationWith(t, "org-workers", "workers", v1alpha1.AgentPlatformOrganizationSpec{Workers: withReplicas(3)})
+		org := c.organizationWith(t, "org-workers", "workers", v1alpha1.AgentPlatformOrganizationSpec{Harnesses: []string{curatedHarness}, Workers: withReplicas(3)})
 		ns := c.readyNamespace(t, org).Name
 		c.replicas(t, ns, 0)
 
@@ -174,9 +174,11 @@ func curatedCases(t *testing.T, c *cluster) {
 		}
 		bareNS := c.readyNamespace(t, org).Name
 		c.modelConfig(t, bareNS, "anthropic", false)
+		// No spec.harnesses, so no curated Agent: an Agent of its own.
+		require.NoError(t, c.admin.Create(t.Context(), newObject(agentGVK, bareNS, "triage", nil, agentSpec("Triage.", nil))))
 		c.replicas(t, bareNS, 1)
 
-		zero := c.organizationWith(t, "org-workers-zero", "zero", v1alpha1.AgentPlatformOrganizationSpec{Workers: withReplicas(0)})
+		zero := c.organizationWith(t, "org-workers-zero", "zero", v1alpha1.AgentPlatformOrganizationSpec{Harnesses: []string{curatedHarness}, Workers: withReplicas(0)})
 		zeroNS := c.readyNamespace(t, zero).Name
 		c.modelConfig(t, zeroNS, "anthropic", false)
 		c.eventually(t, agentGVK, zeroNS, curatedAgent, nil)
@@ -387,7 +389,7 @@ func curatedCases(t *testing.T, c *cluster) {
 			{desc: "the Helm ServiceAccount", parent: "org-sa-helm", name: "sa-helm", sa: helmSA},
 		} {
 			t.Run(tc.desc, func(t *testing.T) {
-				org := c.organizationWith(t, tc.parent, tc.name, v1alpha1.AgentPlatformOrganizationSpec{Workers: withReplicas(2)})
+				org := c.organizationWith(t, tc.parent, tc.name, v1alpha1.AgentPlatformOrganizationSpec{Harnesses: []string{curatedHarness}, Workers: withReplicas(2)})
 				ns := c.readyNamespace(t, org).Name
 				model := c.modelConfig(t, ns, "anthropic", false)
 				c.replicas(t, ns, 2)

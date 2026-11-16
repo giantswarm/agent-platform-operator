@@ -337,6 +337,7 @@ func TestOrganizationEnvtest(t *testing.T) {
 	})
 
 	curatedCases(t, c)
+	referenceCases(t, c)
 	fluxCases(t, c)
 	serviceAccountBindingCases(t, c)
 	erasureCases(t, c)
@@ -345,7 +346,7 @@ func TestOrganizationEnvtest(t *testing.T) {
 // organization creates an AgentPlatformOrganization in a new parent namespace.
 func (c *cluster) organization(t *testing.T, parent, name string) *v1alpha1.AgentPlatformOrganization {
 	t.Helper()
-	return c.organizationWith(t, parent, name, v1alpha1.AgentPlatformOrganizationSpec{Workers: withReplicas(1)})
+	return c.organizationWith(t, parent, name, v1alpha1.AgentPlatformOrganizationSpec{Harnesses: []string{curatedHarness}, Workers: withReplicas(1)})
 }
 
 // organizationWith creates an AgentPlatformOrganization of spec in a new

@@ -107,12 +107,12 @@ func (c *curated) kept(gvk schema.GroupVersionKind, name string) {
 	c.keep[gvk][name] = true
 }
 
-// keepCurated keeps the curated copies in ns. It follows a curated Agent's
-// templateRef and the RemoteMCPServers the templates' tools name, not a
-// subAgent's template or the ConfigMaps systemPromptFrom, outputSchemaFrom
-// and promptTemplate name: the v1 curated set uses none of them. It sets the
-// organization's DefaultModelConfigured condition in status, and removes the
-// copies whose source is no longer curated for the organization.
+// keepCurated keeps the curated copies in ns: the Harnesses spec.harnesses
+// names, the WorkerPool, and the curated Agents and AgentTemplates whose
+// references are all met, with the AgentTemplates and RemoteMCPServers they
+// refer to (references.go). It sets the organization's DefaultModelConfigured
+// condition in status, and removes the copies whose source is no longer
+// curated for the organization or whose references are no longer met.
 func (r *OrganizationReconciler) keepCurated(ctx context.Context, org *v1alpha1.AgentPlatformOrganization, ns string, status *v1alpha1.AgentPlatformOrganizationStatus) error {
 	c := r.Config.Curated
 	models, err := r.modelConfigs(ctx, ns)
@@ -129,7 +129,42 @@ func (r *OrganizationReconciler) keepCurated(ctx context.Context, org *v1alpha1.
 	}
 	k := &curated{keep: map[schema.GroupVersionKind]map[string]bool{}, complete: map[schema.GroupVersionKind]bool{}}
 	var errs []error
-	agents, agentsErr := r.curatedSources(ctx, c.agent())
+
+	harnesses := map[string]verdict{}
+	for _, name := range org.Spec.Harnesses {
+		k.kept(c.harness(), name)
+		err := r.copyCurated(ctx, ns, c.harness(), name, func(spec map[string]any) error {
+			return rewriteHarness(spec, c.WorkerPool, prefix+"/"+name)
+		})
+		harnesses[name] = verdictOf(err, "the copy of the Harness "+name)
+		errs = append(errs, err)
+	}
+	k.complete[c.harness()] = true
+
+	set := newCuratedSet(harnesses)
+	for _, kind := range []schema.GroupVersionKind{c.agent(), c.template(), c.server()} {
+		items, err := r.curatedSources(ctx, kind)
+		set.add(kind.Kind, items, err)
+	}
+	set.write = func(ctx context.Context, kind string, src *unstructured.Unstructured) error {
+		return r.ensureCurated(ctx, ns, src, func(spec map[string]any) error {
+			switch kind {
+			case kindTemplate:
+				setModelConfig(spec, defaultModel)
+			case kindAgent:
+				if tmpl, ok := spec["template"].(map[string]any); ok {
+					setModelConfig(tmpl, defaultModel)
+				}
+				// An inline harness runs where a Harness copy would, under a
+				// prefix no Harness name reaches.
+				if h, ok := spec["harness"].(map[string]any); ok {
+					return rewriteHarness(h, c.WorkerPool, prefix+"/agents/"+src.GetName())
+				}
+			}
+			return nil
+		})
+	}
+
 	// The rule reads the Orphaned condition this reconcile set.
 	current := org.DeepCopy()
 	current.Status = *status
@@ -138,79 +173,12 @@ func (r *OrganizationReconciler) keepCurated(ctx context.Context, org *v1alpha1.
 		// A curated Agent counts before its copy exists: this reconcile
 		// writes it.
 		var err error
-		use.inUse, err = r.inUse(ctx, ns, len(agents) > 0)
+		use.inUse, err = r.inUse(ctx, ns, set.copiesAgent(ctx))
 		errs = append(errs, err)
 	}
 	errs = append(errs, r.copyWorkerPool(ctx, ns, workerReplicas(current, use), k))
 
-	for _, name := range org.Spec.Harnesses {
-		k.kept(c.harness(), name)
-		errs = append(errs, r.copyCurated(ctx, ns, c.harness(), name, func(spec map[string]any) error {
-			return rewriteHarness(spec, c.WorkerPool, prefix+"/"+name)
-		}))
-	}
-	k.complete[c.harness()] = true
-
-	var servers []string
-	if agentsErr != nil {
-		errs = append(errs, agentsErr)
-	} else {
-		k.complete[c.agent()] = true
-	}
-	var templates []string
-	for i := range agents {
-		src := &agents[i]
-		k.kept(c.agent(), src.GetName())
-		if ref, _, _ := unstructured.NestedString(src.Object, "spec", "templateRef", fieldName); ref != "" {
-			templates = append(templates, ref)
-		}
-		tmpl, _, _ := unstructured.NestedMap(src.Object, "spec", "template")
-		servers = append(servers, serversOf(tmpl)...)
-		errs = append(errs, r.ensureCurated(ctx, ns, src, func(spec map[string]any) error {
-			if tmpl, ok := spec["template"].(map[string]any); ok {
-				setModelConfig(tmpl, defaultModel)
-			}
-			// An inline harness runs where a Harness copy would, under a
-			// prefix no Harness name reaches.
-			if h, ok := spec["harness"].(map[string]any); ok {
-				return rewriteHarness(h, c.WorkerPool, prefix+"/agents/"+src.GetName())
-			}
-			return nil
-		}))
-	}
-
-	labelled, err := r.curatedSources(ctx, c.template())
-	if err != nil {
-		errs = append(errs, err)
-	} else if k.complete[c.agent()] {
-		k.complete[c.template()] = true
-	}
-	for i := range labelled {
-		templates = append(templates, labelled[i].GetName())
-	}
-	slices.Sort(templates)
-	templates = slices.Compact(templates)
-	read := 0
-	for _, name := range templates {
-		k.kept(c.template(), name)
-		errs = append(errs, r.copyCurated(ctx, ns, c.template(), name, func(spec map[string]any) error {
-			read++
-			servers = append(servers, serversOf(spec)...)
-			setModelConfig(spec, defaultModel)
-			return nil
-		}))
-	}
-
-	// The RemoteMCPServers the curated Agents reach their tools through.
-	slices.Sort(servers)
-	for _, name := range slices.Compact(servers) {
-		k.kept(c.server(), name)
-		errs = append(errs, r.copyCurated(ctx, ns, c.server(), name, nil))
-	}
-	// Every server a kept copy names is known only when every template was read.
-	if k.complete[c.template()] && read == len(templates) {
-		k.complete[c.server()] = true
-	}
+	errs = append(errs, r.copyCuratedSet(ctx, set, k))
 	errs = append(errs, r.pruneCurated(ctx, ns, k))
 	return errors.Join(errs...)
 }
@@ -524,24 +492,6 @@ func setModelConfig(template map[string]any, name string) {
 		return
 	}
 	template["modelConfig"] = map[string]any{fieldName: name}
-}
-
-// serversOf are the RemoteMCPServers an agent template spec's tools name.
-func serversOf(template map[string]any) []string {
-	tools, _, _ := unstructured.NestedSlice(template, "tools")
-	var names []string
-	for _, t := range tools {
-		tool, ok := t.(map[string]any)
-		if !ok {
-			continue
-		}
-		kind, _, _ := unstructured.NestedString(tool, "mcp", "server", "kind")
-		name, _, _ := unstructured.NestedString(tool, "mcp", "server", fieldName)
-		if kind == "RemoteMCPServer" && name != "" {
-			names = append(names, name)
-		}
-	}
-	return names
 }
 
 func objectRef(src *unstructured.Unstructured) string {

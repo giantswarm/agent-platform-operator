@@ -334,7 +334,7 @@ func fluxCases(t *testing.T, c *cluster) {
 		fromGit := map[string]string{v1alpha1.FluxNameLabel: installationKS, v1alpha1.FluxNamespaceLabel: fluxNS}
 		org := &v1alpha1.AgentPlatformOrganization{
 			ObjectMeta: metav1.ObjectMeta{Name: "treasury", Namespace: parent, Labels: fromGit},
-			Spec:       v1alpha1.AgentPlatformOrganizationSpec{Workers: withReplicas(3)},
+			Spec:       v1alpha1.AgentPlatformOrganizationSpec{Harnesses: []string{curatedHarness}, Workers: withReplicas(3)},
 		}
 		c.create(t, org)
 		ns := c.readyNamespace(t, org).Name
@@ -431,7 +431,7 @@ func fluxCases(t *testing.T, c *cluster) {
 
 		// An organization applied without git, missing from the same
 		// inventory, is never Orphaned.
-		applied := c.organizationWith(t, parent, "applied", v1alpha1.AgentPlatformOrganizationSpec{Workers: withReplicas(3)})
+		applied := c.organizationWith(t, parent, "applied", v1alpha1.AgentPlatformOrganizationSpec{Harnesses: []string{curatedHarness}, Workers: withReplicas(3)})
 		appliedNS := c.readyNamespace(t, applied).Name
 		c.modelConfig(t, appliedNS, "anthropic", false)
 		c.replicas(t, appliedNS, 3)

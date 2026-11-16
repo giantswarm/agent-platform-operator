@@ -88,7 +88,8 @@ curated:
   # the WorkerPool `workerPool` with its ServiceAccount, the Agents and
   # AgentTemplates labelled `agent-platform.giantswarm.io/curated: "true"`
   # (their template's `modelConfig` set to the organization's default
-  # ModelConfig) and the RemoteMCPServers they name. Needs `snapshots.bucket`,
+  # ModelConfig) and the curated RemoteMCPServers they name, each only when
+  # every object it refers to is copied too. Needs `snapshots.bucket`,
   # `erasure.kagent.target`, `erasure.substrate.target` and an API server
   # that serves `kagentApiVersion` and `workerPoolApiVersion`.
   enabled: false
