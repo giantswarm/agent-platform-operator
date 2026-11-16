@@ -445,12 +445,17 @@ func (r *OrganizationReconciler) platformObject(ctx context.Context, gvk schema.
 // RemoteMCPServers and Harnesses they refer to. A kind goes only once no copy
 // of an earlier kind is left to go: when one is not read in full, a deletion
 // fails, or a copy is still being deleted, the later kinds wait for the next
-// reconcile. A copy then never outlives what it refers to, whose name the
-// organization could take.
+// reconcile. Within the AgentTemplates, one that another copy going on this
+// reconcile refers to (a sub-agent's template) waits for the next one too. A
+// copy then never outlives what it refers to, whose name the organization
+// could take.
 func (r *OrganizationReconciler) pruneCurated(ctx context.Context, ns string, k *curated) error {
 	c := r.Config.Curated
 	var errs []error
 	pending := false
+	// referred are the objects that the copies going on this reconcile
+	// refer to, with the names of those copies.
+	referred := map[reference][]string{}
 	for _, gvk := range []schema.GroupVersionKind{c.agent(), c.template(), c.server(), c.harness(), c.pool()} {
 		if !k.complete[gvk] || (pending && gvk != c.pool()) {
 			// The WorkerPool copy is always kept, so nothing waits for it.
@@ -464,9 +469,21 @@ func (r *OrganizationReconciler) pruneCurated(ctx context.Context, ns string, k 
 			pending = true
 			continue
 		}
+		var going []*unstructured.Unstructured
 		for i := range list.Items {
 			cp := &list.Items[i]
 			if k.keep[gvk][cp.GetName()] {
+				continue
+			}
+			going = append(going, cp)
+			for _, ref := range referencesOf(gvk.Kind, cp) {
+				referred[ref] = append(referred[ref], gvk.Kind+" "+cp.GetName())
+			}
+		}
+		for _, cp := range going {
+			self := gvk.Kind + " " + cp.GetName()
+			if slices.ContainsFunc(referred[reference{gvk.Kind, cp.GetName()}], func(by string) bool { return by != self }) {
+				pending = true
 				continue
 			}
 			if cp.GetDeletionTimestamp() != nil {
