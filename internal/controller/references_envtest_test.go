@@ -144,13 +144,78 @@ func referenceCases(t *testing.T, c *cluster) {
 		c.never(t, agentGVK, ns, name)
 		assert.Equal(t, "The organization's.", str(c.read(t, templateGVK, ns, ref), "spec", promptField), "the organization's AgentTemplate was overwritten")
 
-		// The name is free: the template and the Agent are copied.
+		// The name is free: the template and the Agent are copied, at the
+		// next reconcile (the sync period: the organization's own objects
+		// are not watched).
 		require.NoError(t, c.admin.Delete(t.Context(), own))
+		c.eventuallyAbsent(t, templateGVK, ns, ref)
+		c.poke(t, org)
 		c.eventually(t, agentGVK, ns, name, nil)
 		c.eventually(t, templateGVK, ns, ref, func(ct *assert.CollectT, tp *unstructured.Unstructured) {
 			assert.Equal(ct, "Curated.", str(tp, "spec", promptField))
 		})
 	})
+
+	t.Run("a copy outlives no copy it refers to, and one being deleted is no copy to refer to", func(t *testing.T) {
+		org := c.organization(t, "org-refs-held", "held")
+		ns := c.readyNamespace(t, org).Name
+		const ref, name, later = "ref-held", "refs-held", "refs-held-later"
+		c.createSource(t, templateGVK, ref, curatedLabels, templateSpec("Held.", nil))
+		c.createSource(t, agentGVK, name, curatedLabels, map[string]any{harnessRefField: nameRef(curatedHarness), templateRefField: nameRef(ref)})
+		c.eventually(t, agentGVK, ns, name, nil)
+		c.eventually(t, templateGVK, ns, ref, nil)
+
+		// The template is no longer curated: the Agent's copy goes first,
+		// and the template's only once the Agent's is gone.
+		c.setFinalizers(t, agentGVK, ns, name, []string{holdFinalizer})
+		c.setSourceLabels(t.Context(), t, templateGVK, ref, nil)
+		require.EventuallyWithT(t, func(ct *assert.CollectT) {
+			assert.NotNil(ct, c.read(t, agentGVK, ns, name).GetDeletionTimestamp())
+		}, timeout, tick)
+		c.staysPresent(t, templateGVK, ns, ref)
+		c.setFinalizers(t, agentGVK, ns, name, nil)
+		c.eventuallyAbsent(t, agentGVK, ns, name)
+		c.eventuallyAbsent(t, templateGVK, ns, ref)
+
+		// Curated again, then its copy is being deleted: an Agent that
+		// refers to it is copied only once it is copied again.
+		c.setSourceLabels(t.Context(), t, templateGVK, ref, curatedLabels)
+		c.eventually(t, agentGVK, ns, name, nil)
+		c.setFinalizers(t, templateGVK, ns, ref, []string{holdFinalizer})
+		require.NoError(t, c.admin.Delete(t.Context(), c.read(t, templateGVK, ns, ref)))
+		c.createSource(t, agentGVK, later, curatedLabels, map[string]any{harnessRefField: nameRef(curatedHarness), templateRefField: nameRef(ref)})
+		c.never(t, agentGVK, ns, later)
+		c.staysPresent(t, agentGVK, ns, name)
+		c.setFinalizers(t, templateGVK, ns, ref, nil)
+		c.eventually(t, agentGVK, ns, later, nil)
+		c.eventually(t, templateGVK, ns, ref, func(ct *assert.CollectT, tp *unstructured.Unstructured) {
+			assert.Nil(ct, tp.GetDeletionTimestamp())
+		})
+	})
+}
+
+// setFinalizers sets the finalizers of the object of gvk ns/name.
+func (c *cluster) setFinalizers(t *testing.T, gvk schema.GroupVersionKind, ns, name string, finalizers []string) {
+	t.Helper()
+	require.EventuallyWithT(t, func(ct *assert.CollectT) {
+		u := &unstructured.Unstructured{}
+		u.SetGroupVersionKind(gvk)
+		if !assert.NoError(ct, c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns, Name: name}, u)) {
+			return
+		}
+		u.SetFinalizers(finalizers)
+		assert.NoError(ct, c.admin.Update(t.Context(), u))
+	}, timeout, tick)
+}
+
+// staysPresent asserts that the object of gvk ns/name exists for a while.
+func (c *cluster) staysPresent(t *testing.T, gvk schema.GroupVersionKind, ns, name string) {
+	t.Helper()
+	require.Never(t, func() bool {
+		u := &unstructured.Unstructured{}
+		u.SetGroupVersionKind(gvk)
+		return apierrors.IsNotFound(c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns, Name: name}, u))
+	}, 2*time.Second, tick, "%s %s/%s went", gvk.Kind, ns, name)
 }
 
 // createSource creates the platform object of gvk named name, deleted when the

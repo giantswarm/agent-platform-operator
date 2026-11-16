@@ -60,13 +60,14 @@ type verdict struct {
 
 // verdictOf is the verdict of a copy that err left: a cause of Ready=False
 // (the source is missing, the name is taken by another writer's object) is
-// unmet; any other failure is unknown.
+// unmet; any other failure is unknown. As in split, only a *notReadyError
+// itself is a cause: one wrapped or joined with others may hide a failure,
+// and a failure must never delete a copy.
 func verdictOf(err error, what string) verdict {
 	if err == nil {
 		return verdict{state: met}
 	}
-	var nr *notReadyError
-	if errors.As(err, &nr) {
+	if nr, ok := err.(*notReadyError); ok { //nolint:errorlint // a wrapped cause is a failure, see split
 		return verdict{state: unmet, reason: fmt.Sprintf("%s: %s", what, nr.message)}
 	}
 	return verdict{state: unknown, reason: fmt.Sprintf("%s: %v", what, err)}

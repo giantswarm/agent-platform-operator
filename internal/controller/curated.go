@@ -440,17 +440,28 @@ func (r *OrganizationReconciler) platformObject(ctx context.Context, gvk schema.
 }
 
 // pruneCurated deletes the curated copies in ns that k does not keep, of the
-// kinds whose sources k read in full.
+// kinds whose sources k read in full. It deletes the copies that refer to
+// others first: the Agents, then the AgentTemplates, then the
+// RemoteMCPServers and Harnesses they refer to. A kind goes only once no copy
+// of an earlier kind is left to go: when one is not read in full, a deletion
+// fails, or a copy is still being deleted, the later kinds wait for the next
+// reconcile. A copy then never outlives what it refers to, whose name the
+// organization could take.
 func (r *OrganizationReconciler) pruneCurated(ctx context.Context, ns string, k *curated) error {
+	c := r.Config.Curated
 	var errs []error
-	for _, gvk := range r.Config.Curated.copied() {
-		if !k.complete[gvk] {
+	pending := false
+	for _, gvk := range []schema.GroupVersionKind{c.agent(), c.template(), c.server(), c.harness(), c.pool()} {
+		if !k.complete[gvk] || (pending && gvk != c.pool()) {
+			// The WorkerPool copy is always kept, so nothing waits for it.
+			pending = true
 			continue
 		}
 		list := &unstructured.UnstructuredList{}
 		list.SetGroupVersionKind(gvk.GroupVersion().WithKind(gvk.Kind + "List"))
 		if err := r.Client.List(ctx, list, client.InNamespace(ns), client.MatchingLabels{ObjectLabel: ScopeCurated}); err != nil {
 			errs = append(errs, fmt.Errorf("list the %s copies in %s: %w", gvk.Kind, ns, err))
+			pending = true
 			continue
 		}
 		for i := range list.Items {
@@ -458,9 +469,18 @@ func (r *OrganizationReconciler) pruneCurated(ctx context.Context, ns string, k 
 			if k.keep[gvk][cp.GetName()] {
 				continue
 			}
+			if cp.GetDeletionTimestamp() != nil {
+				pending = true
+				continue
+			}
 			if err := r.Client.Delete(ctx, cp); client.IgnoreNotFound(err) != nil {
 				errs = append(errs, fmt.Errorf("delete %s %s/%s: %w", gvk.Kind, ns, cp.GetName(), err))
+				pending = true
 				continue
+			}
+			// A finalizer keeps the copy until its controller is done.
+			if len(cp.GetFinalizers()) > 0 {
+				pending = true
 			}
 			logf.FromContext(ctx).Info("organization object deleted", "namespace", ns, "kind", gvk.Kind, "name", cp.GetName())
 		}

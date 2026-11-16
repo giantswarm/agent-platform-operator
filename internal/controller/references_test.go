@@ -3,10 +3,17 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 const (
@@ -14,6 +21,8 @@ const (
 	fieldTemplateRef = "templateRef"
 	fieldTools       = "tools"
 	fieldTemplate    = "template"
+	fieldSpec        = "spec"
+	reasonTaken      = "taken"
 	fieldKey         = "key"
 	harness          = "kagent"
 	agentName        = "assistant"
@@ -21,7 +30,7 @@ const (
 )
 
 func source(name string, spec map[string]any) unstructured.Unstructured {
-	u := unstructured.Unstructured{Object: map[string]any{"spec": spec}}
+	u := unstructured.Unstructured{Object: map[string]any{fieldSpec: spec}}
 	u.SetName(name)
 	return u
 }
@@ -60,7 +69,7 @@ func TestReferenceVerdicts(t *testing.T) {
 		{name: "an inline harness", agent: map[string]any{"harness": map[string]any{}, fieldTemplate: map[string]any{}}, want: met},
 		{name: "a Harness outside spec.harnesses", agent: map[string]any{fieldHarnessRef: named("claude"), fieldTemplate: map[string]any{}}, want: unmet},
 		{name: "a Harness whose copy failed", agent: onHarness(map[string]any{}), harnesses: map[string]verdict{harness: {state: unknown, reason: "timeout"}}, want: unknown},
-		{name: "a Harness whose name the organization holds", agent: onHarness(map[string]any{}), harnesses: map[string]verdict{harness: {state: unmet, reason: "taken"}}, want: unmet},
+		{name: "a Harness whose name the organization holds", agent: onHarness(map[string]any{}), harnesses: map[string]verdict{harness: {state: unmet, reason: reasonTaken}}, want: unmet},
 		{
 			name:      "a curated templateRef",
 			agent:     map[string]any{fieldHarnessRef: named(harness), fieldTemplateRef: named("triage")},
@@ -162,7 +171,7 @@ func TestReferenceCopies(t *testing.T) {
 		{name: "every write passes", wantWrites: []string{writeServer, "AgentTemplate triage", "Agent assistant"}, wantAgent: met},
 		{
 			name:       "the template's name is taken",
-			fail:       map[string]error{"triage": &notReadyError{reason: reasonNameTaken, message: "taken"}},
+			fail:       map[string]error{"triage": &notReadyError{reason: reasonNameTaken, message: reasonTaken}},
 			wantWrites: []string{writeServer, "AgentTemplate triage"},
 			wantAgent:  unmet,
 		},
@@ -204,4 +213,46 @@ func TestReferenceCopies(t *testing.T) {
 		assert.False(t, s.copiesAgent(context.Background()))
 		assert.False(t, s.unsure())
 	})
+}
+
+// TestVerdictOf pins that only a cause of Ready=False itself leaves a copy
+// out: one joined with a failure is unknown, so no copy goes.
+func TestVerdictOf(t *testing.T) {
+	taken := &notReadyError{reason: reasonNameTaken, message: reasonTaken}
+	assert.Equal(t, met, verdictOf(nil, "x").state)
+	assert.Equal(t, unmet, verdictOf(taken, "x").state)
+	assert.Equal(t, unknown, verdictOf(errors.Join(taken, errors.New("timeout")), "x").state)
+	assert.Equal(t, unknown, verdictOf(fmt.Errorf("wrapped: %w", taken), "x").state)
+}
+
+// TestCuratedCopyNameTakenSinceTheRead pins that a curated copy whose name an
+// object of another writer took between the read and the create is NameTaken,
+// not written and not taken for the copy.
+func TestCuratedCopyNameTakenSinceTheRead(t *testing.T) {
+	gvk := schema.GroupVersionKind{Group: "api.kagent.dev", Version: "v1alpha3", Kind: kindTemplate}
+	theirs := &unstructured.Unstructured{Object: map[string]any{fieldSpec: map[string]any{"systemPrompt": "Theirs."}}}
+	theirs.SetGroupVersionKind(gvk)
+	theirs.SetNamespace("agents-acme-x1")
+	theirs.SetName("triage")
+	store := fake.NewClientBuilder().WithObjects(theirs).Build()
+	// The read misses it, as one made just before the create would.
+	missed := interceptor.NewClient(store, interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+		return apierrors.NewNotFound(schema.GroupResource{Group: gvk.Group, Resource: "agenttemplates"}, key.Name)
+	}})
+	r := &OrganizationReconciler{Client: missed, APIReader: store}
+
+	src := &unstructured.Unstructured{Object: map[string]any{fieldSpec: map[string]any{"systemPrompt": "Curated."}}}
+	src.SetGroupVersionKind(gvk)
+	src.SetNamespace("kagent")
+	src.SetName("triage")
+	err := r.ensureCurated(t.Context(), "agents-acme-x1", src, nil)
+	var nr *notReadyError
+	if assert.ErrorAs(t, err, &nr) {
+		assert.Equal(t, reasonNameTaken, nr.reason)
+	}
+	assert.Equal(t, unmet, verdictOf(err, "x").state)
+	got := &unstructured.Unstructured{}
+	got.SetGroupVersionKind(gvk)
+	require.NoError(t, store.Get(t.Context(), client.ObjectKeyFromObject(theirs), got))
+	assert.Equal(t, "Theirs.", got.Object[fieldSpec].(map[string]any)["systemPrompt"])
 }
