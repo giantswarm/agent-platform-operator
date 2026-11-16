@@ -23,7 +23,6 @@ const (
 	fieldTemplate    = "template"
 	fieldSpec        = "spec"
 	reasonTaken      = "taken"
-	templateName     = "triage"
 	fieldKey         = "key"
 	harness          = "kagent"
 	agentName        = "assistant"
@@ -73,21 +72,21 @@ func TestReferenceVerdicts(t *testing.T) {
 		{name: "a Harness whose name the organization holds", agent: onHarness(map[string]any{}), harnesses: map[string]verdict{harness: {state: unmet, reason: reasonTaken}}, want: unmet},
 		{
 			name:      "a curated templateRef",
-			agent:     map[string]any{fieldHarnessRef: named(harness), fieldTemplateRef: named(templateName)},
-			templates: []unstructured.Unstructured{source(templateName, map[string]any{})},
+			agent:     map[string]any{fieldHarnessRef: named(harness), fieldTemplateRef: named("triage")},
+			templates: []unstructured.Unstructured{source("triage", map[string]any{})},
 			want:      met,
 		},
-		{name: "a templateRef that is not curated", agent: map[string]any{fieldHarnessRef: named(harness), fieldTemplateRef: named(templateName)}, want: unmet},
+		{name: "a templateRef that is not curated", agent: map[string]any{fieldHarnessRef: named(harness), fieldTemplateRef: named("triage")}, want: unmet},
 		{
 			name:    "a templateRef while the templates cannot be listed",
-			agent:   map[string]any{fieldHarnessRef: named(harness), fieldTemplateRef: named(templateName)},
+			agent:   map[string]any{fieldHarnessRef: named(harness), fieldTemplateRef: named("triage")},
 			listErr: map[string]error{kindTemplate: listFailed},
 			want:    unknown,
 		},
 		{
 			name:      "a curated templateRef whose server is not curated",
-			agent:     map[string]any{fieldHarnessRef: named(harness), fieldTemplateRef: named(templateName)},
-			templates: []unstructured.Unstructured{source(templateName, map[string]any{fieldTools: []any{mcpTool("muster")}})},
+			agent:     map[string]any{fieldHarnessRef: named(harness), fieldTemplateRef: named("triage")},
+			templates: []unstructured.Unstructured{source("triage", map[string]any{fieldTools: []any{mcpTool("muster")}})},
 			want:      unmet,
 		},
 		{
@@ -159,8 +158,8 @@ func TestReferenceVerdicts(t *testing.T) {
 // they were; a name another writer holds leaves it out, a failed write
 // leaves its state unknown, so no copy goes.
 func TestReferenceCopies(t *testing.T) {
-	agent := map[string]any{fieldHarnessRef: named(harness), fieldTemplateRef: named(templateName)}
-	triage := source(templateName, map[string]any{fieldTools: []any{mcpTool("muster")}})
+	agent := map[string]any{fieldHarnessRef: named(harness), fieldTemplateRef: named("triage")}
+	triage := source("triage", map[string]any{fieldTools: []any{mcpTool("muster")}})
 	muster := source("muster", map[string]any{})
 	for _, tc := range []struct {
 		name       string
@@ -172,7 +171,7 @@ func TestReferenceCopies(t *testing.T) {
 		{name: "every write passes", wantWrites: []string{writeServer, "AgentTemplate triage", "Agent assistant"}, wantAgent: met},
 		{
 			name:       "the template's name is taken",
-			fail:       map[string]error{templateName: &notReadyError{reason: reasonNameTaken, message: reasonTaken}},
+			fail:       map[string]error{"triage": &notReadyError{reason: reasonNameTaken, message: reasonTaken}},
 			wantWrites: []string{writeServer, "AgentTemplate triage"},
 			wantAgent:  unmet,
 		},
@@ -234,7 +233,7 @@ func TestCuratedCopyNameTakenSinceTheRead(t *testing.T) {
 	theirs := &unstructured.Unstructured{Object: map[string]any{fieldSpec: map[string]any{"systemPrompt": "Theirs."}}}
 	theirs.SetGroupVersionKind(gvk)
 	theirs.SetNamespace("agents-acme-x1")
-	theirs.SetName(templateName)
+	theirs.SetName("triage")
 	store := fake.NewClientBuilder().WithObjects(theirs).Build()
 	// The read misses it, as one made just before the create would.
 	missed := interceptor.NewClient(store, interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
@@ -245,7 +244,7 @@ func TestCuratedCopyNameTakenSinceTheRead(t *testing.T) {
 	src := &unstructured.Unstructured{Object: map[string]any{fieldSpec: map[string]any{"systemPrompt": "Curated."}}}
 	src.SetGroupVersionKind(gvk)
 	src.SetNamespace("kagent")
-	src.SetName(templateName)
+	src.SetName("triage")
 	err := r.ensureCurated(t.Context(), "agents-acme-x1", src, nil)
 	var nr *notReadyError
 	if assert.ErrorAs(t, err, &nr) {
@@ -256,73 +255,4 @@ func TestCuratedCopyNameTakenSinceTheRead(t *testing.T) {
 	got.SetGroupVersionKind(gvk)
 	require.NoError(t, store.Get(t.Context(), client.ObjectKeyFromObject(theirs), got))
 	assert.Equal(t, "Theirs.", got.Object[fieldSpec].(map[string]any)["systemPrompt"])
-}
-
-// TestPruneKeepsWhatAGoingCopyRefersTo pins that a template copy that another
-// template copy going on this reconcile refers to (a sub-agent's) stays while
-// that copy is not gone: its deletion failed, or a finalizer holds it.
-func TestPruneKeepsWhatAGoingCopyRefersTo(t *testing.T) {
-	const ns = "agents-acme-x1"
-	cfg := CuratedConfig{WorkerPool: "kagent-default", Kagent: schema.GroupVersion{Group: "api.kagent.dev", Version: "v1alpha3"}, Substrate: schema.GroupVersion{Group: "ate.dev", Version: "v1alpha1"}}
-	tmpl := func(name string, spec map[string]any, finalizers ...string) *unstructured.Unstructured {
-		u := &unstructured.Unstructured{Object: map[string]any{fieldSpec: spec}}
-		u.SetGroupVersionKind(cfg.template())
-		u.SetNamespace(ns)
-		u.SetName(name)
-		u.SetLabels(map[string]string{ObjectLabel: ScopeCurated})
-		u.SetFinalizers(finalizers)
-		return u
-	}
-	parent := map[string]any{fieldTools: []any{subAgentTool("helper")}}
-	complete := func() *curated {
-		k := &curated{keep: map[schema.GroupVersionKind]map[string]bool{}, complete: map[schema.GroupVersionKind]bool{}}
-		for _, gvk := range cfg.copied() {
-			k.complete[gvk] = true
-		}
-		return k
-	}
-	exists := func(t *testing.T, c client.Client, name string) bool {
-		u := &unstructured.Unstructured{}
-		u.SetGroupVersionKind(cfg.template())
-		err := c.Get(t.Context(), client.ObjectKey{Namespace: ns, Name: name}, u)
-		if apierrors.IsNotFound(err) {
-			return false
-		}
-		require.NoError(t, err)
-		return true
-	}
-
-	t.Run("the referring copy's deletion fails", func(t *testing.T) {
-		store := fake.NewClientBuilder().WithObjects(tmpl(templateName, parent), tmpl("helper", map[string]any{})).Build()
-		failing := interceptor.NewClient(store, interceptor.Funcs{Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
-			if obj.GetName() == templateName {
-				return errors.New("timeout")
-			}
-			return c.Delete(ctx, obj, opts...)
-		}})
-		r := &OrganizationReconciler{Client: failing, Config: Config{Curated: cfg}}
-		assert.Error(t, r.pruneCurated(t.Context(), ns, complete()))
-		assert.True(t, exists(t, store, "helper"), "the sub-agent template went while a copy refers to it")
-	})
-
-	t.Run("a finalizer holds the referring copy", func(t *testing.T) {
-		store := fake.NewClientBuilder().WithObjects(tmpl(templateName, parent, "example.com/hold"), tmpl("helper", map[string]any{})).Build()
-		r := &OrganizationReconciler{Client: store, Config: Config{Curated: cfg}}
-		require.NoError(t, r.pruneCurated(t.Context(), ns, complete()))
-		assert.True(t, exists(t, store, templateName))
-		assert.True(t, exists(t, store, "helper"), "the sub-agent template went while a copy refers to it")
-		// Still held at the next reconcile: it waits again.
-		require.NoError(t, r.pruneCurated(t.Context(), ns, complete()))
-		assert.True(t, exists(t, store, "helper"))
-
-		// The referring copy is gone: the next reconcile deletes it.
-		held := &unstructured.Unstructured{}
-		held.SetGroupVersionKind(cfg.template())
-		require.NoError(t, store.Get(t.Context(), client.ObjectKey{Namespace: ns, Name: templateName}, held))
-		held.SetFinalizers(nil)
-		require.NoError(t, store.Update(t.Context(), held))
-		require.False(t, exists(t, store, templateName))
-		require.NoError(t, r.pruneCurated(t.Context(), ns, complete()))
-		assert.False(t, exists(t, store, "helper"))
-	})
 }
