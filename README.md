@@ -83,8 +83,10 @@ With `curated.enabled` (it needs `snapshots.bucket`), the operator also keeps re
 
 - the Harnesses `spec.harnesses` names, with `substrate.workerPoolRef` set to the organization's pool, `substrate.snapshotPolicy.location` set to `s3://<bucket>/<uid>/<harness>` `kagent.memory` removed, and no compaction summarizer model (compaction uses the agent's own model);
 - the WorkerPool `curated.workerPool` with the ServiceAccount its workers run as, and the placement labels `kagent.dev/worker-pool-name` and `kagent.dev/worker-pool-namespace`;
-- the Agents and AgentTemplates labelled `agent-platform.giantswarm.io/curated: "true"` (and an AgentTemplate a curated Agent's `templateRef` names), with the template's `modelConfig` set to the organization's default ModelConfig, or removed while there is none;
-- the RemoteMCPServers the tools of those templates name: the muster server the curated Agents reach their tools through.
+- the Agents and AgentTemplates labelled `agent-platform.giantswarm.io/curated: "true"` whose references are met (see "The reference rule" below), with the template's `modelConfig` set to the organization's default ModelConfig, or removed while there is none;
+- the RemoteMCPServers labelled `agent-platform.giantswarm.io/curated: "true"` that the tools of those Agents and templates name: the muster server the curated Agents reach their tools through.
+
+**The reference rule**: a curated Agent or AgentTemplate is copied only when every object it refers to is a curated copy in the organization namespace too: its Harness must be in `spec.harnesses`, and every AgentTemplate and RemoteMCPServer it refers to must carry the curated label. Otherwise it is left out, and a copy made before goes. [docs/curated-copies.md](docs/curated-copies.md) has the full rule and why.
 
 A copy carries its source's `kagent.dev/` labels (`kagent.dev/discovery: disabled` on the muster server), and no other label of the source.
 

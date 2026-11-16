@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"strings"
@@ -286,7 +287,7 @@ func startEnvtest(t *testing.T) *cluster {
 
 // curatedSources are the platform namespace's curated objects: a Harness
 // with memory on, the WorkerPool it runs on, a curated Agent reaching muster,
-// a curated AgentTemplate, the muster RemoteMCPServer, and an Agent that is
+// a curated AgentTemplate, the curated muster RemoteMCPServer, and an Agent that is
 // not curated.
 func curatedSources() []*unstructured.Unstructured {
 	obj := func(gvk schema.GroupVersionKind, name string, labels map[string]string, spec map[string]any) *unstructured.Unstructured {
@@ -313,16 +314,23 @@ func curatedSources() []*unstructured.Unstructured {
 			"sandboxClass": "gvisor",
 			"template":     map[string]any{"serviceAccountName": poolSA},
 		}),
-		obj(agentGVK, curatedAgent, curatedLabels, agentSpec(agentPrompt, map[string]any{"modelConfig": nameRef(platformModel), "tools": tools})),
+		obj(agentGVK, curatedAgent, curatedLabels, agentSpec(agentPrompt, map[string]any{"modelConfig": nameRef(platformModel), toolsField: tools})),
 		obj(agentGVK, platformAgent, nil, agentSpec("Platform only.", nil)),
-		obj(templateGVK, curatedTemplate, curatedLabels, templateSpec("Triage.", map[string]any{"modelConfig": nameRef(platformModel), "tools": tools})),
-		obj(serverGVK, musterServer, map[string]string{discoveryLabel: "disabled", "app.kubernetes.io/name": "agent"}, map[string]any{"url": "https://muster.example.com/mcp", "description": "muster"}),
+		obj(templateGVK, curatedTemplate, curatedLabels, templateSpec("Triage.", map[string]any{"modelConfig": nameRef(platformModel), toolsField: tools})),
+		obj(serverGVK, musterServer, curatedWith(map[string]string{discoveryLabel: "disabled", "app.kubernetes.io/name": "agent"}), map[string]any{"url": "https://muster.example.com/mcp", descriptionField: "muster"}),
 	}
 }
 
-// curatedLabels make an Agent or AgentTemplate of the platform namespace
-// curated.
+// curatedLabels make an Agent, AgentTemplate or RemoteMCPServer of the
+// platform namespace curated.
 var curatedLabels = map[string]string{v1alpha1.CuratedLabel: "true"}
+
+// curatedWith is labels and curatedLabels.
+func curatedWith(labels map[string]string) map[string]string {
+	out := maps.Clone(labels)
+	maps.Copy(out, curatedLabels)
+	return out
+}
 
 // newObject is an object of gvk ns/name with labels and spec.
 func newObject(gvk schema.GroupVersionKind, ns, name string, labels map[string]string, spec map[string]any) *unstructured.Unstructured {
@@ -346,7 +354,7 @@ func templateSpec(prompt string, fields map[string]any) map[string]any {
 // agentSpec is the spec of an Agent on the curated Harness with an inline
 // template.
 func agentSpec(prompt string, fields map[string]any) map[string]any {
-	return map[string]any{"harnessRef": nameRef(curatedHarness), "template": templateSpec(prompt, fields)}
+	return map[string]any{harnessRefField: nameRef(curatedHarness), templateField: templateSpec(prompt, fields)}
 }
 
 // helmReleaseSpec is the spec of a HelmRelease of the agent chart, from the
@@ -359,11 +367,16 @@ var helmReleaseSpec = map[string]any{
 // nameRef is a reference to an object by name.
 func nameRef(name string) map[string]any { return map[string]any{nameField: name} }
 
-// The fields of a reference and a Flux object's interval.
+// The fields of a reference and a Flux object's interval, and of an Agent and
+// an agent template.
 const (
-	kindField     = "kind"
-	nameField     = "name"
-	intervalField = "interval"
+	kindField        = "kind"
+	nameField        = "name"
+	intervalField    = "interval"
+	harnessRefField  = "harnessRef"
+	templateField    = "template"
+	toolsField       = "tools"
+	descriptionField = "description"
 )
 
 // recordQuotaUsage does what kube-controller-manager's quota controller does

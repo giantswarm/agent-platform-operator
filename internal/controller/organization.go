@@ -31,7 +31,9 @@
 //     the worker replica rule (workerReplicas); the Agents and AgentTemplates
 //     labelled agent-platform.giantswarm.io/curated=true, with the template's
 //     modelConfig set to the organization's default ModelConfig; and the
-//     RemoteMCPServers their tools name. A copy follows its source and the
+//     curated RemoteMCPServers their tools name. An Agent or AgentTemplate is
+//     copied only when every object it refers to is a curated copy too
+//     (references.go). A copy follows its source and the
 //     default mark, an edit of it is reverted, and it goes when its source is
 //     no longer curated for the organization;
 //   - the ResourceQuota on object counts (Config.ObjectQuota);

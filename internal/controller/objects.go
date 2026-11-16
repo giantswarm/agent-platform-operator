@@ -134,7 +134,23 @@ func (r *OrganizationReconciler) ensureScoped(ctx context.Context, ns, scope str
 	existing := object(obj.GroupVersionKind())
 	err := r.Client.Get(ctx, client.ObjectKeyFromObject(obj), existing)
 	if apierrors.IsNotFound(err) {
-		return r.create(ctx, obj, kind)
+		if scope != ScopeCurated {
+			return r.create(ctx, obj, kind)
+		}
+		// Other copies refer to a curated copy by name: an object of that
+		// name created since the read is never taken for it.
+		err = r.Client.Create(ctx, obj, client.FieldOwner(fieldManager))
+		switch {
+		case err == nil:
+			logf.FromContext(ctx).Info("organization object created", "namespace", ns, "kind", kind, "name", obj.GetName())
+			return nil
+		case !apierrors.IsAlreadyExists(err):
+			return fmt.Errorf("create %s %s/%s: %w", kind, ns, obj.GetName(), err)
+		}
+		err = r.APIReader.Get(ctx, client.ObjectKeyFromObject(obj), existing)
+		if err == nil && existing.GetLabels()[ObjectLabel] == scope {
+			return fmt.Errorf("create %s %s/%s: another reconcile created it; it is checked again on the next", kind, ns, obj.GetName())
+		}
 	}
 	if err != nil {
 		return fmt.Errorf("get %s %s/%s: %w", kind, ns, obj.GetName(), err)
@@ -145,6 +161,11 @@ func (r *OrganizationReconciler) ensureScoped(ctx context.Context, ns, scope str
 		}
 		logf.FromContext(ctx).V(1).Info("leaving an object the reconciler did not write", "namespace", ns, "kind", kind, "name", obj.GetName())
 		return nil
+	}
+	if scope == ScopeCurated && existing.GetDeletionTimestamp() != nil {
+		// A copy that is going is no copy to refer to: what refers to it
+		// waits until it is gone and copied again.
+		return fmt.Errorf("the %s %s/%s is being deleted; it is copied again once it is gone", kind, ns, obj.GetName())
 	}
 	merged := copiedLabels(existing.GetLabels(), want, scope == ScopeCurated)
 	if same(existing.Object["spec"], obj.Object["spec"]) && maps.Equal(merged, existing.GetLabels()) {
