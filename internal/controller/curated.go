@@ -445,8 +445,10 @@ func (r *OrganizationReconciler) platformObject(ctx context.Context, gvk schema.
 // RemoteMCPServers and Harnesses they refer to. A kind goes only once no copy
 // of an earlier kind is left to go: when one is not read in full, a deletion
 // fails, or a copy is still being deleted, the later kinds wait for the next
-// reconcile. A copy then never outlives what it refers to, whose name the
-// organization could take.
+// reconcile. A curated Agent copy then never outlives what it refers to,
+// whose name the organization could take. There is no order between
+// AgentTemplate copies: only an Agent copy runs as a curated agent, and no
+// kept Agent copy refers to a template copy that goes.
 func (r *OrganizationReconciler) pruneCurated(ctx context.Context, ns string, k *curated) error {
 	c := r.Config.Curated
 	var errs []error

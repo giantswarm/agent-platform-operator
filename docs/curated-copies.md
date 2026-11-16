@@ -42,7 +42,10 @@ within the sync period (`syncPeriod`).
   the missing object: the copy is made at the next reconcile.
 - A copy goes in order: the Agents first, then the AgentTemplates, then the
   RemoteMCPServers and Harnesses. A kind goes only once no copy of an earlier
-  kind is left to go, so a copy never outlives an object it refers to.
+  kind is left to go, so a curated Agent copy never outlives an object it
+  refers to. There is no order between AgentTemplate copies: only an Agent
+  copy runs as a curated agent, and no kept Agent copy refers to a template
+  copy that goes.
 - A copy that is being deleted (a finalizer holds it) is no copy to refer to:
   what refers to it is written only once it is gone and copied again.
 - While the operator cannot read a curated source or write a copy (an API
