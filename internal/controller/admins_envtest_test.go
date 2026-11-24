@@ -3,6 +3,7 @@ package controller_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -137,6 +138,23 @@ func adminsCases(t *testing.T, c *cluster) {
 		c.hold(t, org)
 		c.setAdmins(t, org, orgv1.OrganizationAdmin{Kind: orgv1.OrganizationAdminGroup, Name: leadGroup})
 		c.never(t, rbacv1.SchemeGroupVersion.WithKind("RoleBinding"), squatted.Name, controller.AdminsBinding)
+	})
+
+	t.Run("a held organization leaves the admins binding of its terminating namespace as it is", func(t *testing.T) {
+		org := c.organizationWithAdmins(t, "admins-hold-terminating", orgv1.OrganizationAdmin{Kind: orgv1.OrganizationAdminGroup, Name: adminGroup})
+		ns := c.readyNamespace(t, org)
+		key := client.ObjectKey{Namespace: ns.Name, Name: controller.AdminsBinding}
+		c.adminsAre(t, key, group(adminGroup))
+		c.hold(t, org)
+		// envtest runs no namespace controller: the namespace stays
+		// terminating, and its binding stays.
+		require.NoError(t, c.admin.Delete(t.Context(), ns))
+
+		c.setAdmins(t, org, orgv1.OrganizationAdmin{Kind: orgv1.OrganizationAdminGroup, Name: leadGroup})
+		require.Never(t, func() bool {
+			rb := &rbacv1.RoleBinding{}
+			return c.admin.Get(t.Context(), key, rb) != nil || len(rb.Subjects) != 1 || rb.Subjects[0] != group(adminGroup)
+		}, 2*time.Second, tick, "the operator changed the admins binding in the terminating namespace %s", ns.Name)
 	})
 
 	t.Run("an organization without admins leaves another writer's organization-admins alone", func(t *testing.T) {
