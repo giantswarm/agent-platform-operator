@@ -190,10 +190,12 @@ func (r *OrganizationReconciler) eraseStep(ctx context.Context, org *orgv1.Organ
 // while that namespace carries the organization's UID, else the one the
 // status recorded (empty when none was ever created). kagent and Substrate
 // key the organization's sessions and actors by that name, also once it is
-// gone. A namespace agents-<name> without the organization's UID fails the
-// step: the name is fixed, so the steps would delete another writer's
-// workloads and sessions there. A person deletes it, or restores the label;
-// the step is retried.
+// gone. A namespace agents-<name> without the organization's UID is never
+// erased. When the status records that name, it fails the step: the name is
+// fixed, so the steps would delete another writer's workloads and sessions
+// there. A person deletes it, or restores the label; the step is retried.
+// When the status records none, the name was taken before the organization
+// had a namespace, and there is nothing of the organization there.
 func (r *OrganizationReconciler) erasedNamespace(ctx context.Context, org *orgv1.Organization) (string, error) {
 	name, err := namespaceName(org)
 	if err != nil {
@@ -206,6 +208,10 @@ func (r *OrganizationReconciler) erasedNamespace(ctx context.Context, org *orgv1
 		return "", fmt.Errorf("get the namespace %s: %w", name, err)
 	}
 	if ns.Labels[v1alpha1.OrganizationUIDLabel] != string(org.UID) {
+		if platformStatus(org).Namespace == "" {
+			// The organization never had it: the name was taken before.
+			return "", nil
+		}
 		return "", fmt.Errorf("the namespace %s does not carry %s=%s: it is not this organization's, so the erasure does not touch it; delete it, or restore the label if it is the organization's",
 			name, v1alpha1.OrganizationUIDLabel, org.UID)
 	}

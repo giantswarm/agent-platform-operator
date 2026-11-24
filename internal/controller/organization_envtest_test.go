@@ -236,6 +236,13 @@ func TestOrganizationEnvtest(t *testing.T) {
 		assert.Empty(t, ns.Labels[v1alpha1.OrganizationUIDLabel], "the operator took the namespace over")
 		err := c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns.Name, Name: helmSA}, &corev1.ServiceAccount{})
 		assert.True(t, apierrors.IsNotFound(err), "the operator wrote into a namespace that is not the organization's: %v", err)
+
+		// The organization never had the namespace: its deletion ends, and
+		// the namespace stays.
+		require.NoError(t, c.admin.Delete(t.Context(), org))
+		c.gone(t, org)
+		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKeyFromObject(squatted), ns))
+		assert.Nil(t, ns.DeletionTimestamp, "the erasure deleted a namespace that was never the organization's")
 	})
 
 	t.Run("a name that does not fit in the namespace name gives a condition and no namespace", func(t *testing.T) {
