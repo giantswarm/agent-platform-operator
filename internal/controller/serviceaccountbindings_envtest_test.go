@@ -8,17 +8,15 @@ import (
 	authorizationv1 "k8s.io/api/authorization/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/giantswarm/agent-platform-operator/api/v1alpha1"
 	"github.com/giantswarm/agent-platform-operator/internal/controller"
 )
 
 func serviceAccountBindingCases(t *testing.T, c *cluster) {
 	t.Run("a ServiceAccount binding grants its ClusterRole in the organization namespace and nowhere else", func(t *testing.T) {
-		org := c.organization(t, "org-bindings", "bindings")
+		org := c.organization(t, "bindings")
 		ns := c.readyNamespace(t, org)
 
 		rb := &rbacv1.RoleBinding{}
@@ -28,12 +26,12 @@ func serviceAccountBindingCases(t *testing.T, c *cluster) {
 		assert.Equal(t, controller.ScopeServiceAccountBinding, rb.Labels[controller.ObjectLabel])
 
 		assert.True(t, c.canGetSecret(t, ns.Name), "the ServiceAccount cannot read Secrets in its organization namespace %s", ns.Name)
-		assert.False(t, c.canGetSecret(t, org.Namespace), "the ServiceAccount reads Secrets in the parent namespace %s", org.Namespace)
+		assert.False(t, c.canGetSecret(t, platformNS), "the ServiceAccount reads Secrets in the platform namespace %s", platformNS)
 		assert.False(t, c.canGetSecret(t, bindingNS), "the ServiceAccount reads Secrets in its own namespace %s", bindingNS)
 	})
 
 	t.Run("a changed ServiceAccount binding is restored", func(t *testing.T) {
-		org := c.organization(t, "org-bindings-drift", "bindings-drift")
+		org := c.organization(t, "bindings-drift")
 		ns := c.readyNamespace(t, org)
 		rb := &rbacv1.RoleBinding{}
 		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns.Name, Name: bindingClusterRole}, rb))
@@ -49,7 +47,7 @@ func serviceAccountBindingCases(t *testing.T, c *cluster) {
 	})
 
 	t.Run("a ServiceAccount binding of a ClusterRole no longer configured is deleted", func(t *testing.T) {
-		org := c.organization(t, "org-bindings-gone", "bindings-gone")
+		org := c.organization(t, "bindings-gone")
 		ns := c.readyNamespace(t, org)
 		stale := &rbacv1.RoleBinding{
 			ObjectMeta: metav1.ObjectMeta{Name: "removed-secret-reader", Namespace: ns.Name, Labels: map[string]string{controller.ObjectLabel: controller.ScopeServiceAccountBinding}},
@@ -68,30 +66,6 @@ func serviceAccountBindingCases(t *testing.T, c *cluster) {
 		}, timeout, tick)
 		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKeyFromObject(other), &rbacv1.RoleBinding{}))
 		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns.Name, Name: bindingClusterRole}, &rbacv1.RoleBinding{}))
-	})
-
-	t.Run("a parent binding named like a ServiceAccount binding is not mirrored", func(t *testing.T) {
-		const parent = "org-bindings-taken"
-		org := c.organization(t, parent, "bindings-taken")
-		ns := c.readyNamespace(t, org).Name
-		c.create(t, &rbacv1.RoleBinding{
-			ObjectMeta: metav1.ObjectMeta{Name: bindingClusterRole, Namespace: parent},
-			RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: kindClusterRole, Name: controller.OrganizationsAdminClusterRole},
-			Subjects:   []rbacv1.Subject{{Kind: rbacv1.UserKind, APIGroup: rbacv1.GroupName, Name: "erin@example.com"}},
-		})
-		require.EventuallyWithT(t, func(ct *assert.CollectT) {
-			ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, v1alpha1.ConditionReady)
-			if assert.NotNil(ct, ready) {
-				assert.Equal(ct, metav1.ConditionFalse, ready.Status)
-				assert.Equal(ct, "NameTaken", ready.Reason)
-				assert.Contains(ct, ready.Message, parent+"/"+bindingClusterRole)
-			}
-		}, timeout, tick)
-		// The organization keeps its ServiceAccount binding.
-		rb := &rbacv1.RoleBinding{}
-		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns, Name: bindingClusterRole}, rb))
-		assert.Equal(t, controller.ScopeServiceAccountBinding, rb.Labels[controller.ObjectLabel])
-		assert.True(t, c.canGetSecret(t, ns))
 	})
 }
 

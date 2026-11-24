@@ -3,7 +3,7 @@
 # devctl never touches it.
 #
 #   - test-envtest: `make test-envtest`, the Go tests that need a real
-#     kube-apiserver (the AgentPlatformOrganization reconciler, run as the
+#     kube-apiserver (the Organization reconciler, run as the
 #     chart's ServiceAccount under the chart's RBAC). The go-build job's
 #     `make test` skips them without KUBEBUILDER_ASSETS; this job downloads
 #     the kube-apiserver and etcd with setup-envtest, at the version

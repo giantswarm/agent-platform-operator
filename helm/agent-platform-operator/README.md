@@ -1,6 +1,6 @@
 # agent-platform-operator
 
-Reconciles each AgentPlatformOrganization (agent-platform.giantswarm.io) into its organization namespace.
+Reconciles each Organization (security.giantswarm.io) with the Agent Platform enabled into its organization namespace.
 
 **Homepage:** <https://github.com/giantswarm/agent-platform-operator>
 
@@ -55,12 +55,12 @@ Reconciles each AgentPlatformOrganization (agent-platform.giantswarm.io) into it
 | commitMode.sourceRef.kind | string | `"GitRepository"` | Kind of the installation's Flux source in `erasure.fluxNamespace`: `GitRepository` or `OCIRepository`. |
 | commitMode.sourceRef.name | string | `""` | The installation's Flux source. Set: commit mode, every organization gets, in `erasure.fluxNamespace`, a Kustomization that applies its path from this source into its namespace, and the Flux ServiceAccount that Kustomization runs as, both named after the organization namespace, bound in the organization namespace only to `clusterRole`. Empty: none. Needs `erasure.fluxNamespace`. |
 | commitMode.decryptionSecret | string | `"sops-keys"` | The installation's SOPS key Secret in `erasure.fluxNamespace`, which the organizations' Kustomizations decrypt with; empty decrypts nothing. |
-| commitMode.path | string | `"./agent-platform/organizations/{parent}/{name}"` | An organization's path in the source: `{parent}` and `{name}` are replaced by its parent namespace and its name. An installation puts it under its own agent-platform configuration path, outside what the installation's Kustomization applies. |
+| commitMode.path | string | `"./agent-platform/organizations/{name}"` | An organization's path in the source: `{name}` is replaced by its name. An installation puts it under its own agent-platform configuration path, outside what the installation's Kustomization applies. |
 | commitMode.interval | string | `"10m"` | `spec.interval` of the organizations' Kustomizations. |
 | commitMode.clusterRole | string | `"agent-platform:organization-flux"` | The ClusterRole an organization's Flux ServiceAccount is bound to in its organization namespace (rendered by the agent-platform chart). |
-| commitMode.installationKustomization.name | string | `""` | The installation's Kustomization that applies the AgentPlatformOrganizations (with `deletionPolicy: Orphan`). An organization it applied is `Orphaned` while it is missing from its inventory, with reason `DeleteMerged` when it carries `agent-platform.giantswarm.io/delete-pull-request`, `MissingFromGit` otherwise. Empty: no `Orphaned` condition. |
+| commitMode.installationKustomization.name | string | `""` | The installation's Kustomization that applies the Organizations (with `deletionPolicy: Orphan`). An organization it applied is `Orphaned` while it is missing from its inventory, with reason `DeleteMerged` when it carries `agent-platform.giantswarm.io/delete-pull-request`, `MissingFromGit` otherwise. Empty: no `Orphaned` condition. |
 | commitMode.installationKustomization.namespace | string | `""` | Its namespace; empty is `erasure.fluxNamespace`. |
-| syncPeriod | string | `"10m"` | How often every organization is reconciled without a change. A change to an organization, its namespace, its objects there, a parent's organizations-admin RoleBinding, a copied network policy, a curated object or a ModelConfig in its namespace reconciles it at once. |
+| syncPeriod | string | `"10m"` | How often every organization is reconciled without a change. A change to an organization, its namespace, its objects there, a copied network policy, a curated object or a ModelConfig in its namespace reconciles it at once. |
 | resources | object | `{"limits":{"memory":"256Mi"},"requests":{"cpu":"50m","memory":"64Mi"}}` | Container resources. |
 | podSecurityContext | object | `{"runAsGroup":1000,"runAsNonRoot":true,"runAsUser":1000,"seccompProfile":{"type":"RuntimeDefault"}}` | Pod security context. |
 | securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":true,"runAsGroup":1000,"runAsNonRoot":true,"runAsUser":1000,"seccompProfile":{"type":"RuntimeDefault"}}` | Container security context. |

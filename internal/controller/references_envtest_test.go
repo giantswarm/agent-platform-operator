@@ -15,6 +15,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	orgv1 "github.com/giantswarm/organization-operator/api/v1alpha1"
+
 	"github.com/giantswarm/agent-platform-operator/api/v1alpha1"
 )
 
@@ -27,7 +29,7 @@ const templateRefField = "templateRef"
 // object it refers to is a curated copy in the organization namespace.
 func referenceCases(t *testing.T, c *cluster) {
 	t.Run("a curated Agent on a Harness outside spec.harnesses is left out until the organization adds it", func(t *testing.T) {
-		org := c.organizationWith(t, "org-refs-harness", "harness", v1alpha1.AgentPlatformOrganizationSpec{Workers: withReplicas(1)})
+		org := c.organizationWith(t, "refs-harness", orgv1.AgentPlatformSpec{Workers: withReplicas(1)})
 		ns := c.readyNamespace(t, org).Name
 		// The curated AgentTemplate names no Harness: its copy shows that
 		// the curated objects were copied.
@@ -38,7 +40,7 @@ func referenceCases(t *testing.T, c *cluster) {
 		setHarnesses := func(harnesses []string) {
 			require.EventuallyWithT(t, func(ct *assert.CollectT) {
 				got := c.get(ct, org)
-				got.Spec.Harnesses = harnesses
+				got.Spec.AgentPlatform.Harnesses = harnesses
 				assert.NoError(ct, c.admin.Update(t.Context(), got))
 			}, timeout, tick)
 		}
@@ -53,7 +55,7 @@ func referenceCases(t *testing.T, c *cluster) {
 	})
 
 	t.Run("a curated Agent is copied only when each object it refers to is curated", func(t *testing.T) {
-		org := c.organization(t, "org-refs", "refs")
+		org := c.organization(t, "refs")
 		ns := c.readyNamespace(t, org).Name
 		c.eventually(t, agentGVK, ns, curatedAgent, nil)
 
@@ -126,7 +128,7 @@ func referenceCases(t *testing.T, c *cluster) {
 	})
 
 	t.Run("a curated AgentTemplate whose name the organization holds leaves the Agent that refers to it out", func(t *testing.T) {
-		org := c.organization(t, "org-refs-taken", "taken")
+		org := c.organization(t, "refs-taken")
 		ns := c.readyNamespace(t, org).Name
 		const name, ref = "refs-taken", "ref-taken"
 		own := newObject(templateGVK, ns, ref, nil, templateSpec("The organization's.", nil))
@@ -157,7 +159,7 @@ func referenceCases(t *testing.T, c *cluster) {
 	})
 
 	t.Run("a copy outlives no copy it refers to, and one being deleted is no copy to refer to", func(t *testing.T) {
-		org := c.organization(t, "org-refs-held", "held")
+		org := c.organization(t, "refs-held")
 		ns := c.readyNamespace(t, org).Name
 		const ref, name, later = "ref-held", "refs-held", "refs-held-later"
 		c.createSource(t, templateGVK, ref, curatedLabels, templateSpec("Held.", nil))

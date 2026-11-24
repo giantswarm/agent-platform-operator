@@ -6,6 +6,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	orgv1 "github.com/giantswarm/organization-operator/api/v1alpha1"
+
 	"github.com/giantswarm/agent-platform-operator/api/v1alpha1"
 )
 
@@ -31,14 +33,16 @@ func TestWorkerReplicas(t *testing.T) {
 		{name: "a ModelConfig and an Agent, replicas not set", use: used, want: 1},
 		{name: "a ModelConfig and an Agent, replicas set to 0", replicas: &zero, use: used, want: 0},
 		{name: "Orphaned", replicas: &three, conds: orphaned, use: used, want: 0},
-		{name: "being erased, sessions left", replicas: &three, deleted: true, step: v1alpha1.ErasureSessions, want: 3},
-		{name: "being erased, sessions left, replicas not set", deleted: true, step: v1alpha1.ErasureWorkloads, want: 1},
-		{name: "being erased, sessions gone", replicas: &three, deleted: true, step: v1alpha1.ErasureSnapshots, want: 0},
+		{name: "being erased, sessions left", replicas: &three, deleted: true, step: orgv1.AgentPlatformErasureSessions, want: 3},
+		{name: "being erased, sessions left, replicas not set", deleted: true, step: orgv1.AgentPlatformErasureWorkloads, want: 1},
+		{name: "being erased, sessions gone", replicas: &three, deleted: true, step: orgv1.AgentPlatformErasureSnapshots, want: 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			org := &v1alpha1.AgentPlatformOrganization{
-				Spec:   v1alpha1.AgentPlatformOrganizationSpec{Workers: v1alpha1.Workers{Replicas: tc.replicas}},
-				Status: v1alpha1.AgentPlatformOrganizationStatus{ErasureStep: tc.step, Conditions: tc.conds},
+			org := &orgv1.Organization{
+				Spec: orgv1.OrganizationSpec{AgentPlatform: &orgv1.AgentPlatformSpec{
+					Enabled: true, Workers: orgv1.AgentPlatformWorkers{Replicas: tc.replicas},
+				}},
+				Status: orgv1.OrganizationStatus{AgentPlatform: &orgv1.AgentPlatformStatus{ErasureStep: tc.step}, Conditions: tc.conds},
 			}
 			if tc.deleted {
 				org.DeletionTimestamp = &now

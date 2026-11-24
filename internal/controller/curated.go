@@ -17,14 +17,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
+	orgv1 "github.com/giantswarm/organization-operator/api/v1alpha1"
+
 	"github.com/giantswarm/agent-platform-operator/api/v1alpha1"
 )
 
 // This file keeps the curated copies: objects in an organization namespace
 // that the operator keeps equal to a curated source of the platform namespace,
 // apart from the rewrites for each organization that keepCurated applies.
-// They are not the admin mirrors (pkg/adminmirror), which are RoleBindings
-// derived from a parent namespace's admin bindings.
 
 const (
 	// ScopeCurated marks, as the value of ObjectLabel, a read-only copy of a
@@ -113,7 +113,7 @@ func (c *curated) kept(gvk schema.GroupVersionKind, name string) {
 // refer to (references.go). It sets the organization's DefaultModelConfigured
 // condition in status, and removes the copies whose source is no longer
 // curated for the organization or whose references are no longer met.
-func (r *OrganizationReconciler) keepCurated(ctx context.Context, org *v1alpha1.AgentPlatformOrganization, ns string, status *v1alpha1.AgentPlatformOrganizationStatus) error {
+func (r *OrganizationReconciler) keepCurated(ctx context.Context, org *orgv1.Organization, ns string, status *orgState) error {
 	c := r.Config.Curated
 	models, err := r.modelConfigs(ctx, ns)
 	if err != nil {
@@ -131,7 +131,7 @@ func (r *OrganizationReconciler) keepCurated(ctx context.Context, org *v1alpha1.
 	var errs []error
 
 	harnesses := map[string]verdict{}
-	for _, name := range org.Spec.Harnesses {
+	for _, name := range platformSpec(org).Harnesses {
 		k.kept(c.harness(), name)
 		err := r.copyCurated(ctx, ns, c.harness(), name, func(spec map[string]any) error {
 			return rewriteHarness(spec, c.WorkerPool, prefix+"/"+name)
@@ -167,7 +167,7 @@ func (r *OrganizationReconciler) keepCurated(ctx context.Context, org *v1alpha1.
 
 	// The rule reads the Orphaned condition this reconcile set.
 	current := org.DeepCopy()
-	current.Status = *status
+	status.applyTo(current)
 	use := usage{models: len(models) > 0}
 	if use.models && !orphaned(current) {
 		// A curated Agent counts before its copy exists: this reconcile
@@ -194,16 +194,16 @@ type usage struct {
 }
 
 // workerReplicas is the worker replica rule: the organization's
-// spec.workers.replicas (1 when it is not set) while its namespace holds a
+// spec.agentPlatform.workers.replicas (1 when it is not set) while its namespace holds a
 // ModelConfig and an Agent or a session; 0 while it holds no ModelConfig (no
 // agent can run without a model), while it holds no Agent and no session
 // (nothing needs a worker), and while it is Orphaned. A deleted organization
 // runs its replicas until its sessions are gone, whatever else holds, since
 // kagent needs a worker to suspend an actor, and 0 after.
-func workerReplicas(org *v1alpha1.AgentPlatformOrganization, use usage) int64 {
-	replicas := int64(org.Spec.Workers.ReplicasOrDefault())
+func workerReplicas(org *orgv1.Organization, use usage) int64 {
+	replicas := int64(platformSpec(org).Workers.ReplicasOrDefault())
 	if org.DeletionTimestamp != nil {
-		if sessionsGone(org.Status.ErasureStep) {
+		if sessionsGone(platformStatus(org).ErasureStep) {
 			return 0
 		}
 		return replicas
@@ -214,7 +214,7 @@ func workerReplicas(org *v1alpha1.AgentPlatformOrganization, use usage) int64 {
 	return replicas
 }
 
-func orphaned(org *v1alpha1.AgentPlatformOrganization) bool {
+func orphaned(org *orgv1.Organization) bool {
 	return meta.IsStatusConditionTrue(org.Status.Conditions, v1alpha1.ConditionOrphaned)
 }
 
