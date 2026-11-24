@@ -209,7 +209,7 @@ func startEnvtest(t *testing.T) *cluster {
 
 	// The ClusterRoles the operator binds grant what the operator does not
 	// hold itself, so only `bind` lets it write the bindings.
-	for _, name := range []string{helmClusterRole, organizationFluxCR, bindingClusterRole} {
+	for _, name := range []string{helmClusterRole, organizationFluxCR, bindingClusterRole, adminClusterRole} {
 		require.NoError(t, admin.Create(ctx, &rbacv1.ClusterRole{
 			ObjectMeta: metav1.ObjectMeta{Name: name},
 			Rules:      []rbacv1.PolicyRule{{APIGroups: []string{""}, Resources: []string{"secrets"}, Verbs: []string{"get", "list", "create"}}},

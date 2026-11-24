@@ -51,13 +51,14 @@ The operator creates the namespace `agents-<name>`: an `Organization` name is un
 
 The operator writes only a namespace that carries the organization's UID. A namespace `agents-<name>` that another writer created, or that an earlier `Organization` of the same name left while it terminates, is not taken over: the organization is `Ready=False NameTaken` until it is gone. The namespace has no ownerReference to the `Organization`.
 
-The organizations' admins are bound by the installation: it binds `agent-platform:organizations-admin` for the whole cluster. The operator writes no binding for them.
+The right to manage `Organization` objects is bound by the installation: it binds `agent-platform:organizations-admin` for the whole cluster. The operator writes no binding for it.
 
 In the namespace the operator keeps, from the first reconcile on:
 
 - the network policies `networkPolicy.names`, copied from `platformNamespace`;
 - the agent chart's OCIRepository (`agentChart.*`), named after the chart (`agent`);
 - the Helm ServiceAccount `helmReleaseServiceAccount`, which the organization's HelmReleases run as, with a RoleBinding to the ClusterRole `agent-platform-tenant-flux`;
+- the RoleBinding `organization-admins`, which binds the ClusterRole `agent-platform:admin` to the Users and Groups of the organization's `spec.admins`, in their order. It follows the list, and an edit of it is reverted. With no admins the organization has no such binding, and that is no error: the platform team manages the organization. A RoleBinding `organization-admins` that the operator did not write is left as it is, and the organization is `Ready=False NameTaken` while it has admins. The operator writes no binding in other namespaces from the list (no `cluster-admin`);
 - the ResourceQuota `agent-platform-organization-objects` on object counts (`objectQuota`), so one organization cannot flood the API server with objects;
 - in commit mode, the RoleBinding `organization-flux` that binds the organization's Flux ServiceAccount to `commitMode.clusterRole` (`agent-platform:organization-flux`).
 

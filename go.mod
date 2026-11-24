@@ -6,7 +6,7 @@ require (
 	github.com/aws/aws-sdk-go-v2 v1.48.0
 	github.com/aws/aws-sdk-go-v2/config v1.33.21
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.116.0
-	github.com/giantswarm/organization-operator v1.6.5-0.20261124155418-12b648ac1332
+	github.com/giantswarm/organization-operator v1.6.5-0.20261124164900-de1bb4efe375
 	github.com/stretchr/testify v1.12.1
 	google.golang.org/grpc v1.85.0
 	google.golang.org/protobuf v1.36.12

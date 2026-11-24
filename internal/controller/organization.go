@@ -22,6 +22,9 @@
 //   - a RoleBinding of each ServiceAccountBinding's ClusterRole to its
 //     ServiceAccount in another namespace (Config.ServiceAccountBindings),
 //     named after the ClusterRole, deleted when it is no longer configured;
+//   - the RoleBinding organization-admins (admins.go), which binds
+//     agent-platform:admin to the subjects of the organization's spec.admins,
+//     follows that list and is deleted when the list is empty;
 //   - read-only copies of the curated objects of the platform namespace
 //     (Config.Curated): the Harnesses the organization's
 //     spec.agentPlatform.harnesses names, pointed at the organization's own
@@ -43,9 +46,9 @@
 //     ServiceAccount's only one. The Kustomization applies the
 //     organization's path in git into its namespace as that ServiceAccount.
 //
-// The organization's admins are bound by the installation: it binds
+// The right to manage Organizations is bound by the installation: it binds
 // agent-platform:organizations-admin for the whole cluster. The reconciler
-// writes no binding for them.
+// writes no binding for it.
 //
 // The reconciler writes the organization's state to status.agentPlatform and
 // its conditions to status.conditions, with a merge patch under an optimistic
@@ -504,7 +507,7 @@ func (r *OrganizationReconciler) reconcile(ctx context.Context, org *orgv1.Organ
 	if sa := r.Config.HelmServiceAccount; sa != "" {
 		errs = append(errs, r.ensureServiceAccount(ctx, ns.Name, sa, ScopeNamespace), r.ensureHelmRoleBinding(ctx, ns.Name))
 	}
-	errs = append(errs, r.keepServiceAccountBindings(ctx, ns.Name))
+	errs = append(errs, r.keepServiceAccountBindings(ctx, ns.Name), r.keepAdmins(ctx, org, ns.Name))
 	if !r.Config.NetworkPolicyGVK.Empty() {
 		for _, name := range r.Config.NetworkPolicies {
 			errs = append(errs, r.copyObject(ctx, r.Config.NetworkPolicyGVK, name, ns.Name))

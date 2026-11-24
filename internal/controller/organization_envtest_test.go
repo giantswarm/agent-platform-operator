@@ -268,6 +268,7 @@ func TestOrganizationEnvtest(t *testing.T) {
 	referenceCases(t, c)
 	fluxCases(t, c)
 	serviceAccountBindingCases(t, c)
+	adminsCases(t, c)
 	erasureCases(t, c)
 }
 
