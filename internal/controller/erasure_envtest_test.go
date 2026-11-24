@@ -199,6 +199,49 @@ func erasureCases(t *testing.T, c *cluster) {
 		assert.Equal(t, []string{"77777777-7777-7777-7777-777777777777"}, c.sessions.left(otherNS))
 	})
 
+	t.Run("the erasure stops at a namespace of the organization's name that is not the organization's", func(t *testing.T) {
+		org := c.organization(t, "erase-foreign")
+		ns := c.readyNamespace(t, org).Name
+		// The namespace carries another organization's UID: as a namespace
+		// another writer created under the name, after the organization's
+		// own went. A workload and a session there are not the
+		// organization's.
+		setUID := func(uid string) {
+			require.EventuallyWithT(t, func(ct *assert.CollectT) {
+				got := &corev1.Namespace{}
+				if assert.NoError(ct, c.admin.Get(t.Context(), client.ObjectKey{Name: ns}, got)) {
+					got.Labels[v1alpha1.OrganizationUIDLabel] = uid
+					assert.NoError(ct, c.admin.Update(t.Context(), got))
+				}
+			}, timeout, tick)
+		}
+		setUID("00000000-0000-0000-0000-000000000000")
+		c.create(t, newObject(helmReleaseGVK, ns, "theirs", nil, helmReleaseSpec))
+		c.sessions.add(ns, "frank@example.com", "99999999-9999-9999-9999-999999999999")
+		c.observeErasure(t, org, ns)
+
+		require.NoError(t, c.admin.Delete(t.Context(), org))
+		require.EventuallyWithT(t, func(ct *assert.CollectT) {
+			ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, v1alpha1.ConditionReady)
+			if assert.NotNil(ct, ready) {
+				assert.Equal(ct, "Deleting", ready.Reason)
+				assert.Contains(ct, ready.Message, "the namespace "+ns+" does not carry "+v1alpha1.OrganizationUIDLabel)
+			}
+		}, timeout, tick)
+		require.Never(t, func() bool {
+			hr := c.read(t, helmReleaseGVK, ns, "theirs")
+			return hr.GetDeletionTimestamp() != nil || len(c.sessions.left(ns)) == 0
+		}, time.Second, tick, "the erasure deleted a workload or a session of a namespace that is not the organization's")
+
+		// The label restored, the erasure ends. No event of the namespace
+		// reaches the operator in time after the failed step's backoff:
+		// the sync period stands in.
+		setUID(string(org.UID))
+		c.poke(t, org)
+		c.gone(t, org)
+		assert.Empty(t, c.namespacesOf(t, org))
+	})
+
 	t.Run("an organization whose switch was turned off is erased when it is deleted", func(t *testing.T) {
 		org := c.organization(t, "erase-held")
 		ns := c.readyNamespace(t, org).Name

@@ -83,7 +83,7 @@ type curatedSet struct {
 	templates map[string]*unstructured.Unstructured
 	servers   map[string]*unstructured.Unstructured
 	listErr   map[string]error
-	// harnesses are the verdicts of the Harness copies spec.harnesses names.
+	// harnesses are the verdicts of the Harness copies spec.agentPlatform.harnesses names.
 	harnesses map[string]verdict
 	// checked are the verdicts read from the sources alone; copied those
 	// of the copies written (copy).
@@ -195,7 +195,7 @@ func (s *curatedSet) resolveOnce(ctx context.Context, ref reference, write bool)
 		if v, ok := s.harnesses[ref.name]; ok {
 			return v
 		}
-		return verdict{state: unmet, reason: fmt.Sprintf("the Harness %s is not in the organization's spec.harnesses", ref.name)}
+		return verdict{state: unmet, reason: fmt.Sprintf("the Harness %s is not in the organization's spec.agentPlatform.harnesses", ref.name)}
 	case kindAgent:
 		for i := range s.agents {
 			if s.agents[i].GetName() == ref.name {

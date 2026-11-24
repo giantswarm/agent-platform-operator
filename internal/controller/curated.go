@@ -107,7 +107,7 @@ func (c *curated) kept(gvk schema.GroupVersionKind, name string) {
 	c.keep[gvk][name] = true
 }
 
-// keepCurated keeps the curated copies in ns: the Harnesses spec.harnesses
+// keepCurated keeps the curated copies in ns: the Harnesses spec.agentPlatform.harnesses
 // names, the WorkerPool, and the curated Agents and AgentTemplates whose
 // references are all met, with the AgentTemplates and RemoteMCPServers they
 // refer to (references.go). It sets the organization's DefaultModelConfigured

@@ -67,7 +67,7 @@ func TestReferenceVerdicts(t *testing.T) {
 	}{
 		{name: "an inline template on a Harness the organization has", agent: onHarness(map[string]any{}), want: met},
 		{name: "an inline harness", agent: map[string]any{"harness": map[string]any{}, fieldTemplate: map[string]any{}}, want: met},
-		{name: "a Harness outside spec.harnesses", agent: map[string]any{fieldHarnessRef: named("claude"), fieldTemplate: map[string]any{}}, want: unmet},
+		{name: "a Harness outside spec.agentPlatform.harnesses", agent: map[string]any{fieldHarnessRef: named("claude"), fieldTemplate: map[string]any{}}, want: unmet},
 		{name: "a Harness whose copy failed", agent: onHarness(map[string]any{}), harnesses: map[string]verdict{harness: {state: unknown, reason: "timeout"}}, want: unknown},
 		{name: "a Harness whose name the organization holds", agent: onHarness(map[string]any{}), harnesses: map[string]verdict{harness: {state: unmet, reason: reasonTaken}}, want: unmet},
 		{

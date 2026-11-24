@@ -28,7 +28,7 @@ const templateRefField = "templateRef"
 // run in TestOrganizationEnvtest: a curated Agent is copied only when every
 // object it refers to is a curated copy in the organization namespace.
 func referenceCases(t *testing.T, c *cluster) {
-	t.Run("a curated Agent on a Harness outside spec.harnesses is left out until the organization adds it", func(t *testing.T) {
+	t.Run("a curated Agent on a Harness outside spec.agentPlatform.harnesses is left out until the organization adds it", func(t *testing.T) {
 		org := c.organizationWith(t, "refs-harness", orgv1.AgentPlatformSpec{Workers: withReplicas(1)})
 		ns := c.readyNamespace(t, org).Name
 		// The curated AgentTemplate names no Harness: its copy shows that
@@ -48,7 +48,7 @@ func referenceCases(t *testing.T, c *cluster) {
 		c.eventually(t, harnessGVK, ns, curatedHarness, nil)
 		c.eventually(t, agentGVK, ns, curatedAgent, nil)
 
-		// The Harness goes out of spec.harnesses: so does the Agent's copy.
+		// The Harness goes out of spec.agentPlatform.harnesses: so does the Agent's copy.
 		setHarnesses(nil)
 		c.eventuallyAbsent(t, agentGVK, ns, curatedAgent)
 		c.eventuallyAbsent(t, harnessGVK, ns, curatedHarness)

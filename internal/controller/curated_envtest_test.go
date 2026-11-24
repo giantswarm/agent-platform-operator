@@ -84,7 +84,7 @@ func curatedCases(t *testing.T, c *cluster) {
 			assert.Equal(ct, agentPrompt, str(a, "spec", "template", promptField))
 		})
 
-		// A Harness taken out of spec.harnesses goes.
+		// A Harness taken out of spec.agentPlatform.harnesses goes.
 		require.EventuallyWithT(t, func(ct *assert.CollectT) {
 			got := c.get(ct, org)
 			got.Spec.AgentPlatform.Harnesses = nil
