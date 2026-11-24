@@ -170,18 +170,8 @@ func TestOrganizationEnvtest(t *testing.T) {
 		org := c.organization(t, "held")
 		ns := c.readyNamespace(t, org)
 
+		c.hold(t, org)
 		got := c.get(t, org)
-		got.Spec.AgentPlatform.Enabled = false
-		require.NoError(t, c.admin.Update(t.Context(), got))
-		require.EventuallyWithT(t, func(ct *assert.CollectT) {
-			ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, v1alpha1.ConditionReady)
-			if assert.NotNil(ct, ready) {
-				assert.Equal(ct, metav1.ConditionFalse, ready.Status)
-				assert.Equal(ct, "AgentPlatformDisabled", ready.Reason)
-				assert.Equal(ct, got.Generation, ready.ObservedGeneration)
-			}
-		}, timeout, tick)
-		got = c.get(t, org)
 		assert.Contains(t, got.Finalizers, v1alpha1.Finalizer)
 		assert.Equal(t, ns.Name, ap(got).Namespace)
 		still := &corev1.Namespace{}
@@ -314,6 +304,29 @@ func (c *cluster) readyAt(t *testing.T, org *orgv1.Organization, generation int6
 		ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, v1alpha1.ConditionReady)
 		if assert.NotNil(ct, ready) {
 			assert.Equal(ct, metav1.ConditionTrue, ready.Status)
+			assert.Equal(ct, generation, ready.ObservedGeneration)
+		}
+	}, timeout, tick)
+}
+
+// hold turns org's Agent Platform off and waits until the operator holds
+// it: Ready is False with reason AgentPlatformDisabled for the new
+// generation.
+func (c *cluster) hold(t *testing.T, org *orgv1.Organization) {
+	t.Helper()
+	var generation int64
+	require.EventuallyWithT(t, func(ct *assert.CollectT) {
+		got := c.get(ct, org)
+		got.Spec.AgentPlatform.Enabled = false
+		if assert.NoError(ct, c.admin.Update(t.Context(), got)) {
+			generation = got.Generation
+		}
+	}, timeout, tick)
+	require.EventuallyWithT(t, func(ct *assert.CollectT) {
+		ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, v1alpha1.ConditionReady)
+		if assert.NotNil(ct, ready) {
+			assert.Equal(ct, metav1.ConditionFalse, ready.Status)
+			assert.Equal(ct, "AgentPlatformDisabled", ready.Reason)
 			assert.Equal(ct, generation, ready.ObservedGeneration)
 		}
 	}, timeout, tick)
