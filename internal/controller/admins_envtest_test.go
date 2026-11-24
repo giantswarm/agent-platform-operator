@@ -1,6 +1,7 @@
 package controller_test
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -8,6 +9,7 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	orgv1 "github.com/giantswarm/organization-operator/api/v1alpha1"
@@ -58,6 +60,29 @@ func adminsCases(t *testing.T, c *cluster) {
 			assert.True(ct, apierrors.IsNotFound(err), "the admins binding is still there: %v", err)
 		}, timeout, tick)
 		c.readyAt(t, org, c.get(t, org).Generation)
+	})
+
+	t.Run("a removed admin loses access although a finalizer holds the admins binding", func(t *testing.T) {
+		org := c.organizationWithAdmins(t, "admins-held", orgv1.OrganizationAdmin{Kind: orgv1.OrganizationAdminGroup, Name: adminGroup})
+		ns := c.readyNamespace(t, org)
+		key := client.ObjectKey{Namespace: ns.Name, Name: controller.AdminsBinding}
+		c.adminsAre(t, key, group(adminGroup))
+		require.True(t, c.canGetSecretAs(t, "member@example.com", []string{adminGroup}, ns.Name))
+		rbGVK := rbacv1.SchemeGroupVersion.WithKind("RoleBinding")
+		c.setFinalizers(t, rbGVK, ns.Name, controller.AdminsBinding, []string{"example.com/hold"})
+		// t.Context() is done when the cleanups run.
+		t.Cleanup(func() {
+			patch := client.RawPatch(types.MergePatchType, []byte(`{"metadata":{"finalizers":null}}`))
+			rb := &rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Namespace: ns.Name, Name: controller.AdminsBinding}}
+			if err := c.admin.Patch(context.Background(), rb, patch); client.IgnoreNotFound(err) != nil {
+				t.Errorf("release the admins binding: %v", err)
+			}
+		})
+
+		c.setAdmins(t, org)
+		require.EventuallyWithT(t, func(ct *assert.CollectT) {
+			assert.False(ct, c.canGetSecretAs(t, "member@example.com", []string{adminGroup}, ns.Name), "the removed admin group still holds agent-platform:admin in %s", ns.Name)
+		}, timeout, tick)
 	})
 
 	t.Run("an organization without admins leaves another writer's organization-admins alone", func(t *testing.T) {

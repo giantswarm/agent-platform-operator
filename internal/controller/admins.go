@@ -46,7 +46,8 @@ func (r *OrganizationReconciler) keepAdmins(ctx context.Context, org *orgv1.Orga
 	})
 }
 
-// deleteAdminsBinding deletes the reconciler's admins binding in ns, if any.
+// deleteAdminsBinding empties and deletes the reconciler's admins binding in
+// ns, if any.
 func (r *OrganizationReconciler) deleteAdminsBinding(ctx context.Context, ns string) error {
 	rb := &rbacv1.RoleBinding{}
 	err := r.Client.Get(ctx, client.ObjectKey{Namespace: ns, Name: AdminsBinding}, rb)
@@ -56,6 +57,19 @@ func (r *OrganizationReconciler) deleteAdminsBinding(ctx context.Context, ns str
 	case err != nil:
 		return fmt.Errorf("get RoleBinding %s/%s: %w", ns, AdminsBinding, err)
 	case rb.Labels[ObjectLabel] != ScopeAdmins:
+		return nil
+	}
+	// The subjects go first: a finalizer can hold the binding after its
+	// deletion, and RBAC grants what a terminating binding binds. The update
+	// carries the read's resourceVersion, so it changes only that binding.
+	if len(rb.Subjects) > 0 {
+		rb.Subjects = nil
+		if err := r.Client.Update(ctx, rb, client.FieldOwner(fieldManager)); err != nil {
+			return fmt.Errorf("empty RoleBinding %s/%s: %w", ns, AdminsBinding, err)
+		}
+		logf.FromContext(ctx).Info("organization object updated", "namespace", ns, "kind", "RoleBinding", "name", AdminsBinding)
+	}
+	if rb.DeletionTimestamp != nil {
 		return nil
 	}
 	// The UID: a binding of that name that another writer created since the

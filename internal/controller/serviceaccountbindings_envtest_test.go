@@ -73,9 +73,17 @@ func serviceAccountBindingCases(t *testing.T, c *cluster) {
 // ServiceAccount may get a Secret in ns.
 func (c *cluster) canGetSecret(t *testing.T, ns string) bool {
 	t.Helper()
+	return c.canGetSecretAs(t, "system:serviceaccount:"+bindingNS+":"+bindingSA,
+		[]string{"system:serviceaccounts", "system:serviceaccounts:" + bindingNS}, ns)
+}
+
+// canGetSecretAs asks the API server's authorizer whether user, a member of
+// groups and authenticated, may get a Secret in ns.
+func (c *cluster) canGetSecretAs(t *testing.T, user string, groups []string, ns string) bool {
+	t.Helper()
 	review := &authorizationv1.SubjectAccessReview{Spec: authorizationv1.SubjectAccessReviewSpec{
-		User:               "system:serviceaccount:" + bindingNS + ":" + bindingSA,
-		Groups:             []string{"system:serviceaccounts", "system:serviceaccounts:" + bindingNS, "system:authenticated"},
+		User:               user,
+		Groups:             append(groups, "system:authenticated"),
 		ResourceAttributes: &authorizationv1.ResourceAttributes{Namespace: ns, Verb: "get", Resource: "secrets", Name: "acme-kubeconfig"},
 	}}
 	require.NoError(t, c.admin.Create(t.Context(), review))
