@@ -61,10 +61,12 @@
 // git), with reason DeleteMerged or MissingFromGit.
 //
 // Every organization with the Agent Platform enabled carries the finalizer
-// v1alpha1.Finalizer. An Organization without the switch gets nothing. One
-// whose switch is turned off after it was on is held: the reconciler keeps
-// its namespace and its finalizer, changes nothing, erases nothing, and sets
-// Ready=False with reason AgentPlatformDisabled. A deleted organization is
+// v1alpha1.Finalizer. An Organization without the switch gets nothing. A
+// switch-off is not supported yet: the agent-platform chart's admission
+// policy refuses it. Where the reconciler finds the switch off on an
+// organization with its finalizer all the same, it changes nothing, erases
+// nothing and sets Ready=False with reason AgentPlatformDisabled (see
+// reportSwitchOff). A deleted organization is
 // erased in order (erase): its Flux Kustomization or HelmReleases and its
 // Agents; its sessions through kagent, until Substrate holds no actor of it;
 // its snapshot prefix, twice; its namespace; its Flux ServiceAccount; then
@@ -381,11 +383,11 @@ func (r *OrganizationReconciler) Reconcile(ctx context.Context, req reconcile.Re
 	}
 	if !enabled(org) {
 		// Without the switch the organization gets nothing. With the
-		// finalizer the switch was on: the organization is held.
+		// finalizer the switch was on.
 		if !controllerutil.ContainsFinalizer(org, v1alpha1.Finalizer) {
 			return reconcile.Result{}, nil
 		}
-		return reconcile.Result{}, r.hold(ctx, org)
+		return reconcile.Result{}, r.reportSwitchOff(ctx, org)
 	}
 	// The finalizer comes first: an organization deleted from here on is
 	// erased.
@@ -409,53 +411,21 @@ func (r *OrganizationReconciler) Reconcile(ctx context.Context, req reconcile.Re
 	return reconcile.Result{}, err
 }
 
-// hold keeps an organization whose Agent Platform was turned off: its
-// namespace, its objects and its finalizer stay and nothing is erased, as for
-// a deletion without the erase confirmation. Only the admins binding still
-// follows spec.admins (see holdAdmins). Ready is False with reason
-// AgentPlatformDisabled until the switch is on again or the Organization is
-// deleted, which erases it.
-func (r *OrganizationReconciler) hold(ctx context.Context, org *orgv1.Organization) error {
-	// A cause of Ready=False (another writer's binding of that name) goes
-	// into the message only, as in readyCondition; a failure is retried.
-	adminsErr := r.holdAdmins(ctx, org)
-	failed, _ := split(adminsErr)
+// reportSwitchOff reports an organization whose Agent Platform was turned
+// off, or whose spec.agentPlatform was removed, after it was on. A switch-off
+// is not supported yet, and the agent-platform chart's admission policy
+// refuses it; when it gets through all the same, the reconciler changes
+// nothing and erases nothing: the namespace, its contents, the admins binding
+// and the finalizer stay as they are. Only Ready says so. A delete of the
+// Organization still erases it.
+func (r *OrganizationReconciler) reportSwitchOff(ctx context.Context, org *orgv1.Organization) error {
 	status := stateOf(org)
-	message := fmt.Sprintf("spec.agentPlatform.enabled is off: the namespace %q and its contents stay and nothing is erased; turn the Agent Platform on again, or delete the Organization with the erase confirmation to erase it",
-		status.Namespace)
-	if adminsErr != nil {
-		message += "; " + adminsErr.Error()
-	}
 	meta.SetStatusCondition(&status.Conditions, metav1.Condition{
 		Type: v1alpha1.ConditionReady, Status: metav1.ConditionFalse, Reason: reasonAgentPlatformOff,
-		Message: message, ObservedGeneration: org.Generation,
+		Message:            "spec.agentPlatform.enabled is off or spec.agentPlatform is gone: turning the Agent Platform off is not supported yet, and nothing was changed or erased; turn it on again, or delete the Organization to erase it",
+		ObservedGeneration: org.Generation,
 	})
-	return errors.Join(errors.Join(failed...), r.writeStatus(ctx, org, status))
-}
-
-// holdAdmins keeps the admins binding of a held organization equal to
-// spec.admins: the admins of an organization exist only in the Organization,
-// so a hold keeps no access that the list no longer grants. It acts only in
-// the namespace the reconciler created for org (it carries org's UID) and not
-// in a terminating one, and it creates no namespace.
-func (r *OrganizationReconciler) holdAdmins(ctx context.Context, org *orgv1.Organization) error {
-	name, err := namespaceName(org)
-	if err != nil {
-		// No valid name: the organization never had a namespace.
-		return nil
-	}
-	ns := &corev1.Namespace{}
-	err = r.APIReader.Get(ctx, client.ObjectKey{Name: name}, ns)
-	switch {
-	case apierrors.IsNotFound(err):
-		return nil
-	case err != nil:
-		return fmt.Errorf("get the namespace %s: %w", name, err)
-	case ns.Labels[v1alpha1.OrganizationUIDLabel] != string(org.UID),
-		ns.DeletionTimestamp != nil, ns.Status.Phase == corev1.NamespaceTerminating:
-		return nil
-	}
-	return r.keepAdmins(ctx, org, ns.Name)
+	return r.writeStatus(ctx, org, status)
 }
 
 // enabled reports whether org has the Agent Platform switched on.

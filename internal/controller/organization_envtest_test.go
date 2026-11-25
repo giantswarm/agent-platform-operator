@@ -166,24 +166,47 @@ func TestOrganizationEnvtest(t *testing.T) {
 		}
 	})
 
-	t.Run("turning the switch off holds the organization and erases nothing", func(t *testing.T) {
-		org := c.organization(t, "held")
+	t.Run("a switch-off that got past admission changes nothing and erases nothing", func(t *testing.T) {
+		org := c.organizationWithAdmins(t, "switch-off", orgv1.OrganizationAdmin{Kind: orgv1.OrganizationAdminGroup, Name: adminGroup})
 		ns := c.readyNamespace(t, org)
+		key := client.ObjectKey{Namespace: ns.Name, Name: controller.AdminsBinding}
+		c.adminsAre(t, key, group(adminGroup))
 
-		c.hold(t, org)
+		// The same write changes the admins: the operator applies none of it.
+		var generation int64
+		require.EventuallyWithT(t, func(ct *assert.CollectT) {
+			got := c.get(ct, org)
+			got.Spec.AgentPlatform.Enabled = false
+			got.Spec.Admins = []orgv1.OrganizationAdmin{{Kind: orgv1.OrganizationAdminGroup, Name: leadGroup}}
+			if assert.NoError(ct, c.admin.Update(t.Context(), got)) {
+				generation = got.Generation
+			}
+		}, timeout, tick)
+		require.EventuallyWithT(t, func(ct *assert.CollectT) {
+			ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, v1alpha1.ConditionReady)
+			if assert.NotNil(ct, ready) {
+				assert.Equal(ct, metav1.ConditionFalse, ready.Status)
+				assert.Equal(ct, "AgentPlatformDisabled", ready.Reason)
+				assert.Contains(ct, ready.Message, "not supported yet")
+				assert.Equal(ct, generation, ready.ObservedGeneration)
+			}
+		}, timeout, tick)
+
 		got := c.get(t, org)
 		assert.Contains(t, got.Finalizers, v1alpha1.Finalizer)
 		assert.Equal(t, ns.Name, ap(got).Namespace)
 		still := &corev1.Namespace{}
 		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKeyFromObject(ns), still))
-		assert.Nil(t, still.DeletionTimestamp, "the namespace of a held organization is being deleted")
+		assert.Nil(t, still.DeletionTimestamp, "the namespace of a switched-off organization is being deleted")
 		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns.Name, Name: helmSA}, &corev1.ServiceAccount{}))
+		c.adminsAre(t, key, group(adminGroup))
 
-		// On again, it is Ready on the same namespace.
+		// On again, it is Ready on the same namespace, with the new admins.
 		got.Spec.AgentPlatform.Enabled = true
 		require.NoError(t, c.admin.Update(t.Context(), got))
 		c.readyAt(t, got, got.Generation)
 		assert.Equal(t, ns.Name, c.readyNamespace(t, org).Name)
+		c.adminsAre(t, key, group(leadGroup))
 	})
 
 	t.Run("the status fields of another writer stay", func(t *testing.T) {
@@ -304,29 +327,6 @@ func (c *cluster) readyAt(t *testing.T, org *orgv1.Organization, generation int6
 		ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, v1alpha1.ConditionReady)
 		if assert.NotNil(ct, ready) {
 			assert.Equal(ct, metav1.ConditionTrue, ready.Status)
-			assert.Equal(ct, generation, ready.ObservedGeneration)
-		}
-	}, timeout, tick)
-}
-
-// hold turns org's Agent Platform off and waits until the operator holds
-// it: Ready is False with reason AgentPlatformDisabled for the new
-// generation.
-func (c *cluster) hold(t *testing.T, org *orgv1.Organization) {
-	t.Helper()
-	var generation int64
-	require.EventuallyWithT(t, func(ct *assert.CollectT) {
-		got := c.get(ct, org)
-		got.Spec.AgentPlatform.Enabled = false
-		if assert.NoError(ct, c.admin.Update(t.Context(), got)) {
-			generation = got.Generation
-		}
-	}, timeout, tick)
-	require.EventuallyWithT(t, func(ct *assert.CollectT) {
-		ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, v1alpha1.ConditionReady)
-		if assert.NotNil(ct, ready) {
-			assert.Equal(ct, metav1.ConditionFalse, ready.Status)
-			assert.Equal(ct, "AgentPlatformDisabled", ready.Reason)
 			assert.Equal(ct, generation, ready.ObservedGeneration)
 		}
 	}, timeout, tick)
