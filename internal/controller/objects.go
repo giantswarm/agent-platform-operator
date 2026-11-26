@@ -8,6 +8,7 @@ import (
 	"path"
 	"reflect"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -31,6 +32,13 @@ type ChartSource struct {
 	SemverFilter string
 	Interval     string
 	APIVersion   string
+	// MigrationReport is agent-manager migrate's report ConfigMap in an
+	// organization namespace (DefaultMigrationReport when empty): an
+	// existing source moves across a major only while it carries
+	// MigrationReadyAnnotation with the new major. MigrationPoll is how often
+	// a held organization looks again (DefaultMigrationPoll when zero).
+	MigrationReport string
+	MigrationPoll   time.Duration
 }
 
 // The OCIRepository fields ChartSource derives.
@@ -198,6 +206,15 @@ func (r *OrganizationReconciler) ensureScoped(ctx context.Context, ns, scope str
 // did not write is left alone. No organization pins its own chart: the
 // AgentPlatformOrganization has no such field, and only the operator writes
 // the source.
+//
+// A move of spec.ref to a higher major waits, per organization, for
+// agent-manager's migrate (migrationReady): until its report in the
+// namespace marks every release there as on the new major's values, the
+// source keeps its ref (url and interval still follow), the organization is
+// not Ready (reason ChartSourceHeld) and looks again after MigrationPoll. A
+// release still on the old major's values would otherwise fail every upgrade
+// on the new chart (agent chart 3.0 refuses muster.requireApproval) and stay
+// on its old revision until edited by hand.
 func (r *OrganizationReconciler) ensureChartSource(ctx context.Context, ns string) error {
 	want := r.Config.Chart.object(ns)
 	wantLabels := stamp(want, ns, ScopeNamespace, "")
@@ -219,24 +236,50 @@ func (r *OrganizationReconciler) ensureChartSource(ctx context.Context, ns strin
 		spec = map[string]any{}
 	}
 	wantSpec, _ := want.Object["spec"].(map[string]any)
+	var held error
+	if !reflect.DeepEqual(spec[fieldRef], wantSpec[fieldRef]) {
+		have, _ := spec[fieldRef].(map[string]any)
+		if major := r.Config.Chart.majorMove(have); major > 0 {
+			ready, why, err := r.migrationReady(ctx, ns, want.GetName(), major)
+			if err != nil {
+				return err
+			}
+			if !ready {
+				poll := r.Config.Chart.MigrationPoll
+				if poll <= 0 {
+					poll = DefaultMigrationPoll
+				}
+				held = chartSourceHeld(ns, want.GetName(), major, why, poll)
+				wantSpec = maps.Clone(wantSpec)
+				wantSpec[fieldRef] = spec[fieldRef]
+			}
+		}
+	}
 	labels := copiedLabels(existing.GetLabels(), wantLabels, false)
 	same := maps.Equal(labels, existing.GetLabels())
 	for k, v := range wantSpec {
 		same = same && reflect.DeepEqual(spec[k], v)
 	}
 	if same {
-		return nil
+		return held
 	}
 	from := map[string]any{fieldURL: spec[fieldURL], fieldRef: spec[fieldRef], fieldInterval: spec[fieldInterval]}
 	maps.Copy(spec, wantSpec)
 	existing.Object["spec"] = spec
 	existing.SetLabels(labels)
+	before := existing.GetResourceVersion()
 	if err := r.Client.Update(ctx, existing, client.FieldOwner(fieldManager)); err != nil {
 		return fmt.Errorf("update %s %s/%s: %w", kind, ns, want.GetName(), err)
 	}
+	if existing.GetResourceVersion() == before {
+		// The API server stored nothing: a field its CRD prunes or a value
+		// it normalises differs from what the operator derives. Not a change.
+		logf.FromContext(ctx).V(1).Info("organization chart source written, nothing stored", "namespace", ns, "kind", kind, "name", want.GetName())
+		return held
+	}
 	logf.FromContext(ctx).Info("organization chart source updated", "namespace", ns, "kind", kind, "name", want.GetName(),
 		"from", from, "to", wantSpec)
-	return nil
+	return held
 }
 
 // contains reports whether every field of want is in have with the same

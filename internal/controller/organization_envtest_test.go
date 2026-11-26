@@ -24,6 +24,8 @@ import (
 )
 
 const (
+	// oldLine is an agent chart range of an older major than the operator's.
+	oldLine         = "1.x"
 	timeout         = 30 * time.Second
 	tick            = 100 * time.Millisecond
 	mirrorParent    = "org-mirror"
@@ -85,7 +87,7 @@ func TestOrganizationEnvtest(t *testing.T) {
 		// range, plus a field and a label the operator does not derive.
 		oci := c.read(t, ociGVK, ns.Name, agentChart)
 		require.NoError(t, unstructured.SetNestedField(oci.Object, "oci://old.example.com/charts/agent", "spec", "url"))
-		require.NoError(t, unstructured.SetNestedMap(oci.Object, map[string]any{"semver": "1.x", "semverFilter": "-dev"}, "spec", "ref"))
+		require.NoError(t, unstructured.SetNestedMap(oci.Object, map[string]any{semverField: oldLine, "semverFilter": "-dev"}, "spec", "ref"))
 		require.NoError(t, unstructured.SetNestedField(oci.Object, "5m", "spec", "interval"))
 		require.NoError(t, unstructured.SetNestedField(oci.Object, true, "spec", "insecure"))
 		labels := oci.GetLabels()
@@ -99,7 +101,7 @@ func TestOrganizationEnvtest(t *testing.T) {
 			ref, _, _ := unstructured.NestedMap(u.Object, "spec", "ref")
 			interval, _, _ := unstructured.NestedString(u.Object, "spec", "interval")
 			assert.Equal(ct, c.config.Chart.URL, url)
-			assert.Equal(ct, map[string]any{"semver": c.config.Chart.Semver}, ref)
+			assert.Equal(ct, map[string]any{semverField: c.config.Chart.Semver}, ref)
 			assert.Equal(ct, c.config.Chart.Interval, interval)
 		})
 		insecure, _, _ := unstructured.NestedBool(oci.Object, "spec", "insecure")
@@ -117,6 +119,59 @@ func TestOrganizationEnvtest(t *testing.T) {
 			}
 			return u.GetResourceVersion() != rv
 		}, 2*time.Second, tick, "the chart source was written again with nothing to change")
+	})
+
+	t.Run("a move of the chart source to a higher major waits for migrate's mark", func(t *testing.T) {
+		org := c.organization(t, "org-major", "major")
+		ns := c.readyNamespace(t, org)
+		oci := c.read(t, ociGVK, ns.Name, agentChart)
+		require.NoError(t, unstructured.SetNestedMap(oci.Object, map[string]any{semverField: oldLine}, "spec", "ref"))
+		require.NoError(t, c.admin.Update(t.Context(), oci))
+		hr := newObject(helmReleaseGVK, ns.Name, "triage", nil, helmReleaseSpec)
+		require.NoError(t, c.admin.Create(t.Context(), hr))
+
+		c.poke(t, org)
+		require.EventuallyWithT(t, func(ct *assert.CollectT) {
+			ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, v1alpha1.ConditionReady)
+			if assert.NotNil(ct, ready) {
+				assert.Equal(ct, metav1.ConditionFalse, ready.Status)
+				assert.Equal(ct, "ChartSourceHeld", ready.Reason)
+				assert.Contains(ct, ready.Message, controller.MigrationReadyAnnotation)
+			}
+		}, timeout, tick)
+		ref, _, _ := unstructured.NestedMap(c.read(t, ociGVK, ns.Name, agentChart).Object, "spec", "ref")
+		assert.Equal(t, map[string]any{semverField: oldLine}, ref, "the source stays on its major")
+
+		// migrate's mark for the new major: the held organization looks
+		// again on its own (MigrationPoll) and moves.
+		require.NoError(t, c.admin.Create(t.Context(), &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+			Namespace: ns.Name, Name: controller.DefaultMigrationReport,
+			Annotations: map[string]string{controller.MigrationReadyAnnotation: "2"},
+		}}))
+		c.eventually(t, ociGVK, ns.Name, agentChart, func(ct *assert.CollectT, u *unstructured.Unstructured) {
+			ref, _, _ := unstructured.NestedMap(u.Object, "spec", "ref")
+			assert.Equal(ct, map[string]any{semverField: c.config.Chart.Semver}, ref)
+		})
+		c.readyAt(t, org, org.Generation)
+	})
+
+	t.Run("the operator updates no OCIRepository but the chart's and reads no ConfigMap but migrate's report", func(t *testing.T) {
+		org := c.organization(t, "org-rbac", "rbac")
+		ns := c.readyNamespace(t, org)
+		other := newObject(ociGVK, ns.Name, "dashboards", nil, map[string]any{intervalField: chartInterval, urlField: "oci://example.com/charts/dashboards"})
+		require.NoError(t, c.admin.Create(t.Context(), other))
+		other = c.read(t, ociGVK, ns.Name, "dashboards")
+		require.NoError(t, unstructured.SetNestedField(other.Object, "oci://attacker.example.com/charts/dashboards", "spec", urlField))
+		operator := c.as(t, c.operator)
+		err := operator.Update(t.Context(), other)
+		require.True(t, apierrors.IsForbidden(err), "update of another source: %v", err)
+
+		own := c.read(t, ociGVK, ns.Name, agentChart)
+		require.NoError(t, operator.Update(t.Context(), own), "the chart's own source stays writable")
+
+		require.NoError(t, c.admin.Create(t.Context(), &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: ns.Name, Name: "settings"}}))
+		err = operator.Get(t.Context(), client.ObjectKey{Namespace: ns.Name, Name: "settings"}, &corev1.ConfigMap{})
+		require.True(t, apierrors.IsForbidden(err), "get of another ConfigMap: %v", err)
 	})
 
 	t.Run("another writer's annotation on the Helm RoleBinding stays", func(t *testing.T) {

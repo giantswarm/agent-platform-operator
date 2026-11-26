@@ -125,6 +125,8 @@ type cluster struct {
 	rest *rest.Config
 	// config is the reconciler's Config.
 	config controller.Config
+	// operator is the operator's user, as the chart's RBAC binds it.
+	operator string
 	// log records, in order, what the erasure did through the fakes of
 	// kagent's session API, Substrate's actors and the snapshot bucket, and
 	// what the erasure observers saw it delete.
@@ -231,13 +233,14 @@ func startEnvtest(t *testing.T) *cluster {
 	sessions := &fakeSessions{log: log, byID: map[string]*fakeSession{}, pkg: pkgV1alpha1}
 	actors := &fakeActors{log: log, sessions: sessions, linger: map[string]int{}}
 	bucket := &fakeBucket{log: log, objects: map[string]int{}, fail: map[string]error{}}
-	c := &cluster{admin: admin, rest: cfg, log: log, sessions: sessions, actors: actors, bucket: bucket, config: controller.Config{
+	c := &cluster{admin: admin, rest: cfg, operator: operator, log: log, sessions: sessions, actors: actors, bucket: bucket, config: controller.Config{
 		PlatformNamespace: platformNS,
 		NetworkPolicies:   []string{workerPolicy},
 		NetworkPolicyGVK:  npGVK,
 		Chart: controller.ChartSource{
 			URL: "oci://gsoci.azurecr.io/charts/giantswarm/agent", Semver: "2.x",
-			Interval: "30m", APIVersion: ociGVK.GroupVersion().String(),
+			Interval: chartInterval, APIVersion: ociGVK.GroupVersion().String(),
+			MigrationPoll: 200 * time.Millisecond,
 		},
 		HelmServiceAccount: helmSA,
 		HelmClusterRole:    helmClusterRole,
@@ -317,7 +320,7 @@ func curatedSources() []*unstructured.Unstructured {
 		obj(agentGVK, curatedAgent, curatedLabels, agentSpec(agentPrompt, map[string]any{"modelConfig": nameRef(platformModel), toolsField: tools})),
 		obj(agentGVK, platformAgent, nil, agentSpec("Platform only.", nil)),
 		obj(templateGVK, curatedTemplate, curatedLabels, templateSpec("Triage.", map[string]any{"modelConfig": nameRef(platformModel), toolsField: tools})),
-		obj(serverGVK, musterServer, curatedWith(map[string]string{discoveryLabel: "disabled", "app.kubernetes.io/name": "agent"}), map[string]any{"url": "https://muster.example.com/mcp", descriptionField: "muster"}),
+		obj(serverGVK, musterServer, curatedWith(map[string]string{discoveryLabel: "disabled", "app.kubernetes.io/name": "agent"}), map[string]any{urlField: "https://muster.example.com/mcp", descriptionField: "muster"}),
 	}
 }
 
@@ -371,6 +374,9 @@ func nameRef(name string) map[string]any { return map[string]any{nameField: name
 // an agent template.
 const (
 	kindField        = "kind"
+	urlField         = "url"
+	semverField      = "semver"
+	chartInterval    = "30m"
 	nameField        = "name"
 	intervalField    = "interval"
 	harnessRefField  = "harnessRef"

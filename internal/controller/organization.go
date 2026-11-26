@@ -389,7 +389,8 @@ func (r *OrganizationReconciler) Reconcile(ctx context.Context, req reconcile.Re
 	// First: the worker replica rule reads it.
 	orphanedErr := r.setOrphaned(ctx, org, status)
 
-	ready, err := readyCondition(errors.Join(orphanedErr, r.reconcile(ctx, org, status)), org.Generation)
+	reconcileErr := errors.Join(orphanedErr, r.reconcile(ctx, org, status))
+	ready, err := readyCondition(reconcileErr, org.Generation)
 	meta.SetStatusCondition(&status.Conditions, ready)
 	if !equality.Semantic.DeepEqual(&org.Status, status) {
 		org.Status = *status
@@ -397,7 +398,20 @@ func (r *OrganizationReconciler) Reconcile(ctx context.Context, req reconcile.Re
 			return reconcile.Result{}, errors.Join(err, fmt.Errorf("update status: %w", uerr))
 		}
 	}
-	return reconcile.Result{}, err
+	return reconcile.Result{RequeueAfter: requeueAfter(reconcileErr)}, err
+}
+
+// requeueAfter is the shortest requeueAfter of the causes of Ready=False in
+// err; zero when none asks for one.
+func requeueAfter(err error) time.Duration {
+	_, notReady := split(err)
+	var after time.Duration
+	for _, nr := range notReady {
+		if nr.requeueAfter > 0 && (after == 0 || nr.requeueAfter < after) {
+			after = nr.requeueAfter
+		}
+	}
+	return after
 }
 
 // reconcile finds or creates the organization namespace, records it in
@@ -438,8 +452,13 @@ func (r *OrganizationReconciler) reconcile(ctx context.Context, org *v1alpha1.Ag
 }
 
 // notReadyError is a cause of Ready=False that a retry does not change: the
-// reconcile has done what it can.
-type notReadyError struct{ reason, message string }
+// reconcile has done what it can. With requeueAfter the organization is
+// reconciled again after that long, for a cause no watched event ends (the
+// chart source held for migrate, chartSourceHeld).
+type notReadyError struct {
+	reason, message string
+	requeueAfter    time.Duration
+}
 
 func (e *notReadyError) Error() string { return e.message }
 

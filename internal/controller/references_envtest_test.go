@@ -83,7 +83,7 @@ func referenceCases(t *testing.T, c *cluster) {
 			{
 				desc:  "the RemoteMCPServer of a tool",
 				agent: agentSpec("With a server.", map[string]any{toolsField: []any{map[string]any{"mcp": map[string]any{"server": server}}}}),
-				gvk:   serverGVK, ref: "ref-server", spec: map[string]any{"url": "https://tools.example.com/mcp", descriptionField: "tools"},
+				gvk:   serverGVK, ref: "ref-server", spec: map[string]any{urlField: "https://tools.example.com/mcp", descriptionField: "tools"},
 			},
 		} {
 			t.Run(tc.desc, func(t *testing.T) {

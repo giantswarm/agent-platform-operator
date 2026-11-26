@@ -44,6 +44,17 @@ agentChart:
   interval: 30m
   # -- source.toolkit.fluxcd.io API version of the OCIRepository.
   ociRepositoryApiVersion: source.toolkit.fluxcd.io/v1
+  # -- agent-manager migrate's report ConfigMap in an organization namespace.
+  # A move of an existing organization's OCIRepository to a higher major
+  # (`2.x` to `3.x`) waits until migrate annotates it
+  # `agent-platform.giantswarm.io/agent-chart-ready-major` with the new major
+  # (every release there on that major's values), or no HelmRelease there uses
+  # the source; meanwhile the organization is not Ready (`ChartSourceHeld`).
+  # The operator may read this one ConfigMap name only.
+  migrationReport: agent-manager-migrate-report
+  # -- How often an organization whose chart source waits at its major looks
+  # for migrate's annotation again.
+  migrationPoll: 1m
 
 # -- The ServiceAccount the organization's HelmReleases run as
 # (`spec.serviceAccountName`, which helm-controller impersonates), kept in
