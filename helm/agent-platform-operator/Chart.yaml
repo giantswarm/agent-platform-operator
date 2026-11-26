@@ -10,7 +10,7 @@ appVersion: 0.0.1
 name: agent-platform-operator
 
 # Please describe what the app provides in a sentence or two.
-description: Reconciles each AgentPlatformOrganization (agent-platform.giantswarm.io) into its organization namespace.
+description: Reconciles each Organization (security.giantswarm.io) with the Agent Platform enabled into its organization namespace.
 
 # URL of the GitHub repository that is the source of this Chart.yaml file.
 home: https://github.com/giantswarm/agent-platform-operator

@@ -1,6 +1,7 @@
-// agent-platform-operator reconciles each AgentPlatformOrganization
-// (agent-platform.giantswarm.io) into its organization namespace. It serves
-// no API of its own: only metrics and health probes.
+// agent-platform-operator reconciles each Organization
+// (security.giantswarm.io) with the Agent Platform enabled into its
+// organization namespace. It serves no API of its own: only metrics and
+// health probes.
 package main
 
 import (
@@ -21,6 +22,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+
+	orgv1 "github.com/giantswarm/organization-operator/api/v1alpha1"
 
 	"github.com/giantswarm/agent-platform-operator/api/v1alpha1"
 	"github.com/giantswarm/agent-platform-operator/internal/controller"
@@ -74,10 +77,10 @@ func run() error {
 	flag.StringVar(&cfg.HelmServiceAccount, "helmrelease-service-account", "kagent-flux", "The ServiceAccount the organization's HelmReleases run as, kept in every organization namespace; empty keeps none")
 	flag.StringVar(&cfg.HelmClusterRole, "helm-cluster-role", "agent-platform-tenant-flux", "ClusterRole bound to --helmrelease-service-account in every organization namespace")
 	flag.StringVar(&serviceAccountBindings, "service-account-bindings", "", `JSON list of {"clusterRole": ..., "serviceAccount": {"namespace": ..., "name": ...}}: each ClusterRole is bound to that ServiceAccount of another namespace in every organization namespace, by a RoleBinding named after the ClusterRole, so it holds the ClusterRole there and nowhere it is not bound (Substrate's credential providers); a ClusterRole removed from the list loses its bindings; empty binds none`)
-	flag.StringVar(&cfg.SnapshotBucket, "snapshot-bucket", "", "Bucket of the organizations' worker snapshots: status.snapshotPrefix is s3://<bucket>/<uid>; empty leaves it empty")
+	flag.StringVar(&cfg.SnapshotBucket, "snapshot-bucket", "", "Bucket of the organizations' worker snapshots: status.capabilities.agentPlatform.snapshotPrefix is s3://<bucket>/<uid>; empty leaves it empty")
 	flag.StringVar(&snapshotEndpoint, "snapshot-endpoint", "", "S3 endpoint URL for snapshot cleanup; empty uses the AWS endpoint")
 	flag.BoolVar(&snapshotUsePathStyle, "snapshot-use-path-style", false, "Address snapshot buckets in the URL path")
-	flag.BoolVar(&curatedCopies, "curated-copies", false, "Copy the curated objects of --platform-namespace into every organization namespace: the Harnesses its spec.harnesses names, the WorkerPool --curated-worker-pool with its ServiceAccount, the Agents and AgentTemplates labelled "+v1alpha1.CuratedLabel+"=true and the RemoteMCPServers they name. Needs --snapshot-bucket")
+	flag.BoolVar(&curatedCopies, "curated-copies", false, "Copy the curated objects of --platform-namespace into every organization namespace: the Harnesses its spec.capabilities.agentPlatform.harnesses names, the WorkerPool --curated-worker-pool with its ServiceAccount, the Agents and AgentTemplates labelled "+v1alpha1.CuratedLabel+"=true and the RemoteMCPServers they name. Needs --snapshot-bucket")
 	flag.StringVar(&curatedWorkerPool, "curated-worker-pool", "kagent-default", "The curated WorkerPool in --platform-namespace every organization gets a copy of")
 	flag.StringVar(&kagentAPIVersion, "kagent-api-version", "api.kagent.dev/v1alpha3", "api.kagent.dev API version of the Agents, AgentTemplates, Harnesses, ModelConfigs and RemoteMCPServers; cleanup deletes a deleted organization's Agents of it")
 	flag.StringVar(&workerPoolAPIVersion, "workerpool-api-version", "ate.dev/v1alpha1", "ate.dev API version of the WorkerPool")
@@ -94,10 +97,10 @@ func run() error {
 	flag.StringVar(&cfg.Flux.SourceKind, "flux-source-kind", "GitRepository", "Kind of the installation's Flux source in --flux-namespace: GitRepository or OCIRepository")
 	flag.StringVar(&cfg.Flux.SourceName, "flux-source-name", "", "The installation's Flux source in --flux-namespace. Set: commit mode, every organization gets, in --flux-namespace, a Kustomization applying its path from this source into its namespace and the Flux ServiceAccount that Kustomization runs as, both named after the organization namespace. Empty: none. Needs --flux-namespace")
 	flag.StringVar(&cfg.Flux.DecryptionSecret, "flux-decryption-secret", "", "The installation's SOPS key Secret in --flux-namespace, which the organizations' Kustomizations decrypt with; empty decrypts nothing")
-	flag.StringVar(&cfg.Flux.Path, "organization-path", "./agent-platform/organizations/{parent}/{name}", "An organization's path in --flux-source-name, with {parent} and {name} replaced by its parent namespace and name. Keep it outside what the installation's Kustomization applies")
+	flag.StringVar(&cfg.Flux.Path, "organization-path", "./agent-platform/organizations/{name}", "An organization's path in --flux-source-name, with {name} replaced by its name. Keep it outside what the installation's Kustomization applies")
 	flag.StringVar(&cfg.Flux.Interval, "organization-kustomization-interval", "10m", "spec.interval of the organizations' Kustomizations")
 	flag.StringVar(&cfg.Flux.ClusterRole, "organization-flux-cluster-role", "agent-platform:organization-flux", "ClusterRole an organization's Flux ServiceAccount is bound to, in its organization namespace only")
-	flag.StringVar(&installationKustomization, "installation-kustomization", "", "<namespace>/<name> of the installation's Kustomization that applies the AgentPlatformOrganizations (a bare name is in --flux-namespace). An organization it applied is Orphaned while it is missing from its inventory. Empty: no Orphaned condition")
+	flag.StringVar(&installationKustomization, "installation-kustomization", "", "<namespace>/<name> of the installation's Kustomization that applies the Organizations (a bare name is in --flux-namespace). Set: an organization that a Flux Kustomization applied, this one or any other as its ownership labels name it, is AgentPlatformOrphaned while it is missing from that Kustomization's inventory, and the operator is not ready while this Kustomization cannot be read. Empty: no AgentPlatformOrphaned condition")
 	flag.DurationVar(&cfg.Erasure.SnapshotDelay, "snapshot-erase-delay", 5*time.Minute, "How long after the first deletion of a deleted organization's snapshot prefix it is deleted again: at least Substrate's --actor-workflow-deadline (5m by default), so an upload that started before the last actor went has ended")
 	flag.DurationVar(&cfg.Erasure.Poll, "erasure-poll-interval", 10*time.Second, "How often a cleanup step that waits for something to be gone looks again")
 	flag.DurationVar(&syncPeriod, "sync-period", 10*time.Minute, "How often every organization is reconciled without a change")
@@ -203,7 +206,7 @@ func run() error {
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		return err
 	}
-	if err := v1alpha1.AddToScheme(scheme); err != nil {
+	if err := orgv1.AddToScheme(scheme); err != nil {
 		return err
 	}
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
@@ -253,7 +256,7 @@ func run() error {
 	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
 		return err
 	}
-	// A mistyped name would leave Orphaned unset for good, in silence.
+	// A mistyped name, or no right to read Kustomizations, shows on the pod.
 	if check := controller.InstallationCheck(mgr.GetAPIReader(), cfg.Flux); check != nil {
 		if err := mgr.AddReadyzCheck("installation-kustomization", check); err != nil {
 			return err

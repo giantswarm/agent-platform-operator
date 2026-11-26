@@ -2,7 +2,7 @@ package controller_test
 
 import (
 	"context"
-	"sort"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -18,41 +18,34 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	orgv1 "github.com/giantswarm/organization-operator/api/v1alpha1"
+
 	"github.com/giantswarm/agent-platform-operator/api/v1alpha1"
 	"github.com/giantswarm/agent-platform-operator/internal/controller"
-	"github.com/giantswarm/agent-platform-operator/pkg/adminmirror"
 )
 
 const (
 	timeout         = 30 * time.Second
 	tick            = 100 * time.Millisecond
-	mirrorParent    = "org-mirror"
 	kindClusterRole = "ClusterRole"
-	adminsBinding   = "platform-team"
-	namesParent     = "org-names"
-	// customerGroupBinding is rbac-operator's binding of the customer admin
-	// groups, a case of adminmirror.Cases.
-	customerGroupBinding = "write-all-customer-group"
 )
 
 func TestOrganizationEnvtest(t *testing.T) {
 	c := startEnvtest(t)
 
 	t.Run("an organization yields its namespace and the objects kept there", func(t *testing.T) {
-		org := c.organization(t, "org-acme", "payments")
+		org := c.organization(t, "payments")
 		ns := c.readyNamespace(t, org)
 
-		assert.True(t, strings.HasPrefix(ns.Name, "agents-payments-"), "namespace %s is not from the generateName agents-payments-", ns.Name)
-		assert.Len(t, ns.Name, len("agents-payments-")+5)
+		assert.Equal(t, "agents-payments", ns.Name)
 		assert.Equal(t, "payments", ns.Labels[v1alpha1.OrganizationLabel])
-		assert.Equal(t, "org-acme", ns.Labels[v1alpha1.ParentLabel])
 		assert.Equal(t, string(org.UID), ns.Labels[v1alpha1.OrganizationUIDLabel])
 		assert.Empty(t, ns.OwnerReferences)
-		assert.Len(t, c.namespacesOf(t, org), 1)
 
 		org = c.get(t, org)
-		assert.Equal(t, "s3://"+snapshotBucket+"/"+string(org.UID), org.Status.SnapshotPrefix)
-		ready := meta.FindStatusCondition(org.Status.Conditions, v1alpha1.ConditionReady)
+		assert.Equal(t, ns.Name, agentsNamespace(org))
+		assert.Equal(t, "s3://"+snapshotBucket+"/"+string(org.UID), ap(org).SnapshotPrefix)
+		ready := meta.FindStatusCondition(org.Status.Conditions, orgv1.AgentPlatformReady)
 		require.NotNil(t, ready)
 		assert.Equal(t, metav1.ConditionTrue, ready.Status)
 		assert.Equal(t, org.Generation, ready.ObservedGeneration)
@@ -78,7 +71,7 @@ func TestOrganizationEnvtest(t *testing.T) {
 	})
 
 	t.Run("another writer's annotation on the Helm RoleBinding stays", func(t *testing.T) {
-		org := c.organization(t, "org-notes", "notes")
+		org := c.organization(t, "notes")
 		ns := c.readyNamespace(t, org)
 		rb := &rbacv1.RoleBinding{}
 		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns.Name, Name: helmSA}, rb))
@@ -88,7 +81,7 @@ func TestOrganizationEnvtest(t *testing.T) {
 		// A spec change reconciles the organization once more; its Ready
 		// condition observes the new generation after that reconcile.
 		org = c.get(t, org)
-		org.Spec.Workers = withReplicas(2)
+		org.Spec.Capabilities.AgentPlatform.Workers = withReplicas(2)
 		require.NoError(t, c.admin.Update(t.Context(), org))
 		c.readyAt(t, org, org.Generation)
 
@@ -101,9 +94,9 @@ func TestOrganizationEnvtest(t *testing.T) {
 		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKey{Namespace: platformNS, Name: workerPolicy}, source))
 		require.NoError(t, c.admin.Delete(t.Context(), source))
 
-		org := c.organization(t, "org-nopolicy", "nopolicy")
+		org := c.organization(t, "nopolicy")
 		require.EventuallyWithT(t, func(ct *assert.CollectT) {
-			ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, v1alpha1.ConditionReady)
+			ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, orgv1.AgentPlatformReady)
 			if assert.NotNil(ct, ready) {
 				assert.Equal(ct, metav1.ConditionFalse, ready.Status)
 				assert.Equal(ct, "SourceMissing", ready.Reason)
@@ -119,7 +112,7 @@ func TestOrganizationEnvtest(t *testing.T) {
 	})
 
 	t.Run("a changed network policy copy is restored", func(t *testing.T) {
-		org := c.organization(t, "org-drift", "drift")
+		org := c.organization(t, "drift")
 		ns := c.readyNamespace(t, org)
 		policy := &networkingv1.NetworkPolicy{}
 		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns.Name, Name: workerPolicy}, policy))
@@ -135,7 +128,7 @@ func TestOrganizationEnvtest(t *testing.T) {
 	})
 
 	t.Run("a terminating organization namespace makes the organization not Ready", func(t *testing.T) {
-		org := c.organization(t, "org-terminating", "terminating")
+		org := c.organization(t, "terminating")
 		ns := c.readyNamespace(t, org)
 		// envtest runs no namespace controller: the namespace stays
 		// terminating.
@@ -143,245 +136,209 @@ func TestOrganizationEnvtest(t *testing.T) {
 
 		require.EventuallyWithT(t, func(ct *assert.CollectT) {
 			got := c.get(ct, org)
-			ready := meta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionReady)
+			ready := meta.FindStatusCondition(got.Status.Conditions, orgv1.AgentPlatformReady)
 			if assert.NotNil(ct, ready) {
 				assert.Equal(ct, metav1.ConditionFalse, ready.Status)
 				assert.Equal(ct, "NamespaceTerminating", ready.Reason)
 			}
-			assert.Equal(ct, ns.Name, got.Status.Namespace)
+			assert.Equal(ct, ns.Name, agentsNamespace(got))
 		}, timeout, tick)
 		assert.Len(t, c.namespacesOf(t, org), 1, "a terminating namespace was replaced while it still exists")
 	})
 
-	t.Run("a lost status finds the namespace by its organization-uid label", func(t *testing.T) {
-		org := c.organization(t, "org-lost", "billing")
+	t.Run("an Organization without the switch, or with it off, gets nothing", func(t *testing.T) {
+		none := &orgv1.Organization{ObjectMeta: metav1.ObjectMeta{Name: "kaas-only"}}
+		require.NoError(t, c.admin.Create(t.Context(), none))
+		off := &orgv1.Organization{
+			ObjectMeta: metav1.ObjectMeta{Name: "switched-off"},
+			Spec:       orgv1.OrganizationSpec{Capabilities: orgv1.OrganizationCapabilities{AgentPlatform: &orgv1.AgentPlatformSpec{Harnesses: []string{curatedHarness}}}},
+		}
+		require.NoError(t, c.admin.Create(t.Context(), off))
+		// An enabled organization created after both is reconciled, so the
+		// two had their turn.
+		c.readyNamespace(t, c.organization(t, "switched-on"))
+
+		for _, org := range []*orgv1.Organization{none, off} {
+			got := c.get(t, org)
+			assert.Empty(t, got.Finalizers, org.Name)
+			assert.Equal(t, orgv1.OrganizationStatus{}, got.Status, org.Name)
+			err := c.admin.Get(t.Context(), client.ObjectKey{Name: controller.NamespacePrefix + org.Name}, &corev1.Namespace{})
+			assert.True(t, apierrors.IsNotFound(err), "%s got a namespace: %v", org.Name, err)
+		}
+	})
+
+	t.Run("a switch-off that got past admission changes nothing and erases nothing", func(t *testing.T) {
+		org := c.organizationWithAdmins(t, "switch-off", orgv1.OrganizationAdmin{Kind: orgv1.OrganizationAdminGroup, Name: adminGroup})
 		ns := c.readyNamespace(t, org)
+		key := client.ObjectKey{Namespace: ns.Name, Name: controller.AdminsBinding}
+		c.adminsAre(t, key, group(adminGroup))
 
-		org = c.get(t, org)
-		org.Status = v1alpha1.AgentPlatformOrganizationStatus{}
-		require.NoError(t, c.admin.Status().Update(t.Context(), org))
-
+		// The same write changes the admins: the operator applies none of it.
+		var generation int64
 		require.EventuallyWithT(t, func(ct *assert.CollectT) {
 			got := c.get(ct, org)
-			assert.Equal(ct, ns.Name, got.Status.Namespace)
-			assert.True(ct, meta.IsStatusConditionTrue(got.Status.Conditions, v1alpha1.ConditionReady))
+			got.Spec.Capabilities.AgentPlatform.Enabled = false
+			got.Spec.Admins = []orgv1.OrganizationAdmin{{Kind: orgv1.OrganizationAdminGroup, Name: leadGroup}}
+			if assert.NoError(ct, c.admin.Update(t.Context(), got)) {
+				generation = got.Generation
+			}
 		}, timeout, tick)
-		assert.Len(t, c.namespacesOf(t, org), 1, "a reconcile after the lost status made a second namespace")
+		require.EventuallyWithT(t, func(ct *assert.CollectT) {
+			ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, orgv1.AgentPlatformReady)
+			if assert.NotNil(ct, ready) {
+				assert.Equal(ct, metav1.ConditionFalse, ready.Status)
+				assert.Equal(ct, "AgentPlatformDisabled", ready.Reason)
+				assert.Contains(ct, ready.Message, "not supported yet")
+				assert.Equal(ct, generation, ready.ObservedGeneration)
+			}
+		}, timeout, tick)
+
+		got := c.get(t, org)
+		assert.Contains(t, got.Finalizers, v1alpha1.Finalizer)
+		assert.Equal(t, ns.Name, agentsNamespace(got))
+		still := &corev1.Namespace{}
+		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKeyFromObject(ns), still))
+		assert.Nil(t, still.DeletionTimestamp, "the namespace of a switched-off organization is being deleted")
+		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns.Name, Name: helmSA}, &corev1.ServiceAccount{}))
+		c.adminsAre(t, key, group(adminGroup))
+
+		// On again, it is Ready on the same namespace, with the new admins.
+		got.Spec.Capabilities.AgentPlatform.Enabled = true
+		require.NoError(t, c.admin.Update(t.Context(), got))
+		c.readyAt(t, got, got.Generation)
+		assert.Equal(t, ns.Name, c.readyNamespace(t, org).Name)
+		c.adminsAre(t, key, group(leadGroup))
 	})
 
-	t.Run("the parent's organizations-admin bindings are mirrored", func(t *testing.T) {
-		org := c.organization(t, mirrorParent, "platform")
+	t.Run("the status fields and entries of another field manager stay", func(t *testing.T) {
+		// Before the Agent Platform is on, organization-operator applies, as
+		// its own field manager, status.namespace, its kaas entry of
+		// status.namespaces and a condition of its own.
+		org := &orgv1.Organization{ObjectMeta: metav1.ObjectMeta{Name: "shared-status"}}
+		require.NoError(t, c.admin.Create(t.Context(), org))
+		kaas := orgv1.OrganizationNamespace{Name: "org-shared-status", Capability: orgv1.CapabilityKaaS}
+		raw, err := json.Marshal(struct {
+			Status orgv1.OrganizationStatus `json:"status"`
+		}{orgv1.OrganizationStatus{
+			Namespace:  kaas.Name,
+			Namespaces: []orgv1.OrganizationNamespace{kaas},
+			Conditions: []metav1.Condition{{Type: "KaaSReady", Status: metav1.ConditionTrue, Reason: "Reconciled", LastTransitionTime: metav1.Now()}},
+		}})
+		require.NoError(t, err)
+		applied := &unstructured.Unstructured{}
+		require.NoError(t, json.Unmarshal(raw, &applied.Object))
+		applied.SetGroupVersionKind(orgv1.GroupVersion.WithKind("Organization"))
+		applied.SetName(org.Name)
+		require.NoError(t, c.admin.Status().Apply(t.Context(), client.ApplyConfigurationFromUnstructured(applied),
+			client.FieldOwner("organization-operator"), client.ForceOwnership))
+
+		// On: the operator's first status write adds its entry to both lists.
+		got := c.get(t, org)
+		got.Spec.Capabilities.AgentPlatform = &orgv1.AgentPlatformSpec{Enabled: true, Harnesses: []string{curatedHarness}, Workers: withReplicas(1)}
+		require.NoError(t, c.admin.Update(t.Context(), got))
 		ns := c.readyNamespace(t, org)
-		admins := &rbacv1.RoleBinding{
-			ObjectMeta: metav1.ObjectMeta{Name: adminsBinding, Namespace: mirrorParent},
-			RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: kindClusterRole, Name: controller.OrganizationsAdminClusterRole},
-			Subjects: []rbacv1.Subject{
-				{Kind: rbacv1.UserKind, APIGroup: rbacv1.GroupName, Name: "alice@example.com"},
-				{Kind: rbacv1.GroupKind, APIGroup: rbacv1.GroupName, Name: "acme-platform"},
-				{Kind: rbacv1.ServiceAccountKind, Name: "automation", Namespace: mirrorParent},
-				{Kind: rbacv1.GroupKind, APIGroup: rbacv1.GroupName, Name: "system:authenticated"},
-				{Kind: rbacv1.UserKind, APIGroup: rbacv1.GroupName, Name: "system:serviceaccount:org-mirror:automation"},
-			},
-		}
-		require.NoError(t, c.admin.Create(t.Context(), admins))
-		// A binding to another role is not mirrored.
-		require.NoError(t, c.admin.Create(t.Context(), &rbacv1.RoleBinding{
-			ObjectMeta: metav1.ObjectMeta{Name: "viewers", Namespace: mirrorParent},
-			RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: kindClusterRole, Name: "view"},
-			Subjects:   []rbacv1.Subject{{Kind: rbacv1.UserKind, APIGroup: rbacv1.GroupName, Name: "bob@example.com"}},
-		}))
 
-		require.EventuallyWithT(t, func(ct *assert.CollectT) {
-			mirror := &rbacv1.RoleBinding{}
-			if !assert.NoError(ct, c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns.Name, Name: adminsBinding}, mirror)) {
-				return
-			}
-			assert.Equal(ct, admins.RoleRef, mirror.RoleRef)
-			assert.Equal(ct, []rbacv1.Subject{
-				{Kind: rbacv1.UserKind, APIGroup: rbacv1.GroupName, Name: "alice@example.com"},
-				{Kind: rbacv1.GroupKind, APIGroup: rbacv1.GroupName, Name: "acme-platform"},
-			}, mirror.Subjects)
-		}, timeout, tick)
-		err := c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns.Name, Name: "viewers"}, &rbacv1.RoleBinding{})
-		assert.True(t, apierrors.IsNotFound(err), "a binding to another role was mirrored: %v", err)
-
-		// A change of the parent's subjects follows.
-		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKeyFromObject(admins), admins))
-		admins.Subjects = append(admins.Subjects, rbacv1.Subject{Kind: rbacv1.GroupKind, APIGroup: rbacv1.GroupName, Name: "acme-sre"})
-		require.NoError(t, c.admin.Update(t.Context(), admins))
-		require.EventuallyWithT(t, func(ct *assert.CollectT) {
-			mirror := &rbacv1.RoleBinding{}
-			if !assert.NoError(ct, c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns.Name, Name: adminsBinding}, mirror)) {
-				return
-			}
-			assert.Contains(ct, mirror.Subjects, rbacv1.Subject{Kind: rbacv1.GroupKind, APIGroup: rbacv1.GroupName, Name: "acme-sre"})
-			assert.Len(ct, mirror.Subjects, 3)
-		}, timeout, tick)
-
-		// The mirror goes with the parent's binding.
-		require.NoError(t, c.admin.Delete(t.Context(), admins))
-		require.EventuallyWithT(t, func(ct *assert.CollectT) {
-			err := c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns.Name, Name: adminsBinding}, &rbacv1.RoleBinding{})
-			assert.True(ct, apierrors.IsNotFound(err), "the mirror is still there: %v", err)
-		}, timeout, tick)
+		got = c.get(t, org)
+		assert.Equal(t, kaas.Name, got.Status.Namespace)
+		assert.ElementsMatch(t, []orgv1.OrganizationNamespace{kaas, {Name: ns.Name, Capability: orgv1.CapabilityAgentPlatform}}, got.Status.Namespaces)
+		assert.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, "KaaSReady"), "conditions: %+v", got.Status.Conditions)
 	})
 
-	t.Run("the parent bindings of adminmirror.Cases are mirrored as the table says", func(t *testing.T) {
-		const parent = "org-rbacop"
-		org := c.organization(t, parent, "customer")
-		ns := c.readyNamespace(t, org)
-		cases := adminmirror.Cases()
-		// The bindings without a mirror first, so the reconcile that writes
-		// the first mirror lists them too.
-		sort.SliceStable(cases, func(i, j int) bool { return len(cases[i].Mirrored) < len(cases[j].Mirrored) })
-		for _, tc := range cases {
-			rb := tc.Binding.DeepCopy()
-			rb.Namespace = parent
-			require.NoError(t, c.admin.Create(t.Context(), rb))
-			if tc.Binding.DeletionTimestamp == nil {
-				continue
-			}
-			// The API server drops a deletion timestamp on create: a delete
-			// sets it, and the case's finalizer keeps the binding.
-			require.NoError(t, c.admin.Delete(t.Context(), rb))
-			t.Cleanup(func() {
-				held := &rbacv1.RoleBinding{}
-				if err := c.admin.Get(context.Background(), client.ObjectKeyFromObject(rb), held); err != nil {
-					return
-				}
-				held.Finalizers = nil
-				assert.NoError(t, client.IgnoreNotFound(c.admin.Update(context.Background(), held)))
-			})
-		}
-
-		organizationsAdmin := rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: kindClusterRole, Name: adminmirror.OrganizationsAdminClusterRole}
+	t.Run("a namespace of the organization's name that another writer created is not taken over", func(t *testing.T) {
+		squatted := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: controller.NamespacePrefix + "squatted"}}
+		require.NoError(t, c.admin.Create(t.Context(), squatted))
+		org := c.organization(t, "squatted")
 		require.EventuallyWithT(t, func(ct *assert.CollectT) {
-			for _, tc := range cases {
-				if len(tc.Mirrored) == 0 {
-					continue
-				}
-				mirror := &rbacv1.RoleBinding{}
-				if !assert.NoError(ct, c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns.Name, Name: tc.Binding.Name}, mirror)) {
-					continue
-				}
-				assert.Equal(ct, organizationsAdmin, mirror.RoleRef, tc.Binding.Name)
-				assert.Equal(ct, tc.Mirrored, mirror.Subjects, tc.Binding.Name)
-			}
-		}, timeout, tick)
-		// Eventually: a binding being deleted may be mirrored by a reconcile
-		// that ran before its delete, and the delete event removes the mirror.
-		require.EventuallyWithT(t, func(ct *assert.CollectT) {
-			for _, tc := range cases {
-				if len(tc.Mirrored) > 0 {
-					continue
-				}
-				err := c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns.Name, Name: tc.Binding.Name}, &rbacv1.RoleBinding{})
-				assert.True(ct, apierrors.IsNotFound(err), "%s has a mirror: %v", tc.Binding.Name, err)
-			}
-		}, timeout, tick)
-
-		// A subject that leaves rbac-operator's binding leaves the mirror.
-		customers := &rbacv1.RoleBinding{}
-		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKey{Namespace: parent, Name: customerGroupBinding}, customers))
-		left := customers.Subjects[0]
-		customers.Subjects = customers.Subjects[1:]
-		require.NoError(t, c.admin.Update(t.Context(), customers))
-		require.EventuallyWithT(t, func(ct *assert.CollectT) {
-			mirror := &rbacv1.RoleBinding{}
-			if !assert.NoError(ct, c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns.Name, Name: customerGroupBinding}, mirror)) {
-				return
-			}
-			assert.NotContains(ct, mirror.Subjects, left)
-			assert.Equal(ct, adminmirror.MirroredSubjects(customers.Subjects), mirror.Subjects)
-		}, timeout, tick)
-	})
-
-	t.Run("a parent binding whose name the organization namespace already holds is reported", func(t *testing.T) {
-		org := c.organization(t, "org-taken", "taken")
-		c.readyNamespace(t, org)
-		// The Helm RoleBinding holds the name kagent-flux in the
-		// organization namespace.
-		taken := &rbacv1.RoleBinding{
-			ObjectMeta: metav1.ObjectMeta{Name: helmSA, Namespace: "org-taken"},
-			RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: kindClusterRole, Name: controller.OrganizationsAdminClusterRole},
-			Subjects:   []rbacv1.Subject{{Kind: rbacv1.UserKind, APIGroup: rbacv1.GroupName, Name: "carol@example.com"}},
-		}
-		require.NoError(t, c.admin.Create(t.Context(), taken))
-		require.EventuallyWithT(t, func(ct *assert.CollectT) {
-			ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, v1alpha1.ConditionReady)
+			got := c.get(ct, org)
+			ready := meta.FindStatusCondition(got.Status.Conditions, orgv1.AgentPlatformReady)
 			if assert.NotNil(ct, ready) {
 				assert.Equal(ct, metav1.ConditionFalse, ready.Status)
 				assert.Equal(ct, "NameTaken", ready.Reason)
+				assert.Contains(ct, ready.Message, squatted.Name)
 			}
+			assert.Empty(ct, agentsNamespace(got))
 		}, timeout, tick)
+		ns := &corev1.Namespace{}
+		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKeyFromObject(squatted), ns))
+		assert.Empty(t, ns.Labels[v1alpha1.OrganizationUIDLabel], "the operator took the namespace over")
+		err := c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns.Name, Name: helmSA}, &corev1.ServiceAccount{})
+		assert.True(t, apierrors.IsNotFound(err), "the operator wrote into a namespace that is not the organization's: %v", err)
 
-		require.NoError(t, c.admin.Delete(t.Context(), taken))
-		c.readyNamespace(t, org)
+		// The organization never had the namespace: its deletion ends, and
+		// the namespace stays.
+		require.NoError(t, c.admin.Delete(t.Context(), org))
+		c.gone(t, org)
+		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKeyFromObject(squatted), ns))
+		assert.Nil(t, ns.DeletionTimestamp, "the erasure deleted a namespace that was never the organization's")
 	})
 
-	t.Run("the CRD refuses a name longer than 50 characters or with a dot", func(t *testing.T) {
-		createNamespace(t, c.admin, namesParent)
-		long := &v1alpha1.AgentPlatformOrganization{ObjectMeta: metav1.ObjectMeta{Name: strings.Repeat("a", 51), Namespace: namesParent}}
-		err := c.admin.Create(t.Context(), long)
-		require.True(t, apierrors.IsInvalid(err), "a 51-character name was not refused as invalid: %v", err)
-		assert.Contains(t, err.Error(), "at most 50 characters")
-
-		dotted := &v1alpha1.AgentPlatformOrganization{ObjectMeta: metav1.ObjectMeta{Name: "team.payments", Namespace: namesParent}}
-		err = c.admin.Create(t.Context(), dotted)
-		require.True(t, apierrors.IsInvalid(err), "a name with a dot was not refused as invalid: %v", err)
-		assert.Contains(t, err.Error(), "holds no dot")
-
-		fifty := &v1alpha1.AgentPlatformOrganization{ObjectMeta: metav1.ObjectMeta{Name: strings.Repeat("a", 50), Namespace: namesParent}}
-		require.NoError(t, c.admin.Create(t.Context(), fifty))
-		c.readyNamespace(t, fifty)
+	t.Run("a name that does not fit in the namespace name gives a condition and no namespace", func(t *testing.T) {
+		for _, name := range []string{strings.Repeat("a", 57), "team.payments"} {
+			org := c.organization(t, name)
+			require.EventuallyWithT(t, func(ct *assert.CollectT) {
+				got := c.get(ct, org)
+				ready := meta.FindStatusCondition(got.Status.Conditions, orgv1.AgentPlatformReady)
+				if assert.NotNil(ct, ready) {
+					assert.Equal(ct, metav1.ConditionFalse, ready.Status)
+					assert.Equal(ct, "NamespaceNameInvalid", ready.Reason)
+				}
+				assert.Empty(ct, agentsNamespace(got))
+			}, timeout, tick, name)
+			err := c.admin.Get(t.Context(), client.ObjectKey{Name: controller.NamespacePrefix + name}, &corev1.Namespace{})
+			assert.True(t, apierrors.IsNotFound(err), "%s: %v", name, err)
+		}
+		// The longest name that fits.
+		c.readyNamespace(t, c.organization(t, strings.Repeat("a", 56)))
 	})
 
 	curatedCases(t, c)
 	referenceCases(t, c)
 	fluxCases(t, c)
 	serviceAccountBindingCases(t, c)
+	adminsCases(t, c)
 	erasureCases(t, c)
 }
 
-// organization creates an AgentPlatformOrganization in a new parent namespace.
-func (c *cluster) organization(t *testing.T, parent, name string) *v1alpha1.AgentPlatformOrganization {
+// organization creates an Organization with the Agent Platform enabled, the
+// curated Harness and one worker.
+func (c *cluster) organization(t *testing.T, name string) *orgv1.Organization {
 	t.Helper()
-	return c.organizationWith(t, parent, name, v1alpha1.AgentPlatformOrganizationSpec{Harnesses: []string{curatedHarness}, Workers: withReplicas(1)})
+	return c.organizationWith(t, name, orgv1.AgentPlatformSpec{Harnesses: []string{curatedHarness}, Workers: withReplicas(1)})
 }
 
-// organizationWith creates an AgentPlatformOrganization of spec in a new
-// parent namespace.
-func (c *cluster) organizationWith(t *testing.T, parent, name string, spec v1alpha1.AgentPlatformOrganizationSpec) *v1alpha1.AgentPlatformOrganization {
+// organizationWith creates an Organization named name whose
+// spec.capabilities.agentPlatform is spec, with the switch on.
+func (c *cluster) organizationWith(t *testing.T, name string, spec orgv1.AgentPlatformSpec) *orgv1.Organization {
 	t.Helper()
-	createNamespace(t, c.admin, parent)
-	org := &v1alpha1.AgentPlatformOrganization{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: parent},
-		Spec:       spec,
+	spec.Enabled = true
+	org := &orgv1.Organization{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec:       orgv1.OrganizationSpec{Capabilities: orgv1.OrganizationCapabilities{AgentPlatform: &spec}},
 	}
 	require.NoError(t, c.admin.Create(t.Context(), org))
 	return org
 }
 
 // readyNamespace waits until org is Ready and returns its namespace.
-func (c *cluster) readyNamespace(t *testing.T, org *v1alpha1.AgentPlatformOrganization) *corev1.Namespace {
+func (c *cluster) readyNamespace(t *testing.T, org *orgv1.Organization) *corev1.Namespace {
 	t.Helper()
 	ns := &corev1.Namespace{}
 	require.EventuallyWithT(t, func(ct *assert.CollectT) {
 		got := c.get(ct, org)
-		if !assert.NotEmpty(ct, got.Status.Namespace) {
+		if !assert.NotEmpty(ct, agentsNamespace(got)) {
 			return
 		}
-		assert.True(ct, meta.IsStatusConditionTrue(got.Status.Conditions, v1alpha1.ConditionReady), "conditions: %+v", got.Status.Conditions)
-		assert.NoError(ct, c.admin.Get(t.Context(), client.ObjectKey{Name: got.Status.Namespace}, ns))
+		assert.True(ct, meta.IsStatusConditionTrue(got.Status.Conditions, orgv1.AgentPlatformReady), "conditions: %+v", got.Status.Conditions)
+		assert.NoError(ct, c.admin.Get(t.Context(), client.ObjectKey{Name: agentsNamespace(got)}, ns))
 	}, timeout, tick)
 	return ns
 }
 
 // readyAt waits until org's Ready condition is True for generation.
-func (c *cluster) readyAt(t *testing.T, org *v1alpha1.AgentPlatformOrganization, generation int64) {
+func (c *cluster) readyAt(t *testing.T, org *orgv1.Organization, generation int64) {
 	t.Helper()
 	require.EventuallyWithT(t, func(ct *assert.CollectT) {
-		ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, v1alpha1.ConditionReady)
+		ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, orgv1.AgentPlatformReady)
 		if assert.NotNil(ct, ready) {
 			assert.Equal(ct, metav1.ConditionTrue, ready.Status)
 			assert.Equal(ct, generation, ready.ObservedGeneration)
@@ -390,14 +347,44 @@ func (c *cluster) readyAt(t *testing.T, org *v1alpha1.AgentPlatformOrganization,
 }
 
 // get reads org as the admin.
-func (c *cluster) get(t require.TestingT, org *v1alpha1.AgentPlatformOrganization) *v1alpha1.AgentPlatformOrganization {
-	got := &v1alpha1.AgentPlatformOrganization{}
+func (c *cluster) get(t require.TestingT, org *orgv1.Organization) *orgv1.Organization {
+	got := &orgv1.Organization{}
 	require.NoError(t, c.admin.Get(context.Background(), client.ObjectKeyFromObject(org), got))
 	return got
 }
 
+// ap is org's status.capabilities.agentPlatform, the zero value before the
+// operator wrote it.
+func ap(org *orgv1.Organization) orgv1.AgentPlatformStatus {
+	if org.Status.Capabilities.AgentPlatform == nil {
+		return orgv1.AgentPlatformStatus{}
+	}
+	return *org.Status.Capabilities.AgentPlatform
+}
+
+// agentsNamespace is the name of the agentPlatform entry of org's
+// status.namespaces, "" before the operator wrote it.
+func agentsNamespace(org *orgv1.Organization) string {
+	for _, ns := range org.Status.Namespaces {
+		if ns.Capability == orgv1.CapabilityAgentPlatform {
+			return ns.Name
+		}
+	}
+	return ""
+}
+
+// erasureStep is the reason of org's AgentPlatformErasing condition while it
+// is True, "" before the erasure.
+func erasureStep(org *orgv1.Organization) string {
+	erasing := meta.FindStatusCondition(org.Status.Conditions, orgv1.AgentPlatformErasing)
+	if erasing == nil || erasing.Status != metav1.ConditionTrue {
+		return ""
+	}
+	return erasing.Reason
+}
+
 // namespacesOf are the namespaces labelled with org's UID.
-func (c *cluster) namespacesOf(t *testing.T, org *v1alpha1.AgentPlatformOrganization) []corev1.Namespace {
+func (c *cluster) namespacesOf(t *testing.T, org *orgv1.Organization) []corev1.Namespace {
 	t.Helper()
 	list := &corev1.NamespaceList{}
 	require.NoError(t, c.admin.List(t.Context(), list, client.MatchingLabels{v1alpha1.OrganizationUIDLabel: string(org.UID)}))

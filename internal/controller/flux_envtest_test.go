@@ -17,16 +17,18 @@ import (
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	orgv1 "github.com/giantswarm/organization-operator/api/v1alpha1"
+
 	"github.com/giantswarm/agent-platform-operator/api/v1alpha1"
 	"github.com/giantswarm/agent-platform-operator/internal/controller"
 )
 
-// fluxCases are the cases of commit mode, run in TestOrganizationEnvtest:
-// the organization's Flux Kustomization and ServiceAccount, and the Orphaned
-// condition.
+// fluxCases are the cases of commit mode, run in TestOrganizationEnvtest: the
+// organization's Flux Kustomization and ServiceAccount, and the
+// AgentPlatformOrphaned condition.
 func fluxCases(t *testing.T, c *cluster) {
 	t.Run("an organization gets a Kustomization that applies its path as a ServiceAccount bound in its namespace only", func(t *testing.T) {
-		org := c.organization(t, "org-git", "ledger")
+		org := c.organization(t, "git")
 		ns := c.readyNamespace(t, org).Name
 		org = c.get(t, org)
 
@@ -34,8 +36,7 @@ func fluxCases(t *testing.T, c *cluster) {
 		// erasure selects them by.
 		labels := map[string]string{
 			v1alpha1.OrganizationUIDLabel:  string(org.UID),
-			v1alpha1.OrganizationLabel:     "ledger",
-			v1alpha1.ParentLabel:           "org-git",
+			v1alpha1.OrganizationLabel:     "git",
 			controller.ObjectLabel:         controller.ScopeFlux,
 			"app.kubernetes.io/managed-by": "agent-platform-operator",
 		}
@@ -43,7 +44,7 @@ func fluxCases(t *testing.T, c *cluster) {
 		assert.Equal(t, labels, k.GetLabels())
 		assert.Equal(t, map[string]any{
 			intervalField:        fluxInterval,
-			"path":               "./agent-platform/organizations/org-git/ledger",
+			"path":               "./agent-platform/organizations/git",
 			"prune":              true,
 			"deletionPolicy":     "WaitForTermination",
 			"suspend":            false,
@@ -78,15 +79,15 @@ func fluxCases(t *testing.T, c *cluster) {
 
 		// What kustomize-controller does with a merged file: apply it as
 		// spec.serviceAccountName. Into the organization namespace it lands;
-		// into another organization's namespace, the parent namespace or the
-		// Flux namespace it is refused.
-		other := c.readyNamespace(t, c.organization(t, "org-git-other", "ledger")).Name
+		// into another organization's namespace, the platform namespace or
+		// the Flux namespace it is refused.
+		other := c.readyNamespace(t, c.organization(t, "git-other")).Name
 		asFlux := c.as(t, "system:serviceaccount:"+fluxNS+":"+ns)
 		secret := func(namespace string) *corev1.Secret {
 			return &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "tenant-credential-merged", Namespace: namespace}}
 		}
 		require.NoError(t, asFlux.Create(t.Context(), secret(ns)))
-		for _, elsewhere := range []string{other, "org-git", fluxNS} {
+		for _, elsewhere := range []string{other, platformNS, fluxNS} {
 			err := asFlux.Create(t.Context(), secret(elsewhere))
 			assert.True(t, apierrors.IsForbidden(err), "a merged file was applied into %s: %v", elsewhere, err)
 		}
@@ -127,7 +128,7 @@ func fluxCases(t *testing.T, c *cluster) {
 		// A spec change reconciles the organization: the stripped
 		// ServiceAccount no longer does.
 		org = c.get(t, org)
-		org.Spec.Workers = withReplicas(2)
+		org.Spec.Capabilities.AgentPlatform.Workers = withReplicas(2)
 		require.NoError(t, c.admin.Update(t.Context(), org))
 		c.readyAt(t, org, org.Generation)
 		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKey{Namespace: fluxNS, Name: ns}, sa))
@@ -135,7 +136,7 @@ func fluxCases(t *testing.T, c *cluster) {
 	})
 
 	t.Run("Flux objects that lost the organization's UID label are not taken over and hold the erasure before the namespace", func(t *testing.T) {
-		org := c.organization(t, "org-git-stripped", "ledger")
+		org := c.organization(t, "git-stripped")
 		ns := c.readyNamespace(t, org).Name
 		org = c.get(t, org)
 		c.eventually(t, kustomizationGVK, fluxNS, ns, nil)
@@ -160,7 +161,7 @@ func fluxCases(t *testing.T, c *cluster) {
 		}
 		editSA(func(l map[string]string) { delete(l, v1alpha1.OrganizationUIDLabel); delete(l, controller.ObjectLabel) })
 		require.EventuallyWithT(t, func(ct *assert.CollectT) {
-			ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, v1alpha1.ConditionReady)
+			ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, orgv1.AgentPlatformReady)
 			if assert.NotNil(ct, ready) {
 				assert.Equal(ct, metav1.ConditionFalse, ready.Status)
 				assert.Equal(ct, "NameTaken", ready.Reason)
@@ -178,13 +179,13 @@ func fluxCases(t *testing.T, c *cluster) {
 			t.Helper()
 			require.EventuallyWithT(t, func(ct *assert.CollectT) {
 				got := c.get(ct, org)
-				ready := meta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionReady)
+				ready := meta.FindStatusCondition(got.Status.Conditions, orgv1.AgentPlatformReady)
 				if assert.NotNil(ct, ready) {
 					assert.Equal(ct, "Deleting", ready.Reason)
 					assert.Contains(ct, ready.Message, "the "+kind+" "+fluxNS+"/"+ns+", named after the organization namespace, does not carry "+v1alpha1.OrganizationUIDLabel)
 					assert.Contains(ct, ready.Message, controller.ObjectLabel+"="+controller.ScopeFlux)
 				}
-				assert.Equal(ct, v1alpha1.ErasureWorkloads, got.Status.ErasureStep)
+				assert.Equal(ct, orgv1.AgentPlatformErasingWorkloads, erasureStep(got))
 			}, timeout, tick)
 			require.Len(t, c.namespacesOf(t, org), 1, "the namespace went while the %s was unlabelled", kind)
 		}
@@ -213,7 +214,7 @@ func fluxCases(t *testing.T, c *cluster) {
 	})
 
 	t.Run("an unlabelled Flux object deleted by hand holds the erasure until a finalizer lets it go", func(t *testing.T) {
-		org := c.organization(t, "org-git-terminating", "ledger")
+		org := c.organization(t, "git-terminating")
 		ns := c.readyNamespace(t, org).Name
 		org = c.get(t, org)
 		kustomization, serviceAccount := c.holdFluxObjects(t, ns)
@@ -242,154 +243,102 @@ func fluxCases(t *testing.T, c *cluster) {
 			t.Helper()
 			require.EventuallyWithT(t, func(ct *assert.CollectT) {
 				got := c.get(ct, org)
-				ready := meta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionReady)
+				ready := meta.FindStatusCondition(got.Status.Conditions, orgv1.AgentPlatformReady)
 				if assert.NotNil(ct, ready) {
 					assert.Equal(ct, "Deleting", ready.Reason)
 					assert.Contains(ct, ready.Message, "waiting until these are gone: ")
 					assert.Contains(ct, ready.Message, kind+" "+fluxNS+"/"+ns)
 				}
-				assert.Equal(ct, step, got.Status.ErasureStep)
+				assert.Equal(ct, step, erasureStep(got))
 			}, timeout, tick)
 			require.Never(t, func() bool {
-				got := &v1alpha1.AgentPlatformOrganization{}
+				got := &orgv1.Organization{}
 				err := c.admin.Get(context.Background(), client.ObjectKeyFromObject(org), got)
-				return err != nil || got.Status.ErasureStep != step
+				return err != nil || erasureStep(got) != step
 			}, time.Second, tick, "the erasure left the %s step while the %s was terminating", step, kind)
 			require.Len(t, c.namespacesOf(t, org), namespaces)
 		}
 		require.NoError(t, c.admin.Delete(t.Context(), org))
-		waitsFor("Kustomization", v1alpha1.ErasureWorkloads, 1)
+		waitsFor("Kustomization", orgv1.AgentPlatformErasingWorkloads, 1)
 
 		c.finalizeNamespaceWhenDeleted(t, ns)
 		c.release(t.Context(), kustomization)
-		waitsFor("ServiceAccount", v1alpha1.ErasureOutsideObjects, 0)
+		waitsFor("ServiceAccount", orgv1.AgentPlatformErasingOutsideObjects, 0)
 
 		c.release(t.Context(), serviceAccount)
 		c.gone(t, org)
 		require.Empty(t, c.namespacesOf(t, org))
 	})
 
-	t.Run("a parent binding named like the organization's Flux binding is not mirrored", func(t *testing.T) {
-		org := c.organization(t, "org-git-taken", "ledger")
-		ns := c.readyNamespace(t, org).Name
-		c.create(t, &rbacv1.RoleBinding{
-			ObjectMeta: metav1.ObjectMeta{Name: controller.FluxRoleBinding, Namespace: "org-git-taken"},
-			RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: kindClusterRole, Name: controller.OrganizationsAdminClusterRole},
-			Subjects:   []rbacv1.Subject{{Kind: rbacv1.UserKind, APIGroup: rbacv1.GroupName, Name: "dave@example.com"}},
-		})
-		require.EventuallyWithT(t, func(ct *assert.CollectT) {
-			ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, v1alpha1.ConditionReady)
-			if assert.NotNil(ct, ready) {
-				assert.Equal(ct, metav1.ConditionFalse, ready.Status)
-				assert.Equal(ct, "NameTaken", ready.Reason)
-				assert.Contains(ct, ready.Message, "org-git-taken/"+controller.FluxRoleBinding)
-			}
-		}, timeout, tick)
-		// The organization keeps its Flux binding and its Kustomization.
-		rb := &rbacv1.RoleBinding{}
-		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns, Name: controller.FluxRoleBinding}, rb))
-		assert.Equal(t, organizationFluxCR, rb.RoleRef.Name)
-		c.eventually(t, kustomizationGVK, fluxNS, ns, nil)
-	})
-
 	t.Run("an organization missing from the installation Kustomization's inventory is Orphaned until it is back", func(t *testing.T) {
-		const parent = "org-orphans"
-		createNamespace(t, c.admin, parent)
-		// Flux's inventory ID of an AgentPlatformOrganization.
-		entry := func(name string) any {
-			return map[string]any{"id": parent + "_" + name + "_agent-platform.giantswarm.io_AgentPlatformOrganization", "v": "v1alpha1"}
-		}
-		c.create(t, newObject(kustomizationGVK, fluxNS, installationKS, nil, map[string]any{
-			intervalField: fluxInterval, "path": "./management-clusters/test", "prune": true, "deletionPolicy": "Orphan",
-			"sourceRef": map[string]any{kindField: fluxSourceKind, nameField: fluxSource},
-		}))
-		// The status kustomize-controller records: settled (Ready for its
-		// generation), or reconciling, with the inventory of the last apply.
+		c.create(t, appliedKustomization(fluxNS, installationKS))
 		// revision is the lastAppliedRevision the next status records.
 		revision := "main@sha1:1111111111111111111111111111111111111111"
 		setStatus := func(settled bool, entries ...any) {
-			if entries == nil {
-				entries = []any{}
-			}
-			require.EventuallyWithT(t, func(ct *assert.CollectT) {
-				got := c.read(t, kustomizationGVK, fluxNS, installationKS)
-				condition := map[string]any{"type": "Ready", "status": "True", "reason": "ReconciliationSucceeded", "message": "Applied revision"}
-				if !settled {
-					condition = map[string]any{"type": "Reconciling", "status": "True", "reason": "Progressing", "message": "Reconciliation in progress"}
-				}
-				condition["lastTransitionTime"] = metav1.Now().UTC().Format(time.RFC3339)
-				got.Object["status"] = map[string]any{
-					"observedGeneration":  got.GetGeneration(),
-					"conditions":          []any{condition},
-					"inventory":           map[string]any{"entries": entries},
-					"lastAppliedRevision": revision,
-				}
-				assert.NoError(ct, c.admin.Status().Update(t.Context(), got))
-			}, timeout, tick)
+			c.kustomizationStatus(t, fluxNS, installationKS, settled, revision, entries...)
 		}
 		setInventory := func(entries ...any) { setStatus(true, entries...) }
-		setInventory(entry("treasury"))
+		setInventory(organizationEntry("treasury"))
 
 		// Applied by the installation Kustomization, as Flux labels it.
 		fromGit := map[string]string{v1alpha1.FluxNameLabel: installationKS, v1alpha1.FluxNamespaceLabel: fluxNS}
-		org := &v1alpha1.AgentPlatformOrganization{
-			ObjectMeta: metav1.ObjectMeta{Name: "treasury", Namespace: parent, Labels: fromGit},
-			Spec:       v1alpha1.AgentPlatformOrganizationSpec{Harnesses: []string{curatedHarness}, Workers: withReplicas(3)},
+		org := &orgv1.Organization{
+			ObjectMeta: metav1.ObjectMeta{Name: "treasury", Labels: fromGit, Annotations: pruneDisabled()},
+			Spec: orgv1.OrganizationSpec{Capabilities: orgv1.OrganizationCapabilities{AgentPlatform: &orgv1.AgentPlatformSpec{
+				Enabled: true, Harnesses: []string{curatedHarness}, Workers: withReplicas(3),
+			}}},
 		}
 		c.create(t, org)
 		ns := c.readyNamespace(t, org).Name
 		c.modelConfig(t, ns, "anthropic", false)
-		c.orphaned(t, org, metav1.ConditionFalse, v1alpha1.ReasonInInventory)
+		c.orphaned(t, org, metav1.ConditionFalse, orgv1.AgentPlatformOrphanedInInventory)
 		c.lastAppliedRevision(t, org, revision)
 		c.replicas(t, ns, 3)
 
 		// A new revision with the same inventory is recorded.
 		revision = "main@sha1:4444444444444444444444444444444444444444"
-		setInventory(entry("treasury"))
+		setInventory(organizationEntry("treasury"))
 		c.lastAppliedRevision(t, org, revision)
 		held := revision
 
 		// A settled status without an applied revision keeps the last one.
 		revision = ""
-		setInventory(entry("treasury"))
+		setInventory(organizationEntry("treasury"))
 		assert.Never(t, func() bool {
-			return c.get(t, org).Status.LastAppliedRevision != held
+			return ap(c.get(t, org)).LastAppliedRevision != held
 		}, 2*time.Second, tick, "a status without lastAppliedRevision changed the organization's last applied revision")
 
 		// While Flux reconciles, an organization it labelled may not be in the
 		// inventory yet: it is not Orphaned for that.
 		setStatus(false)
 		assert.Never(t, func() bool {
-			cond := meta.FindStatusCondition(c.get(t, org).Status.Conditions, v1alpha1.ConditionOrphaned)
+			cond := meta.FindStatusCondition(c.get(t, org).Status.Conditions, orgv1.AgentPlatformOrphaned)
 			return cond == nil || cond.Status != metav1.ConditionFalse
-		}, 2*time.Second, tick, "Orphaned changed while the installation Kustomization reconciled")
+		}, 2*time.Second, tick, "AgentPlatformOrphaned changed while the installation Kustomization reconciled")
 
 		// The file is gone from git: Orphaned, and the workers stop. The
 		// last revision that held it stays.
 		revision = "main@sha1:2222222222222222222222222222222222222222"
 		setInventory()
-		c.orphaned(t, org, metav1.ConditionTrue, v1alpha1.ReasonMissingFromGit)
+		c.orphaned(t, org, metav1.ConditionTrue, orgv1.AgentPlatformOrphanedMissingFromGit)
 		c.lastAppliedRevision(t, org, held)
 		c.replicas(t, ns, 0)
 
 		// agent-manager's delete pull request marked it: the delete merged.
-		require.EventuallyWithT(t, func(ct *assert.CollectT) {
-			got := c.get(ct, org)
-			got.Annotations = map[string]string{v1alpha1.DeletePullRequestAnnotation: "https://github.com/giantswarm/test-configs/pull/7"}
-			assert.NoError(ct, c.admin.Update(t.Context(), got))
-		}, timeout, tick)
-		c.orphaned(t, org, metav1.ConditionTrue, v1alpha1.ReasonDeleteMerged)
+		c.markDeletePullRequest(t, org, "https://github.com/giantswarm/test-configs/pull/7")
+		c.orphaned(t, org, metav1.ConditionTrue, orgv1.AgentPlatformOrphanedDeleteMerged)
 		c.replicas(t, ns, 0)
 
 		// The file is back: no longer Orphaned, and the workers run again.
 		revision = "main@sha1:3333333333333333333333333333333333333333"
-		setInventory(entry("treasury"))
-		c.orphaned(t, org, metav1.ConditionFalse, v1alpha1.ReasonInInventory)
+		setInventory(organizationEntry("treasury"))
+		c.orphaned(t, org, metav1.ConditionFalse, orgv1.AgentPlatformOrphanedInInventory)
 		c.lastAppliedRevision(t, org, revision)
 		c.replicas(t, ns, 3)
 
 		// Without the ownership labels it was not applied from git: no
-		// Orphaned condition and no last applied revision, until they are back.
+		// AgentPlatformOrphaned condition and no last applied revision, until
+		// they are back.
 		setLabels := func(labels map[string]string) {
 			require.EventuallyWithT(t, func(ct *assert.CollectT) {
 				got := c.get(ct, org)
@@ -399,9 +348,9 @@ func fluxCases(t *testing.T, c *cluster) {
 		}
 		setLabels(nil)
 		c.lastAppliedRevision(t, org, "")
-		assert.Nil(t, meta.FindStatusCondition(c.get(t, org).Status.Conditions, v1alpha1.ConditionOrphaned))
+		assert.Nil(t, meta.FindStatusCondition(c.get(t, org).Status.Conditions, orgv1.AgentPlatformOrphaned))
 		setLabels(fromGit)
-		c.orphaned(t, org, metav1.ConditionFalse, v1alpha1.ReasonInInventory)
+		c.orphaned(t, org, metav1.ConditionFalse, orgv1.AgentPlatformOrphanedInInventory)
 		c.lastAppliedRevision(t, org, revision)
 
 		// The two-step delete: the delete pull request merged (DeleteMerged,
@@ -409,7 +358,7 @@ func fluxCases(t *testing.T, c *cluster) {
 		// again until its sessions are gone, so kagent can suspend its
 		// actors; its Kustomization goes first, its Flux ServiceAccount last.
 		setInventory()
-		c.orphaned(t, org, metav1.ConditionTrue, v1alpha1.ReasonDeleteMerged)
+		c.orphaned(t, org, metav1.ConditionTrue, orgv1.AgentPlatformOrphanedDeleteMerged)
 		c.replicas(t, ns, 0)
 		c.sessions.add(ns, "alice@example.com", "44444444-4444-4444-4444-444444444444")
 		kustomization, serviceAccount := c.holdFluxObjects(t, ns)
@@ -417,7 +366,7 @@ func fluxCases(t *testing.T, c *cluster) {
 		c.observeErasure(t, org, ns, kustomization, serviceAccount)
 		require.NoError(t, c.admin.Delete(t.Context(), org))
 		c.gone(t, org)
-		events := c.log.of(ns, org.Status.SnapshotPrefix)
+		events := c.log.of(ns, ap(org).SnapshotPrefix)
 		t.Logf("erasure: %v", events)
 		workers := all(events, evWorkers)
 		require.Len(t, workers, 3, "the pool's replicas: %v", workers)
@@ -431,13 +380,117 @@ func fluxCases(t *testing.T, c *cluster) {
 
 		// An organization applied without git, missing from the same
 		// inventory, is never Orphaned.
-		applied := c.organizationWith(t, parent, "applied", v1alpha1.AgentPlatformOrganizationSpec{Harnesses: []string{curatedHarness}, Workers: withReplicas(3)})
+		applied := c.organizationWith(t, "applied", orgv1.AgentPlatformSpec{Harnesses: []string{curatedHarness}, Workers: withReplicas(3)})
 		appliedNS := c.readyNamespace(t, applied).Name
 		c.modelConfig(t, appliedNS, "anthropic", false)
 		c.replicas(t, appliedNS, 3)
-		assert.Nil(t, meta.FindStatusCondition(c.get(t, applied).Status.Conditions, v1alpha1.ConditionOrphaned))
-		assert.Empty(t, c.get(t, applied).Status.LastAppliedRevision)
+		assert.Nil(t, meta.FindStatusCondition(c.get(t, applied).Status.Conditions, orgv1.AgentPlatformOrphaned))
+		assert.Empty(t, ap(c.get(t, applied)).LastAppliedRevision)
 	})
+
+	t.Run("an organization that another namespace's Kustomization applied is Orphaned once it leaves that Kustomization's inventory", func(t *testing.T) {
+		// Not the installation's Kustomization: one of the installation's
+		// own GitOps, in another namespace, read with the chart's RBAC.
+		const gitopsNS, gitopsKS = "flux-system", "organizations"
+		createNamespace(t, c.admin, gitopsNS)
+		c.create(t, appliedKustomization(gitopsNS, gitopsKS))
+		// It applies other objects too, which stay when the organization's
+		// file goes.
+		other := map[string]any{"id": "default_settings__ConfigMap", "v": "v1"}
+		revision := "main@sha1:5555555555555555555555555555555555555555"
+		c.kustomizationStatus(t, gitopsNS, gitopsKS, true, revision, other, organizationEntry("ledger"))
+
+		org := &orgv1.Organization{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        "ledger",
+				Labels:      map[string]string{v1alpha1.FluxNameLabel: gitopsKS, v1alpha1.FluxNamespaceLabel: gitopsNS},
+				Annotations: pruneDisabled(),
+			},
+			Spec: orgv1.OrganizationSpec{Capabilities: orgv1.OrganizationCapabilities{AgentPlatform: &orgv1.AgentPlatformSpec{
+				Enabled: true, Harnesses: []string{curatedHarness}, Workers: withReplicas(2),
+			}}},
+		}
+		c.create(t, org)
+		ns := c.readyNamespace(t, org).Name
+		c.modelConfig(t, ns, "anthropic", false)
+		c.orphaned(t, org, metav1.ConditionFalse, orgv1.AgentPlatformOrphanedInInventory)
+		c.lastAppliedRevision(t, org, revision)
+		c.replicas(t, ns, 2)
+
+		// Its file is gone from that Kustomization's path: Orphaned, and the
+		// workers stop. The last revision that held it stays.
+		c.kustomizationStatus(t, gitopsNS, gitopsKS, true, "main@sha1:6666666666666666666666666666666666666666", other)
+		c.orphaned(t, org, metav1.ConditionTrue, orgv1.AgentPlatformOrphanedMissingFromGit)
+		c.lastAppliedRevision(t, org, revision)
+		c.replicas(t, ns, 0)
+
+		// It carries the delete pull request's URL: the delete merged.
+		c.markDeletePullRequest(t, org, "https://github.com/giantswarm/test-configs/pull/8")
+		c.orphaned(t, org, metav1.ConditionTrue, orgv1.AgentPlatformOrphanedDeleteMerged)
+		c.replicas(t, ns, 0)
+	})
+}
+
+// organizationEntry is Flux's inventory entry of the Organization name: the
+// ID of a cluster-scoped object has an empty namespace.
+func organizationEntry(name string) any {
+	return map[string]any{"id": "_" + name + "_security.giantswarm.io_Organization", "v": "v1alpha1"}
+}
+
+// pruneDisabled are the annotations of an Organization in git: Flux leaves
+// the object in place when its file goes, though its Kustomization prunes.
+func pruneDisabled() map[string]string {
+	return map[string]string{"kustomize.toolkit.fluxcd.io/prune": "disabled"}
+}
+
+// markDeletePullRequest adds to org's annotations the URL of the delete pull
+// request that removes its file, as agent-manager does.
+func (c *cluster) markDeletePullRequest(t *testing.T, org *orgv1.Organization, url string) {
+	t.Helper()
+	require.EventuallyWithT(t, func(ct *assert.CollectT) {
+		got := c.get(ct, org)
+		if got.Annotations == nil {
+			got.Annotations = map[string]string{}
+		}
+		got.Annotations[v1alpha1.DeletePullRequestAnnotation] = url
+		assert.NoError(ct, c.admin.Update(t.Context(), got))
+	}, timeout, tick)
+}
+
+// appliedKustomization is a Kustomization ns/name that applies Organizations
+// from the installation's source and prunes what leaves it, but for the
+// objects that carry pruneDisabled; it leaves them in place when it goes.
+func appliedKustomization(ns, name string) *unstructured.Unstructured {
+	return newObject(kustomizationGVK, ns, name, nil, map[string]any{
+		intervalField: fluxInterval, "path": "./management-clusters/test", "prune": true, "deletionPolicy": "Orphan",
+		"sourceRef": map[string]any{kindField: fluxSourceKind, nameField: fluxSource, "namespace": fluxNS},
+	})
+}
+
+// kustomizationStatus records on the Kustomization ns/name the status
+// kustomize-controller writes: settled (Ready for its generation) or
+// reconciling, with the inventory of the last apply and revision as its last
+// applied revision.
+func (c *cluster) kustomizationStatus(t *testing.T, ns, name string, settled bool, revision string, entries ...any) {
+	t.Helper()
+	if entries == nil {
+		entries = []any{}
+	}
+	require.EventuallyWithT(t, func(ct *assert.CollectT) {
+		got := c.read(t, kustomizationGVK, ns, name)
+		condition := map[string]any{"type": "Ready", "status": "True", "reason": "ReconciliationSucceeded", "message": "Applied revision"}
+		if !settled {
+			condition = map[string]any{"type": "Reconciling", "status": "True", "reason": "Progressing", "message": "Reconciliation in progress"}
+		}
+		condition["lastTransitionTime"] = metav1.Now().UTC().Format(time.RFC3339)
+		got.Object["status"] = map[string]any{
+			"observedGeneration":  got.GetGeneration(),
+			"conditions":          []any{condition},
+			"inventory":           map[string]any{"entries": entries},
+			"lastAppliedRevision": revision,
+		}
+		assert.NoError(ct, c.admin.Status().Update(t.Context(), got))
+	}, timeout, tick)
 }
 
 // editKustomization sets one value of the organization Kustomization fluxNS/name, as the admin.
@@ -474,11 +527,12 @@ func (c *cluster) finalizeNamespaceWhenDeleted(t *testing.T, name string) {
 	}()
 }
 
-// orphaned waits until org's Orphaned condition has status and reason.
-func (c *cluster) orphaned(t *testing.T, org *v1alpha1.AgentPlatformOrganization, status metav1.ConditionStatus, reason string) {
+// orphaned waits until org's AgentPlatformOrphaned condition has status and
+// reason.
+func (c *cluster) orphaned(t *testing.T, org *orgv1.Organization, status metav1.ConditionStatus, reason string) {
 	t.Helper()
 	require.EventuallyWithT(t, func(ct *assert.CollectT) {
-		cond := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, v1alpha1.ConditionOrphaned)
+		cond := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, orgv1.AgentPlatformOrphaned)
 		if assert.NotNil(ct, cond) {
 			assert.Equal(ct, status, cond.Status)
 			assert.Equal(ct, reason, cond.Reason)
@@ -488,10 +542,10 @@ func (c *cluster) orphaned(t *testing.T, org *v1alpha1.AgentPlatformOrganization
 
 // lastAppliedRevision waits until org's status records revision as the last
 // revision that held its file.
-func (c *cluster) lastAppliedRevision(t *testing.T, org *v1alpha1.AgentPlatformOrganization, revision string) {
+func (c *cluster) lastAppliedRevision(t *testing.T, org *orgv1.Organization, revision string) {
 	t.Helper()
 	require.EventuallyWithT(t, func(ct *assert.CollectT) {
-		assert.Equal(ct, revision, c.get(ct, org).Status.LastAppliedRevision)
+		assert.Equal(ct, revision, ap(c.get(ct, org)).LastAppliedRevision)
 	}, timeout, tick)
 }
 

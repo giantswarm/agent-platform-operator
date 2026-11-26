@@ -2,7 +2,6 @@ package controller
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"maps"
 	"path"
@@ -18,8 +17,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
-
-	"github.com/giantswarm/agent-platform-operator/pkg/adminmirror"
 )
 
 // ChartSource is the agent chart's OCIRepository, as agent-manager composes
@@ -101,7 +98,8 @@ func (r *OrganizationReconciler) create(ctx context.Context, obj client.Object, 
 }
 
 // copyObject copies a platform object of gvk into ns. A missing source makes
-// the organization not Ready; its creation reconciles the organization again.
+// the organization AgentPlatformReady=False; its creation reconciles the
+// organization again.
 func (r *OrganizationReconciler) copyObject(ctx context.Context, gvk schema.GroupVersionKind, name, ns string) error {
 	src, err := r.platformObject(ctx, gvk, name)
 	if err != nil {
@@ -123,11 +121,11 @@ func copyOf(src *unstructured.Unstructured, ns string) *unstructured.Unstructure
 	return obj
 }
 
-// ensureScoped creates obj as the reconciler's own of scope, or brings its
-// own copy back to it when same(copy's spec, obj's spec) is false or its
-// labels differ. An object of that name the reconciler did not write is left
-// alone; for a curated copy that makes the organization not Ready, since the
-// name is the curated object's.
+// ensureScoped creates obj as the reconciler's own of scope, or brings its own
+// copy back to it when same(copy's spec, obj's spec) is false or its labels
+// differ. An object of that name the reconciler did not write is left alone;
+// for a curated copy that makes the organization AgentPlatformReady=False,
+// since the name is the curated object's.
 func (r *OrganizationReconciler) ensureScoped(ctx context.Context, ns, scope string, obj *unstructured.Unstructured, from string, same func(have, want any) bool) error {
 	want := stamp(obj, ns, scope, from)
 	kind := obj.GetKind()
@@ -256,10 +254,10 @@ func copiedLabels(have, want map[string]string, takesSourceKagentLabels bool) ma
 // ensureServiceAccount creates the ServiceAccount, the reconciler's own of
 // scope; one that exists is kept as it is (a ServiceAccount has nothing to
 // drift). A curated one is the workers' identity, so one of that name that is
-// not curated, another writer's or the reconciler's own of another scope,
-// makes the organization not Ready. The cache holds only ServiceAccounts
-// labelled ObjectLabel, so a name it misses that create finds taken is read
-// from the API server.
+// not curated, another writer's or the reconciler's own of another scope, makes
+// the organization AgentPlatformReady=False. The cache holds only
+// ServiceAccounts labelled ObjectLabel, so a name it misses that create finds
+// taken is read from the API server.
 func (r *OrganizationReconciler) ensureServiceAccount(ctx context.Context, ns, name, scope string) error {
 	key := client.ObjectKey{Namespace: ns, Name: name}
 	existing := &corev1.ServiceAccount{}
@@ -313,7 +311,7 @@ func (r *OrganizationReconciler) ensureRoleBinding(ctx context.Context, want *rb
 		return fmt.Errorf("get RoleBinding %s/%s: %w", ns, name, err)
 	case existing.Labels[ObjectLabel] != want.Labels[ObjectLabel]:
 		// Another object holds the name: it is left as it is, and the
-		// organization is not Ready until the name is free.
+		// organization is AgentPlatformReady=False until the name is free.
 		return &notReadyError{reason: reasonNameTaken, message: fmt.Sprintf("the RoleBinding %s/%s is not the operator's %s binding, so the operator cannot write it", ns, name, want.Labels[ObjectLabel])}
 	case existing.RoleRef == want.RoleRef && reflect.DeepEqual(existing.Subjects, want.Subjects) && existing.Annotations[CopiedFromAnnotation] == want.Annotations[CopiedFromAnnotation]:
 		return nil
@@ -339,73 +337,4 @@ func (r *OrganizationReconciler) ensureRoleBinding(ctx context.Context, want *rb
 		}
 	}
 	return r.create(ctx, want, "RoleBinding")
-}
-
-// mirrorAdmins keeps in ns a mirror of every admin binding of parent that
-// counts now (adminmirror.Mirrors: one being deleted does not): the same
-// name, the roleRef organizations-admin, and the subjects
-// adminmirror.MirroredSubjects keeps: Users and Groups whose names do not
-// start with system:. ServiceAccounts are never mirrored, so the parent's
-// automation cannot bind itself into every organization, and system: names
-// are the API server's own identities. A mirror whose parent binding is gone,
-// being deleted, or left without subjects, is deleted.
-func (r *OrganizationReconciler) mirrorAdmins(ctx context.Context, parent, ns string) error {
-	parents := &rbacv1.RoleBindingList{}
-	if err := r.Client.List(ctx, parents, client.InNamespace(parent)); err != nil {
-		return fmt.Errorf("list RoleBindings in %s: %w", parent, err)
-	}
-	want := map[string]*rbacv1.RoleBinding{}
-	var errs []error
-	for i := range parents.Items {
-		pb := &parents.Items[i]
-		if !adminmirror.Mirrors(pb) {
-			continue
-		}
-		if pb.Name == FluxRoleBinding && r.Config.Flux.commitMode() {
-			// The name of the organization's Flux binding: the mirror would
-			// take it and leave the organization without its Kustomization.
-			errs = append(errs, &notReadyError{reason: reasonNameTaken, message: fmt.Sprintf("the RoleBinding %s/%s has the name the operator keeps for the organization's Flux binding, so it is not mirrored; rename it", parent, pb.Name)})
-			continue
-		}
-		if r.boundClusterRole(pb.Name) {
-			// The name of a ServiceAccount binding: the mirror would take it
-			// and leave that ServiceAccount without its ClusterRole here.
-			errs = append(errs, &notReadyError{reason: reasonNameTaken, message: fmt.Sprintf("the RoleBinding %s/%s has the name the operator keeps for its binding of the ClusterRole %s, so it is not mirrored; rename it", parent, pb.Name, pb.Name)})
-			continue
-		}
-		subjects := adminmirror.MirroredSubjects(pb.Subjects)
-		if len(subjects) == 0 {
-			continue
-		}
-		want[pb.Name] = &rbacv1.RoleBinding{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: pb.Name, Namespace: ns,
-				Labels:      ownLabels(ScopeAdminMirror),
-				Annotations: map[string]string{CopiedFromAnnotation: parent + "/" + pb.Name},
-			},
-			// Never the parent's roleRef: an rbac-operator binding refers
-			// to cluster-admin, which the operator may not bind.
-			RoleRef:  organizationsAdminRoleRef,
-			Subjects: subjects,
-		}
-	}
-	mirrors := &rbacv1.RoleBindingList{}
-	if err := r.Client.List(ctx, mirrors, client.InNamespace(ns), client.MatchingLabels{ObjectLabel: ScopeAdminMirror}); err != nil {
-		errs = append(errs, fmt.Errorf("list RoleBindings in %s: %w", ns, err))
-	}
-	for i := range mirrors.Items {
-		m := &mirrors.Items[i]
-		if _, ok := want[m.Name]; ok {
-			continue
-		}
-		if err := r.Client.Delete(ctx, m); client.IgnoreNotFound(err) != nil {
-			errs = append(errs, fmt.Errorf("delete RoleBinding %s/%s: %w", ns, m.Name, err))
-			continue
-		}
-		logf.FromContext(ctx).Info("organization object deleted", "namespace", ns, "kind", "RoleBinding", "name", m.Name)
-	}
-	for _, rb := range want {
-		errs = append(errs, r.ensureRoleBinding(ctx, rb))
-	}
-	return errors.Join(errs...)
 }

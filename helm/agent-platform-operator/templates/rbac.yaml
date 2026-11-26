@@ -17,18 +17,24 @@ is rendered by the agent-platform chart, not here.
 
 In commit mode (commitMode.sourceRef.name) the operator also creates, updates
 and deletes the organizations' Kustomizations and Flux ServiceAccounts in the
-Flux namespace, and reads the installation's Kustomization
-(commitMode.installationKustomization) for the Orphaned condition.
+Flux namespace. With commitMode.installationKustomization it reads and
+watches the Kustomizations of every namespace for the AgentPlatformOrphaned
+condition: the one an organization's Flux ownership labels name can be in any
+namespace, and RBAC cannot narrow a read to the Kustomizations that apply an
+Organization.
+
+On the Organizations (security.giantswarm.io) the operator reads them, adds
+and removes its finalizer (patch) and writes their status (patch); it holds
+no other right on them. RBAC cannot narrow a patch to the finalizer: the
+agent-platform chart's admission policy does.
 
 The operator binds these ClusterRoles and nothing else: `bind` on those
-names, no `escalate`, no cluster-admin. agent-platform:organizations-admin for
-the mirrored bindings of a parent namespace (its organizations-admin bindings
-and rbac-operator's cluster-admin bindings, whose subjects the mirror binds to
-organizations-admin, never to cluster-admin), agent-platform-tenant-flux for
+names, no `escalate`, no cluster-admin. agent-platform-tenant-flux for
 the organization's Helm ServiceAccount, agent-platform:organization-flux for
-the organization's Flux ServiceAccount (commit mode), and each
-serviceAccountBindings ClusterRole for its ServiceAccount, in the organization
-namespace only.
+the organization's Flux ServiceAccount (commit mode), each
+serviceAccountBindings ClusterRole for its ServiceAccount, and
+agent-platform:admin for the organization's admins (spec.admins, by the
+RoleBinding organization-admins), in the organization namespace only.
 */}}
 {{- $netpol := include "networkPolicyResource" . | default "{}" | fromJson }}
 apiVersion: rbac.authorization.k8s.io/v1
@@ -38,29 +44,30 @@ metadata:
   labels:
     {{- include "labels.common" . | nindent 4 }}
 rules:
-  # The finalizer that holds a deleted organization until it is erased.
-  - apiGroups: ["agent-platform.giantswarm.io"]
-    resources: ["agentplatformorganizations"]
-    verbs: ["get", "list", "watch", "update", "patch"]
-  - apiGroups: ["agent-platform.giantswarm.io"]
-    resources: ["agentplatformorganizations/status"]
-    verbs: ["get", "update", "patch"]
-  # The organization namespaces: created from generateName, found by label,
+  # The organizations: read; patched for the finalizer that holds a deleted
+  # organization until it is erased; their status written.
+  - apiGroups: ["security.giantswarm.io"]
+    resources: ["organizations"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: ["security.giantswarm.io"]
+    resources: ["organizations/status"]
+    verbs: ["patch"]
+  # The organization namespaces agents-<name>: created, read by name,
   # deleted by the erasure.
   - apiGroups: [""]
     resources: ["namespaces"]
     verbs: ["get", "list", "watch", "create", "delete"]
-  # The parents' organizations-admin bindings and rbac-operator's
-  # cluster-admin bindings are read; the mirrors and the Helm ServiceAccount's
-  # binding are written.
+  # The Helm, Flux, ServiceAccountBinding and admins bindings of the
+  # organization namespaces are written; the others there are read, for a name the
+  # operator needs.
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["rolebindings"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["clusterroles"]
     resourceNames:
-      - "agent-platform:organizations-admin"
       - "agent-platform-tenant-flux"
+      - "agent-platform:admin"
       {{- if .Values.commitMode.sourceRef.name }}
       - {{ .Values.commitMode.clusterRole | quote }}
       {{- end }}
@@ -84,8 +91,10 @@ rules:
     resources: ["ocirepositories"]
     verbs: ["get", "create"]
   # The organization's Flux Kustomization: kept in commit mode, deleted by
-  # the erasure; the installation's is read for the Orphaned condition. The
-  # erasure deletes the HelmReleases and the Agents of its namespace too.
+  # the erasure; with the installation's set, the one that applied each
+  # organization is read for the AgentPlatformOrphaned condition, in any
+  # namespace. The erasure deletes the HelmReleases and the Agents of its
+  # namespace too.
   {{- $c := .Values.commitMode }}
   - apiGroups: ["kustomize.toolkit.fluxcd.io"]
     resources: ["kustomizations"]

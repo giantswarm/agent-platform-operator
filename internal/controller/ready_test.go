@@ -27,7 +27,7 @@ func TestReadyCondition(t *testing.T) {
 			wantStatus: metav1.ConditionTrue, wantReason: reasonReconciled,
 		},
 		{
-			name:       "causes of Ready=False are not retried and all are named",
+			name:       "causes of AgentPlatformReady=False are not retried and all are named",
 			err:        errors.Join(missing, errors.Join(taken)),
 			wantStatus: metav1.ConditionFalse, wantReason: reasonSourceMissing,
 			wantMessage: missing.message + "; " + taken.message,

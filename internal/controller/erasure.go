@@ -9,7 +9,6 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -20,10 +19,17 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	orgv1 "github.com/giantswarm/organization-operator/api/v1alpha1"
+
 	"github.com/giantswarm/agent-platform-operator/api/v1alpha1"
 )
 
-const reasonDeleting = "Deleting"
+const (
+	reasonDeleting = "Deleting"
+	// reasonPrefixDeleted is the reason of the AgentPlatformSnapshotsErased
+	// condition.
+	reasonPrefixDeleted = "PrefixDeleted"
+)
 
 // Sessions is kagent's session API, as the operator's identity.
 type Sessions interface {
@@ -73,14 +79,14 @@ type ErasureConfig struct {
 	Agent       schema.GroupVersionKind
 }
 
-// erasureSteps are the steps of the erasure, in order; the finalizer's
-// removal is the last.
+// erasureSteps are the steps of the erasure, in order, the reasons of the
+// AgentPlatformErasing condition; the finalizer's removal is the last.
 var erasureSteps = []string{
-	v1alpha1.ErasureWorkloads,
-	v1alpha1.ErasureSessions,
-	v1alpha1.ErasureSnapshots,
-	v1alpha1.ErasureNamespace,
-	v1alpha1.ErasureOutsideObjects,
+	orgv1.AgentPlatformErasingWorkloads,
+	orgv1.AgentPlatformErasingSessions,
+	orgv1.AgentPlatformErasingSnapshots,
+	orgv1.AgentPlatformErasingNamespace,
+	orgv1.AgentPlatformErasingOutsideObjects,
 }
 
 // waiting is a step that is not done yet and looks again after after.
@@ -92,19 +98,39 @@ type waiting struct {
 // sessionsGone reports whether the erasure has passed the Sessions step: the
 // organization has no session and no actor left.
 func sessionsGone(step string) bool {
-	return slices.Index(erasureSteps, step) > slices.Index(erasureSteps, v1alpha1.ErasureSessions)
+	return slices.Index(erasureSteps, step) > slices.Index(erasureSteps, orgv1.AgentPlatformErasingSessions)
+}
+
+// erasureStep is the erasure step that conditions record: the reason of the
+// AgentPlatformErasing condition while it is True, "" before the erasure.
+func erasureStep(conditions []metav1.Condition) string {
+	erasing := meta.FindStatusCondition(conditions, orgv1.AgentPlatformErasing)
+	if erasing == nil || erasing.Status != metav1.ConditionTrue {
+		return ""
+	}
+	return erasing.Reason
+}
+
+// setErasing records step as the erasure step: AgentPlatformErasing is True
+// with step as its reason.
+func (s *orgState) setErasing(step, message string, generation int64) {
+	meta.SetStatusCondition(&s.Conditions, metav1.Condition{
+		Type: orgv1.AgentPlatformErasing, Status: metav1.ConditionTrue, Reason: step,
+		Message: message, ObservedGeneration: generation,
+	})
 }
 
 // erase runs the erasure of a deleted organization from the step its status
 // records, and removes the finalizer once every step is done. A failing step
 // is retried with the controller's backoff; a step that waits looks again
-// after the poll interval. Ready stays False with reason Deleting, and its
-// message names the step.
-func (r *OrganizationReconciler) erase(ctx context.Context, org *v1alpha1.AgentPlatformOrganization) (reconcile.Result, error) {
+// after the poll interval. AgentPlatformErasing is True with the step as its
+// reason, AgentPlatformReady stays False with reason Deleting, and the
+// message of both names the step.
+func (r *OrganizationReconciler) erase(ctx context.Context, org *orgv1.Organization) (reconcile.Result, error) {
 	// The progress is in the status: read it from the API server, so a
 	// reconcile of a stale cached copy never runs a step it has passed (the
 	// workers back up after the sessions went, the prefix deleted again).
-	fresh := &v1alpha1.AgentPlatformOrganization{}
+	fresh := &orgv1.Organization{}
 	if err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(org), fresh); err != nil {
 		return reconcile.Result{}, client.IgnoreNotFound(err)
 	}
@@ -112,19 +138,21 @@ func (r *OrganizationReconciler) erase(ctx context.Context, org *v1alpha1.AgentP
 	if !controllerutil.ContainsFinalizer(org, v1alpha1.Finalizer) {
 		return reconcile.Result{}, nil
 	}
-	status := org.Status.DeepCopy()
-	start := max(slices.Index(erasureSteps, status.ErasureStep), 0)
+	status := stateOf(org)
+	start := max(slices.Index(erasureSteps, erasureStep(status.Conditions)), 0)
 	var (
+		step string
 		wait *waiting
 		err  error
 	)
 	for i := start; i < len(erasureSteps) && wait == nil && err == nil; i++ {
-		status.ErasureStep = erasureSteps[i]
-		wait, err = r.eraseStep(ctx, org, status)
+		step = erasureSteps[i]
+		// Before the step: the worker replica rule reads it.
+		status.setErasing(step, "", org.Generation)
+		wait, err = r.eraseStep(ctx, org, status, step)
 	}
 
-	step := slices.Index(erasureSteps, status.ErasureStep) + 1
-	message := fmt.Sprintf("cleanup step %d of %d (%s)", step, len(erasureSteps)+1, status.ErasureStep)
+	message := fmt.Sprintf("cleanup step %d of %d (%s)", slices.Index(erasureSteps, step)+1, len(erasureSteps)+1, step)
 	switch {
 	case err != nil:
 		message += " failed: " + err.Error()
@@ -133,15 +161,13 @@ func (r *OrganizationReconciler) erase(ctx context.Context, org *v1alpha1.AgentP
 	default:
 		message = "cleanup complete; removing the finalizer"
 	}
+	status.setErasing(step, message, org.Generation)
 	meta.SetStatusCondition(&status.Conditions, metav1.Condition{
-		Type: v1alpha1.ConditionReady, Status: metav1.ConditionFalse, Reason: reasonDeleting,
+		Type: orgv1.AgentPlatformReady, Status: metav1.ConditionFalse, Reason: reasonDeleting,
 		Message: message, ObservedGeneration: org.Generation,
 	})
-	if !equality.Semantic.DeepEqual(&org.Status, status) {
-		org.Status = *status
-		if uerr := r.Client.Status().Update(ctx, org, client.FieldOwner(fieldManager)); uerr != nil {
-			return reconcile.Result{}, errors.Join(err, fmt.Errorf("update status: %w", uerr))
-		}
+	if uerr := r.writeStatus(ctx, org, status); uerr != nil {
+		return reconcile.Result{}, errors.Join(err, uerr)
 	}
 	switch {
 	case err != nil:
@@ -158,55 +184,92 @@ func (r *OrganizationReconciler) erase(ctx context.Context, org *v1alpha1.AgentP
 	return reconcile.Result{}, nil
 }
 
-// eraseStep runs the step status.ErasureStep names.
-func (r *OrganizationReconciler) eraseStep(ctx context.Context, org *v1alpha1.AgentPlatformOrganization, status *v1alpha1.AgentPlatformOrganizationStatus) (*waiting, error) {
+// eraseStep runs step.
+func (r *OrganizationReconciler) eraseStep(ctx context.Context, org *orgv1.Organization, status *orgState, step string) (*waiting, error) {
 	ns, err := r.erasedNamespace(ctx, org)
 	if err != nil {
 		return nil, err
 	}
-	switch status.ErasureStep {
-	case v1alpha1.ErasureWorkloads:
+	switch step {
+	case orgv1.AgentPlatformErasingWorkloads:
 		if err := r.scaleWorkers(ctx, org, status, ns); err != nil {
 			return nil, err
 		}
 		return r.eraseWorkloads(ctx, org, ns)
-	case v1alpha1.ErasureSessions:
+	case orgv1.AgentPlatformErasingSessions:
 		if err := r.scaleWorkers(ctx, org, status, ns); err != nil {
 			return nil, err
 		}
 		return r.eraseSessions(ctx, ns)
-	case v1alpha1.ErasureSnapshots:
+	case orgv1.AgentPlatformErasingSnapshots:
 		if err := r.scaleWorkers(ctx, org, status, ns); err != nil {
 			return nil, err
 		}
 		return r.eraseSnapshots(ctx, org, status)
-	case v1alpha1.ErasureNamespace:
+	case orgv1.AgentPlatformErasingNamespace:
 		return r.eraseNamespace(ctx, org)
-	case v1alpha1.ErasureOutsideObjects:
+	case orgv1.AgentPlatformErasingOutsideObjects:
 		return r.eraseOutsideObjects(ctx, org, ns)
 	}
-	return nil, fmt.Errorf("unknown cleanup step %q", status.ErasureStep)
+	return nil, fmt.Errorf("unknown cleanup step %q", step)
 }
 
-// erasedNamespace is the name of the organization namespace: the one
-// labelled with the organization's UID, else the one the status recorded
-// (empty when none was ever created). kagent and Substrate key the
-// organization's sessions and actors by that name, also once it is gone.
-func (r *OrganizationReconciler) erasedNamespace(ctx context.Context, org *v1alpha1.AgentPlatformOrganization) (string, error) {
-	list := &corev1.NamespaceList{}
-	if err := r.APIReader.List(ctx, list, client.MatchingLabels{v1alpha1.OrganizationUIDLabel: string(org.UID)}); err != nil {
-		return "", fmt.Errorf("list the namespaces labelled %s=%s: %w", v1alpha1.OrganizationUIDLabel, org.UID, err)
+// erasedNamespace is the name of the organization namespace: agents-<name>
+// while that namespace carries the organization's UID, else the one the
+// agentPlatform entry of status.namespaces records (empty when none was ever
+// created). kagent and Substrate key the organization's sessions and actors by
+// that name, also once it is gone. A namespace agents-<name> without the
+// organization's UID is never erased. When the status records that name, it
+// fails the step: the name is fixed, so the steps would delete another writer's
+// workloads and sessions there. A person deletes it, or restores the label; the
+// step is retried. When the status records none, the name was taken before the
+// organization had a namespace, and there is nothing of the organization there.
+func (r *OrganizationReconciler) erasedNamespace(ctx context.Context, org *orgv1.Organization) (string, error) {
+	name, err := namespaceName(org)
+	if err != nil {
+		return organizationNamespace(org), nil //nolint:nilerr // such an organization never had a namespace
 	}
-	if len(list.Items) > 0 {
-		return list.Items[0].Name, nil
+	ns := &corev1.Namespace{}
+	if err := r.APIReader.Get(ctx, client.ObjectKey{Name: name}, ns); apierrors.IsNotFound(err) {
+		return organizationNamespace(org), nil
+	} else if err != nil {
+		return "", fmt.Errorf("get the namespace %s: %w", name, err)
 	}
-	return org.Status.Namespace, nil
+	if ns.Labels[v1alpha1.OrganizationUIDLabel] != string(org.UID) {
+		if organizationNamespace(org) == "" {
+			// The organization never had it: the name was taken before.
+			return "", nil
+		}
+		return "", fmt.Errorf("the namespace %s does not carry %s=%s: it is not this organization's, so the erasure does not touch it; delete it, or restore the label if it is the organization's",
+			name, v1alpha1.OrganizationUIDLabel, org.UID)
+	}
+	return name, nil
+}
+
+// ownNamespace is the namespace agents-<name> when it carries the
+// organization's UID, or nil: absent, another writer's, or a name that is
+// not a valid namespace name.
+func (r *OrganizationReconciler) ownNamespace(ctx context.Context, org *orgv1.Organization) (*corev1.Namespace, error) {
+	name, err := namespaceName(org)
+	if err != nil {
+		return nil, nil //nolint:nilerr // such an organization never had a namespace
+	}
+	ns := &corev1.Namespace{}
+	if err := r.APIReader.Get(ctx, client.ObjectKey{Name: name}, ns); apierrors.IsNotFound(err) {
+		return nil, nil
+	} else if err != nil {
+		return nil, fmt.Errorf("get the namespace %s: %w", name, err)
+	}
+	if ns.Labels[v1alpha1.OrganizationUIDLabel] != string(org.UID) {
+		return nil, nil
+	}
+	return ns, nil
 }
 
 // scaleWorkers keeps the organization's WorkerPool copy at the worker replica
 // rule's count for a deleted organization: its replicas until its sessions
 // are gone, so kagent can suspend its actors, and 0 after.
-func (r *OrganizationReconciler) scaleWorkers(ctx context.Context, org *v1alpha1.AgentPlatformOrganization, status *v1alpha1.AgentPlatformOrganizationStatus, ns string) error {
+func (r *OrganizationReconciler) scaleWorkers(ctx context.Context, org *orgv1.Organization, status *orgState, ns string) error {
 	c := r.Config.Curated
 	if !c.Enabled() || ns == "" {
 		return nil
@@ -220,7 +283,7 @@ func (r *OrganizationReconciler) scaleWorkers(ctx context.Context, org *v1alpha1
 		return fmt.Errorf("get WorkerPool %s/%s: %w", ns, c.WorkerPool, err)
 	}
 	erasing := org.DeepCopy()
-	erasing.Status = *status
+	status.applyTo(erasing)
 	// A deleted organization's rule reads its erasure step only.
 	want := workerReplicas(erasing, usage{})
 	if have, _, _ := unstructured.NestedInt64(pool.Object, "spec", "replicas"); have == want {
@@ -239,7 +302,7 @@ func (r *OrganizationReconciler) scaleWorkers(ctx context.Context, org *v1alpha1
 // until it is gone, then deletes the HelmReleases left in the namespace (all
 // of them where there is no Kustomization) and its Agents, and waits until
 // they are gone.
-func (r *OrganizationReconciler) eraseWorkloads(ctx context.Context, org *v1alpha1.AgentPlatformOrganization, ns string) (*waiting, error) {
+func (r *OrganizationReconciler) eraseWorkloads(ctx context.Context, org *orgv1.Organization, ns string) (*waiting, error) {
 	e, f := r.Config.Erasure, r.Config.Flux
 	// The organization's Flux objects are searched in the Flux namespace
 	// only: the UID label elsewhere names nothing the operator created.
@@ -309,28 +372,36 @@ func (r *OrganizationReconciler) eraseSessions(ctx context.Context, ns string) (
 	return nil, nil
 }
 
-// eraseSnapshots deletes the organization's snapshot prefix, records when,
-// and deletes it once more after the snapshot delay.
-func (r *OrganizationReconciler) eraseSnapshots(ctx context.Context, org *v1alpha1.AgentPlatformOrganization, status *v1alpha1.AgentPlatformOrganizationStatus) (*waiting, error) {
+// eraseSnapshots deletes the organization's snapshot prefix, records when
+// (AgentPlatformSnapshotsErased turns True: its lastTransitionTime is that
+// time), and deletes it once more after the snapshot delay.
+func (r *OrganizationReconciler) eraseSnapshots(ctx context.Context, org *orgv1.Organization, status *orgState) (*waiting, error) {
 	e := r.Config.Erasure
 	// The prefix the status recorded last.
-	prefix := org.Status.SnapshotPrefix
+	prefix := platformStatus(org).SnapshotPrefix
 	if prefix == "" {
 		prefix = r.snapshotPrefix(org)
 	}
 	if e.Snapshots == nil || prefix == "" {
 		return nil, nil
 	}
-	if status.SnapshotsErasedAt == nil {
+	if !meta.IsStatusConditionTrue(status.Conditions, orgv1.AgentPlatformSnapshotsErased) {
 		if err := e.Snapshots.DeletePrefix(ctx, prefix); err != nil {
 			return nil, err
 		}
-		now := metav1.NowMicro()
-		status.SnapshotsErasedAt = &now
+		meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+			Type: orgv1.AgentPlatformSnapshotsErased, Status: metav1.ConditionTrue, Reason: reasonPrefixDeleted,
+			Message:            fmt.Sprintf("%s emptied; emptied once more %s after", prefix, e.SnapshotDelay),
+			ObservedGeneration: org.Generation,
+			// A condition's time is kept to the second: rounded up, the
+			// second deletion never comes before the delay has passed.
+			LastTransitionTime: metav1.NewTime(time.Now().Truncate(time.Second).Add(time.Second)),
+		})
 	}
-	if left := time.Until(status.SnapshotsErasedAt.Add(e.SnapshotDelay)); left > 0 {
+	again := meta.FindStatusCondition(status.Conditions, orgv1.AgentPlatformSnapshotsErased).LastTransitionTime.Add(e.SnapshotDelay)
+	if left := time.Until(again); left > 0 {
 		return &waiting{
-			message: fmt.Sprintf("%s emptied; emptying it again at %s", prefix, status.SnapshotsErasedAt.Add(e.SnapshotDelay).UTC().Format(time.RFC3339)),
+			message: fmt.Sprintf("%s emptied; emptying it again at %s", prefix, again.UTC().Format(time.RFC3339)),
 			after:   left,
 		}, nil
 	}
@@ -339,30 +410,24 @@ func (r *OrganizationReconciler) eraseSnapshots(ctx context.Context, org *v1alph
 
 // eraseNamespace deletes the organization namespace and waits until it is
 // gone.
-func (r *OrganizationReconciler) eraseNamespace(ctx context.Context, org *v1alpha1.AgentPlatformOrganization) (*waiting, error) {
-	list := &corev1.NamespaceList{}
-	if err := r.APIReader.List(ctx, list, client.MatchingLabels{v1alpha1.OrganizationUIDLabel: string(org.UID)}); err != nil {
-		return nil, fmt.Errorf("list the namespaces labelled %s=%s: %w", v1alpha1.OrganizationUIDLabel, org.UID, err)
+func (r *OrganizationReconciler) eraseNamespace(ctx context.Context, org *orgv1.Organization) (*waiting, error) {
+	ns, err := r.ownNamespace(ctx, org)
+	if err != nil || ns == nil {
+		return nil, err
 	}
-	var left []string
-	for i := range list.Items {
-		ns := &list.Items[i]
-		left = append(left, "Namespace "+ns.Name)
-		if ns.DeletionTimestamp != nil {
-			continue
-		}
+	if ns.DeletionTimestamp == nil {
 		if err := r.Client.Delete(ctx, ns); client.IgnoreNotFound(err) != nil {
 			return nil, fmt.Errorf("delete Namespace %s: %w", ns.Name, err)
 		}
 		logf.FromContext(ctx).Info("organization namespace deleted", "namespace", ns.Name)
 	}
-	return r.waitFor(left), nil
+	return r.waitFor([]string{"Namespace " + ns.Name}), nil
 }
 
 // eraseOutsideObjects deletes the organization's Flux ServiceAccount beside
 // the installation's Flux source and waits until it is gone, also when it is
 // terminating without the organization's UID label.
-func (r *OrganizationReconciler) eraseOutsideObjects(ctx context.Context, org *v1alpha1.AgentPlatformOrganization, orgNamespace string) (*waiting, error) {
+func (r *OrganizationReconciler) eraseOutsideObjects(ctx context.Context, org *orgv1.Organization, orgNamespace string) (*waiting, error) {
 	ns := r.Config.Flux.Namespace
 	if ns == "" {
 		return nil, nil
@@ -403,7 +468,7 @@ func (r *OrganizationReconciler) eraseOutsideObjects(ctx context.Context, org *v
 // stripped, which the erasure would not find by the label and the
 // agent-platform admission policy lets it not delete, or a squatter. Either
 // way a person decides; the step is retried.
-func (r *OrganizationReconciler) unlabelled(ctx context.Context, obj client.Object, org *v1alpha1.AgentPlatformOrganization, name string) ([]string, error) {
+func (r *OrganizationReconciler) unlabelled(ctx context.Context, obj client.Object, org *orgv1.Organization, name string) ([]string, error) {
 	if name == "" {
 		return nil, nil
 	}
@@ -473,6 +538,6 @@ func (r *OrganizationReconciler) waitFor(left []string) *waiting {
 
 // fluxLabels select, in the Flux namespace, the organization's Flux
 // Kustomization and Flux ServiceAccount: those labelled with its UID.
-func fluxLabels(org *v1alpha1.AgentPlatformOrganization) client.MatchingLabels {
+func fluxLabels(org *orgv1.Organization) client.MatchingLabels {
 	return client.MatchingLabels{v1alpha1.OrganizationUIDLabel: string(org.UID)}
 }

@@ -21,6 +21,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	orgv1 "github.com/giantswarm/organization-operator/api/v1alpha1"
+
 	"github.com/giantswarm/agent-platform-operator/api/v1alpha1"
 )
 
@@ -54,8 +56,8 @@ type FluxConfig struct {
 	// DecryptionSecret is the installation's SOPS key Secret in Namespace;
 	// empty decrypts nothing.
 	DecryptionSecret string
-	// Path is the organization's path in the source, with {parent} and
-	// {name} replaced by its parent namespace and its name.
+	// Path is the organization's path in the source, with {name} replaced
+	// by its name.
 	Path string
 	// Interval is the Kustomization's spec.interval.
 	Interval string
@@ -63,7 +65,10 @@ type FluxConfig struct {
 	// in the organization namespace, and nowhere else.
 	ClusterRole string
 	// Installation is the installation's Kustomization that applies the
-	// AgentPlatformOrganizations. An empty name sets no Orphaned condition.
+	// Organizations. A name turns the AgentPlatformOrphaned condition on, for
+	// an organization that any Kustomization applied, and the operator is not
+	// ready while this one cannot be read. An empty name sets no
+	// AgentPlatformOrphaned condition.
 	Installation types.NamespacedName
 }
 
@@ -71,8 +76,17 @@ type FluxConfig struct {
 // ServiceAccount per organization.
 func (f FluxConfig) commitMode() bool { return f.Namespace != "" && f.SourceName != "" }
 
-// orphans reports whether the reconciler sets the Orphaned condition.
+// orphans reports whether the reconciler sets the AgentPlatformOrphaned
+// condition.
 func (f FluxConfig) orphans() bool { return f.Installation.Name != "" }
+
+// appliedBy is the Flux Kustomization whose ownership labels o carries: the
+// one that applied it from git. False when it carries neither or one only.
+func appliedBy(o client.Object) (types.NamespacedName, bool) {
+	l := o.GetLabels()
+	k := types.NamespacedName{Namespace: l[v1alpha1.FluxNamespaceLabel], Name: l[v1alpha1.FluxNameLabel]}
+	return k, k.Namespace != "" && k.Name != ""
+}
 
 // watched reports whether the reconciler watches Kustomizations.
 func (f FluxConfig) watched() bool {
@@ -80,18 +94,17 @@ func (f FluxConfig) watched() bool {
 }
 
 // path is the organization's path in the source.
-func (f FluxConfig) path(org *v1alpha1.AgentPlatformOrganization) string {
-	return strings.NewReplacer("{parent}", org.Namespace, "{name}", org.Name).Replace(f.Path)
+func (f FluxConfig) path(org *orgv1.Organization) string {
+	return strings.ReplaceAll(f.Path, "{name}", org.Name)
 }
 
 // fluxObjectLabels are the labels of the organization's objects in the Flux
-// namespace: the erasure's selector (the UID), the organization and its
-// parent (the watch's), and the reconciler's own.
-func fluxObjectLabels(org *v1alpha1.AgentPlatformOrganization) map[string]string {
+// namespace: the erasure's selector (the UID), the organization (the
+// watch's), and the reconciler's own.
+func fluxObjectLabels(org *orgv1.Organization) map[string]string {
 	l := ownLabels(ScopeFlux)
 	l[v1alpha1.OrganizationUIDLabel] = string(org.UID)
 	l[v1alpha1.OrganizationLabel] = org.Name
-	l[v1alpha1.ParentLabel] = org.Namespace
 	return l
 }
 
@@ -100,7 +113,7 @@ func fluxObjectLabels(org *v1alpha1.AgentPlatformOrganization) map[string]string
 // Kustomization, which applies the organization's path into ns as that
 // ServiceAccount. Both objects in the Flux namespace are named ns: unique,
 // and agents-* like every organization Kustomization.
-func (r *OrganizationReconciler) keepFlux(ctx context.Context, org *v1alpha1.AgentPlatformOrganization, ns string) error {
+func (r *OrganizationReconciler) keepFlux(ctx context.Context, org *orgv1.Organization, ns string) error {
 	f := r.Config.Flux
 	if err := r.ensureFluxServiceAccount(ctx, org, ns); err != nil {
 		return err
@@ -121,7 +134,7 @@ func (r *OrganizationReconciler) keepFlux(ctx context.Context, org *v1alpha1.Age
 // miss is confirmed from the API server: a ServiceAccount of that name without
 // the organization's UID is another writer's, and binding it would give its
 // holder the organization.
-func (r *OrganizationReconciler) ensureFluxServiceAccount(ctx context.Context, org *v1alpha1.AgentPlatformOrganization, name string) error {
+func (r *OrganizationReconciler) ensureFluxServiceAccount(ctx context.Context, org *orgv1.Organization, name string) error {
 	ns := r.Config.Flux.Namespace
 	existing := &corev1.ServiceAccount{}
 	err := r.Client.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, existing)
@@ -154,13 +167,13 @@ func (r *OrganizationReconciler) ensureFluxServiceAccount(ctx context.Context, o
 	return nil
 }
 
-// ensureKustomization creates the organization's Kustomization, or brings
-// its spec and labels back to what the reconciler keeps; fields the API
-// server defaults, the status and other writers' metadata stay. It is read
-// from the cache, and a miss is confirmed from the API server: the cache
-// holds only labelled Kustomizations, so one of that name without the labels
-// would read as missing.
-func (r *OrganizationReconciler) ensureKustomization(ctx context.Context, org *v1alpha1.AgentPlatformOrganization, name string) error {
+// ensureKustomization creates the organization's Kustomization, or brings its
+// spec and labels back to what the reconciler keeps; fields the API server
+// defaults, the status and other writers' metadata stay. It is read from the
+// cache, and a miss is confirmed from the API server: without the
+// AgentPlatformOrphaned condition the cache holds only labelled Kustomizations,
+// so one of that name without the labels would read as missing.
+func (r *OrganizationReconciler) ensureKustomization(ctx context.Context, org *orgv1.Organization, name string) error {
 	f := r.Config.Flux
 	want := r.kustomization(org, name)
 	existing := object(f.Kustomization)
@@ -201,7 +214,7 @@ func (r *OrganizationReconciler) ensureKustomization(ctx context.Context, org *v
 // only what that ServiceAccount's one RoleBinding allows. It prunes, and on
 // deletion waits until what it applied is gone; it is never suspended, since
 // a suspended Kustomization skips its garbage collection on delete.
-func (r *OrganizationReconciler) kustomization(org *v1alpha1.AgentPlatformOrganization, ns string) *unstructured.Unstructured {
+func (r *OrganizationReconciler) kustomization(org *orgv1.Organization, ns string) *unstructured.Unstructured {
 	f := r.Config.Flux
 	spec := map[string]any{
 		"interval":           f.Interval,
@@ -290,56 +303,53 @@ func nameTaken(kind, ns, name string) error {
 	return &notReadyError{reason: reasonNameTaken, message: fmt.Sprintf("the %s %s/%s is not the operator's for this organization, so the operator cannot write it", kind, ns, name)}
 }
 
-// setOrphaned sets the Orphaned condition in status from the installation
-// Kustomization's inventory. An organization without that Kustomization's
-// ownership labels was not applied from git and has no Orphaned condition.
-// While the inventory cannot be read (the Kustomization is missing, or has
-// not recorded one yet) the condition stays as it was: a passing gap must
-// neither stop an organization's workers nor start an orphan's.
-func (r *OrganizationReconciler) setOrphaned(ctx context.Context, org *v1alpha1.AgentPlatformOrganization, status *v1alpha1.AgentPlatformOrganizationStatus) error {
+// setOrphaned sets the AgentPlatformOrphaned condition in status from the
+// inventory of the Kustomization whose ownership labels the organization
+// carries, whichever it is. An organization without those labels was not
+// applied from git and has no AgentPlatformOrphaned condition. While the
+// inventory cannot be read (the Kustomization is missing, or has not recorded
+// one yet) the condition stays as it was: a passing gap must neither stop an
+// organization's workers nor start an orphan's.
+func (r *OrganizationReconciler) setOrphaned(ctx context.Context, org *orgv1.Organization, status *orgState) error {
 	f := r.Config.Flux
-	if !f.orphans() {
+	owner, fromGit := appliedBy(org)
+	if !f.orphans() || !fromGit {
 		// Without the installation Kustomization nothing sets it: one left
 		// from an earlier configuration would stop the workers for good.
-		meta.RemoveStatusCondition(&status.Conditions, v1alpha1.ConditionOrphaned)
-		status.LastAppliedRevision = ""
-		return nil
-	}
-	l := org.GetLabels()
-	if l[v1alpha1.FluxNameLabel] != f.Installation.Name || l[v1alpha1.FluxNamespaceLabel] != f.Installation.Namespace {
-		meta.RemoveStatusCondition(&status.Conditions, v1alpha1.ConditionOrphaned)
+		// Without the ownership labels it was not applied from git.
+		meta.RemoveStatusCondition(&status.Conditions, orgv1.AgentPlatformOrphaned)
 		status.LastAppliedRevision = ""
 		return nil
 	}
 	ks := object(f.Kustomization)
-	err := r.installationReader().Get(ctx, f.Installation, ks)
+	err := r.cacheReader().Get(ctx, owner, ks)
 	if apierrors.IsNotFound(err) {
-		logf.FromContext(ctx).Info("the installation Kustomization is missing; Orphaned stays as it was", "kustomization", f.Installation)
+		logf.FromContext(ctx).Info("the Kustomization that applied the organization is missing; AgentPlatformOrphaned stays as it was", "kustomization", owner)
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("get the installation Kustomization %s: %w", f.Installation, err)
+		return fmt.Errorf("get the Kustomization %s that applied the organization: %w", owner, err)
 	}
 	// Flux labels an object when it applies it, and records it in the
 	// inventory only once the apply and its health checks succeeded: until
 	// then a new organization would read as missing from git.
 	if why := unsettled(ks); why != "" {
-		logf.FromContext(ctx).V(1).Info("the installation Kustomization is not settled; Orphaned stays as it was", "kustomization", f.Installation, "why", why)
+		logf.FromContext(ctx).V(1).Info("the Kustomization that applied the organization is not settled; AgentPlatformOrphaned stays as it was", "kustomization", owner, "why", why)
 		return nil
 	}
 	inventory, found, err := unstructured.NestedMap(ks.Object, "status", "inventory")
 	if err != nil || !found {
-		logf.FromContext(ctx).V(1).Info("the installation Kustomization has no inventory; Orphaned stays as it was", "kustomization", f.Installation)
+		logf.FromContext(ctx).V(1).Info("the Kustomization that applied the organization has no inventory; AgentPlatformOrphaned stays as it was", "kustomization", owner)
 		return nil
 	}
 	// An inventory without entries is empty: Flux omits an empty list.
 	entries, _ := inventory["entries"].([]any)
-	// Flux's inventory ID: <namespace>_<name>_<group>_<kind>.
-	gvk := v1alpha1.GroupVersion.WithKind("AgentPlatformOrganization")
-	id := strings.Join([]string{org.Namespace, org.Name, gvk.Group, gvk.Kind}, "_")
+	// Flux's inventory ID: <namespace>_<name>_<group>_<kind>, with an empty
+	// namespace for the cluster-scoped Organization.
+	id := "_" + org.Name + organizationEntrySuffix
 	cond := metav1.Condition{
-		Type: v1alpha1.ConditionOrphaned, Status: metav1.ConditionFalse, Reason: v1alpha1.ReasonInInventory,
-		Message:            fmt.Sprintf("in the inventory of the Kustomization %s", f.Installation),
+		Type: orgv1.AgentPlatformOrphaned, Status: metav1.ConditionFalse, Reason: orgv1.AgentPlatformOrphanedInInventory,
+		Message:            fmt.Sprintf("in the inventory of the Kustomization %s", owner),
 		ObservedGeneration: org.Generation,
 	}
 	if inInventory(entries, id) {
@@ -349,20 +359,16 @@ func (r *OrganizationReconciler) setOrphaned(ctx context.Context, org *v1alpha1.
 			status.LastAppliedRevision = revision
 		}
 	} else {
-		cond.Status, cond.Reason = metav1.ConditionTrue, v1alpha1.ReasonMissingFromGit
-		cond.Message = fmt.Sprintf("missing from the inventory of the Kustomization %s: its file is gone from git; the workers are stopped", f.Installation)
+		cond.Status, cond.Reason = metav1.ConditionTrue, orgv1.AgentPlatformOrphanedMissingFromGit
+		cond.Message = fmt.Sprintf("missing from the inventory of the Kustomization %s: its file is gone from git; the workers are stopped", owner)
 		if pr := org.GetAnnotations()[v1alpha1.DeletePullRequestAnnotation]; pr != "" {
-			cond.Reason = v1alpha1.ReasonDeleteMerged
-			cond.Message = fmt.Sprintf("missing from the inventory of the Kustomization %s after the delete pull request %s: pending erase; the workers are stopped", f.Installation, pr)
+			cond.Reason = orgv1.AgentPlatformOrphanedDeleteMerged
+			cond.Message = fmt.Sprintf("missing from the inventory of the Kustomization %s after the delete pull request %s: pending erase; the workers are stopped", owner, pr)
 		}
 	}
 	meta.SetStatusCondition(&status.Conditions, cond)
 	return nil
 }
-
-// installationReader reads the installation Kustomization: from the cache,
-// which watches it, where the reconciler has one.
-func (r *OrganizationReconciler) installationReader() client.Reader { return r.cacheReader() }
 
 // cacheReader reads the watched unstructured kinds (the Kustomizations) from
 // the manager's cache, or from the API server without one: the client reads
@@ -376,8 +382,9 @@ func (r *OrganizationReconciler) cacheReader() client.Reader {
 
 // InstallationCheck is a readiness check: not ready while the installation
 // Kustomization cannot be read, so a mistyped --installation-kustomization
-// shows on the pod, and an operator that comes up before Flux created it
-// becomes ready once it exists. Nil without one.
+// or a missing right to read Kustomizations shows on the pod, and an
+// operator that comes up before Flux created it becomes ready once it
+// exists. Nil without one.
 func InstallationCheck(reader client.Reader, f FluxConfig) func(*http.Request) error {
 	if !f.orphans() {
 		return nil
@@ -428,65 +435,96 @@ func inInventory(entries []any, id string) bool {
 	return false
 }
 
-// stripInventory is the cache's transform of a Kustomization: the managed
-// fields go, and so does the inventory of any Kustomization but installation,
-// which the reconciler never reads. A Kustomization's inventory lists every
-// object it applied.
-func stripInventory(installation types.NamespacedName) func(any) (any, error) {
-	return func(o any) (any, error) {
-		u, ok := o.(*unstructured.Unstructured)
-		if !ok {
-			return o, nil
-		}
-		u.SetManagedFields(nil)
-		if u.GetNamespace() != installation.Namespace || u.GetName() != installation.Name {
-			unstructured.RemoveNestedField(u.Object, "status", "inventory")
-		}
+// organizationEntrySuffix ends the inventory ID of every Organization.
+var organizationEntrySuffix = "_" + orgv1.GroupVersion.Group + "_Organization"
+
+// organizationInventory is the cache's transform of a Kustomization: the
+// managed fields go, and its inventory keeps the Organizations' entries only,
+// the ones the reconciler reads. A Kustomization's inventory lists every object
+// it applied, and with the AgentPlatformOrphaned condition on every
+// Kustomization of the cluster is cached, since any one of them may apply an
+// Organization.
+func organizationInventory(o any) (any, error) {
+	u, ok := o.(*unstructured.Unstructured)
+	if !ok {
+		return o, nil
+	}
+	u.SetManagedFields(nil)
+	inventory, ok, _ := unstructured.NestedFieldNoCopy(u.Object, "status", "inventory")
+	m, isMap := inventory.(map[string]any)
+	if !ok || !isMap {
 		return u, nil
 	}
-}
-
-// organizationsOfKustomization maps the installation Kustomization to every
-// organization, and an organization's Kustomization to its organization.
-func (r *OrganizationReconciler) organizationsOfKustomization(ctx context.Context, o client.Object) []reconcile.Request {
-	if r.isInstallation(o) {
-		return r.organizationsOf(ctx, "")
+	entries, ok := m["entries"].([]any)
+	if !ok {
+		return u, nil
 	}
-	return organizationOfLabels(ctx, o)
-}
-
-func (r *OrganizationReconciler) isInstallation(o client.Object) bool {
-	return r.Config.Flux.orphans() && o.GetNamespace() == r.Config.Flux.Installation.Namespace && o.GetName() == r.Config.Flux.Installation.Name
-}
-
-// kustomizationChanged passes the installation Kustomization's inventory and
-// last applied revision changes and its moves into and out of settled, and an
-// organization Kustomization's spec and label changes, not the rest of the
-// status kustomize-controller records on every reconcile.
-func (r *OrganizationReconciler) kustomizationChanged() predicate.Funcs {
-	return predicate.Funcs{UpdateFunc: func(e event.UpdateEvent) bool {
-		if r.isInstallation(e.ObjectNew) {
-			o, ok := e.ObjectOld.(*unstructured.Unstructured)
-			n, ok2 := e.ObjectNew.(*unstructured.Unstructured)
-			if !ok || !ok2 {
-				return true
+	kept := []any{}
+	for _, e := range entries {
+		if entry, ok := e.(map[string]any); ok {
+			if id, _ := entry["id"].(string); strings.HasSuffix(id, organizationEntrySuffix) {
+				kept = append(kept, e)
 			}
-			// kustomize-controller patches the conditions several times per
-			// reconcile: only a move into or out of settled, a new inventory
-			// or a new applied revision can change an organization's
-			// Orphaned condition or its last applied revision.
-			if (unsettled(o) == "") != (unsettled(n) == "") {
-				return true
-			}
-			or, _, _ := unstructured.NestedString(o.Object, "status", "lastAppliedRevision")
-			nr, _, _ := unstructured.NestedString(n.Object, "status", "lastAppliedRevision")
-			if or != nr {
-				return true
-			}
-			oi, _, _ := unstructured.NestedFieldNoCopy(o.Object, "status", "inventory")
-			ni, _, _ := unstructured.NestedFieldNoCopy(n.Object, "status", "inventory")
-			return !reflect.DeepEqual(oi, ni)
 		}
-		return e.ObjectOld.GetGeneration() != e.ObjectNew.GetGeneration() || !reflect.DeepEqual(e.ObjectOld.GetLabels(), e.ObjectNew.GetLabels())
+	}
+	m["entries"] = kept
+	return u, nil
+}
+
+// organizationsOfKustomization maps a Kustomization to the organizations it
+// applied (those that carry its ownership labels), and an organization's own
+// Kustomization to its organization.
+func (r *OrganizationReconciler) organizationsOfKustomization(ctx context.Context, o client.Object) []reconcile.Request {
+	reqs := organizationOfLabels(ctx, o)
+	if !r.Config.Flux.orphans() {
+		return reqs
+	}
+	list := &orgv1.OrganizationList{}
+	err := r.Client.List(ctx, list, client.MatchingLabels{v1alpha1.FluxNameLabel: o.GetName(), v1alpha1.FluxNamespaceLabel: o.GetNamespace()})
+	if err != nil {
+		logf.FromContext(ctx).Error(err, "listing the Organizations of a Kustomization failed", "kustomization", client.ObjectKeyFromObject(o))
+		return reqs
+	}
+	for i := range list.Items {
+		if kept(&list.Items[i]) {
+			reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])})
+		}
+	}
+	return reqs
+}
+
+// kustomizationChanged passes, of an organization's own Kustomization, its
+// spec and label changes, and of any other Kustomization, which may apply an
+// Organization, its inventory and last applied revision changes and its moves
+// into and out of settled; not the rest of the status kustomize-controller
+// records on every reconcile.
+func kustomizationChanged() predicate.Funcs {
+	return predicate.Funcs{UpdateFunc: func(e event.UpdateEvent) bool {
+		if e.ObjectOld.GetGeneration() != e.ObjectNew.GetGeneration() || !reflect.DeepEqual(e.ObjectOld.GetLabels(), e.ObjectNew.GetLabels()) {
+			return true
+		}
+		if _, own := e.ObjectNew.GetLabels()[ObjectLabel]; own {
+			return false
+		}
+		o, ok := e.ObjectOld.(*unstructured.Unstructured)
+		n, ok2 := e.ObjectNew.(*unstructured.Unstructured)
+		if !ok || !ok2 {
+			return true
+		}
+		// kustomize-controller patches the conditions several times per
+		// reconcile: only a move into or out of settled, a new inventory or a
+		// new applied revision can change an organization's
+		// AgentPlatformOrphaned condition or its last applied revision.
+		if (unsettled(o) == "") != (unsettled(n) == "") {
+			return true
+		}
+		or, _, _ := unstructured.NestedString(o.Object, "status", "lastAppliedRevision")
+		nr, _, _ := unstructured.NestedString(n.Object, "status", "lastAppliedRevision")
+		if or != nr {
+			return true
+		}
+		oi, _, _ := unstructured.NestedFieldNoCopy(o.Object, "status", "inventory")
+		ni, _, _ := unstructured.NestedFieldNoCopy(n.Object, "status", "inventory")
+		return !reflect.DeepEqual(oi, ni)
 	}}
 }

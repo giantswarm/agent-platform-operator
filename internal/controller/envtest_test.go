@@ -8,6 +8,7 @@ import (
 	"maps"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -31,6 +32,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+
+	orgv1 "github.com/giantswarm/organization-operator/api/v1alpha1"
 
 	"github.com/giantswarm/agent-platform-operator/api/v1alpha1"
 	"github.com/giantswarm/agent-platform-operator/internal/controller"
@@ -89,7 +92,7 @@ const (
 	sopsSecret          = "sops-keys"
 	installationKS      = "flux"
 	organizationFluxCR  = "agent-platform:organization-flux"
-	organizationPathFmt = "./agent-platform/organizations/{parent}/{name}"
+	organizationPathFmt = "./agent-platform/organizations/{name}"
 
 	// A ServiceAccountBinding: a credential provider's Secret reader
 	// ClusterRole and its ServiceAccount in Substrate's namespace.
@@ -116,8 +119,8 @@ var (
 	helmReleaseGVK   = schema.GroupVersionKind{Group: "helm.toolkit.fluxcd.io", Version: "v2", Kind: "HelmRelease"}
 )
 
-// cluster is a kube-apiserver holding the chart's CRD and RBAC, with the
-// reconciler running as the chart's ServiceAccount.
+// cluster is a kube-apiserver holding the Organization CRD and the chart's
+// RBAC, with the reconciler running as the chart's ServiceAccount.
 type cluster struct {
 	// admin is a client with every right.
 	admin client.Client
@@ -134,8 +137,9 @@ type cluster struct {
 	bucket   *fakeBucket
 }
 
-// startEnvtest starts the API server, installs the chart's CRD and the kagent,
-// Substrate and Flux CRDs of testdata/crds, applies the chart's RBAC
+// startEnvtest starts the API server, installs the Organization CRD of the
+// organization-operator module go.mod requires and the kagent, Substrate and
+// Flux CRDs of testdata/crds, applies the chart's RBAC
 // (templates/rbac.yaml), creates the platform namespace with the
 // worker network policy and the Flux namespace, and runs the reconciler, in
 // commit mode, as the chart's ServiceAccount. Skipped without envtest binaries: run via
@@ -164,7 +168,7 @@ func startEnvtest(t *testing.T) *cluster {
 	require.NoError(t, err, "helm template: %s", stderrOf(err))
 
 	env := &envtest.Environment{
-		CRDDirectoryPaths:     []string{chartDir + "/crds", crdsDir},
+		CRDDirectoryPaths:     []string{organizationCRDs(t), crdsDir},
 		ErrorIfCRDPathMissing: true,
 	}
 	cfg, err := env.Start()
@@ -176,7 +180,7 @@ func startEnvtest(t *testing.T) *cluster {
 	})
 	scheme := runtime.NewScheme()
 	require.NoError(t, clientgoscheme.AddToScheme(scheme))
-	require.NoError(t, v1alpha1.AddToScheme(scheme))
+	require.NoError(t, orgv1.AddToScheme(scheme))
 	admin, err := client.New(cfg, client.Options{Scheme: scheme})
 	require.NoError(t, err)
 	ctx := t.Context()
@@ -205,7 +209,7 @@ func startEnvtest(t *testing.T) *cluster {
 
 	// The ClusterRoles the operator binds grant what the operator does not
 	// hold itself, so only `bind` lets it write the bindings.
-	for _, name := range []string{controller.OrganizationsAdminClusterRole, helmClusterRole, organizationFluxCR, bindingClusterRole} {
+	for _, name := range []string{helmClusterRole, organizationFluxCR, bindingClusterRole, adminClusterRole} {
 		require.NoError(t, admin.Create(ctx, &rbacv1.ClusterRole{
 			ObjectMeta: metav1.ObjectMeta{Name: name},
 			Rules:      []rbacv1.PolicyRule{{APIGroups: []string{""}, Resources: []string{"secrets"}, Verbs: []string{"get", "list", "create"}}},
@@ -454,6 +458,16 @@ func chartObjectQuota(t *testing.T) corev1.ResourceList {
 	}
 	require.FailNow(t, "the chart's Deployment passes no --object-quota with the default values")
 	return nil
+}
+
+// organizationCRDs is the directory of the Organization CRD in the
+// organization-operator module that go.mod requires: the CRD of the Go types
+// the operator imports.
+func organizationCRDs(t *testing.T) string {
+	t.Helper()
+	dir, err := exec.Command("go", "list", "-m", "-f", "{{.Dir}}", "github.com/giantswarm/organization-operator").Output()
+	require.NoError(t, err, "go list: %s", stderrOf(err))
+	return filepath.Join(strings.TrimSpace(string(dir)), "config", "crd", "bases")
 }
 
 func createNamespace(t *testing.T, c client.Client, name string) {
