@@ -30,6 +30,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
+	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/config"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"github.com/giantswarm/agent-platform-operator/api/v1alpha1"
@@ -271,8 +272,12 @@ func startEnvtest(t *testing.T, options ...func(*controller.Config)) *cluster {
 
 	asOperator := rest.CopyConfig(cfg)
 	asOperator.Impersonate = rest.ImpersonationConfig{UserName: operator}
+	// Every test starts its own manager in this process, and controller names
+	// are unique per process unless the validation is skipped.
+	skipNameValidation := true
 	mgr, err := ctrl.NewManager(asOperator, ctrl.Options{
 		Scheme:                 scheme,
+		Controller:             ctrlconfig.Controller{SkipNameValidation: &skipNameValidation},
 		Cache:                  controller.CacheOptions(c.config, time.Hour),
 		Metrics:                metricsserver.Options{BindAddress: "0"},
 		HealthProbeBindAddress: "0",
