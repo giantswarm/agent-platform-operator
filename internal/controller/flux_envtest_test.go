@@ -271,41 +271,14 @@ func fluxCases(t *testing.T, c *cluster) {
 	})
 
 	t.Run("an organization missing from the installation Kustomization's inventory is Orphaned until it is back", func(t *testing.T) {
-		// Flux's inventory ID of a cluster-scoped Organization: an empty
-		// namespace.
-		entry := func(name string) any {
-			return map[string]any{"id": "_" + name + "_security.giantswarm.io_Organization", "v": "v1alpha1"}
-		}
-		c.create(t, newObject(kustomizationGVK, fluxNS, installationKS, nil, map[string]any{
-			intervalField: fluxInterval, "path": "./management-clusters/test", "prune": true, "deletionPolicy": "Orphan",
-			"sourceRef": map[string]any{kindField: fluxSourceKind, nameField: fluxSource},
-		}))
-		// The status kustomize-controller records: settled (Ready for its
-		// generation), or reconciling, with the inventory of the last apply.
+		c.create(t, appliedKustomization(fluxNS, installationKS))
 		// revision is the lastAppliedRevision the next status records.
 		revision := "main@sha1:1111111111111111111111111111111111111111"
 		setStatus := func(settled bool, entries ...any) {
-			if entries == nil {
-				entries = []any{}
-			}
-			require.EventuallyWithT(t, func(ct *assert.CollectT) {
-				got := c.read(t, kustomizationGVK, fluxNS, installationKS)
-				condition := map[string]any{"type": "Ready", "status": "True", "reason": "ReconciliationSucceeded", "message": "Applied revision"}
-				if !settled {
-					condition = map[string]any{"type": "Reconciling", "status": "True", "reason": "Progressing", "message": "Reconciliation in progress"}
-				}
-				condition["lastTransitionTime"] = metav1.Now().UTC().Format(time.RFC3339)
-				got.Object["status"] = map[string]any{
-					"observedGeneration":  got.GetGeneration(),
-					"conditions":          []any{condition},
-					"inventory":           map[string]any{"entries": entries},
-					"lastAppliedRevision": revision,
-				}
-				assert.NoError(ct, c.admin.Status().Update(t.Context(), got))
-			}, timeout, tick)
+			c.kustomizationStatus(t, fluxNS, installationKS, settled, revision, entries...)
 		}
 		setInventory := func(entries ...any) { setStatus(true, entries...) }
-		setInventory(entry("treasury"))
+		setInventory(organizationEntry("treasury"))
 
 		// Applied by the installation Kustomization, as Flux labels it.
 		fromGit := map[string]string{v1alpha1.FluxNameLabel: installationKS, v1alpha1.FluxNamespaceLabel: fluxNS}
@@ -324,13 +297,13 @@ func fluxCases(t *testing.T, c *cluster) {
 
 		// A new revision with the same inventory is recorded.
 		revision = "main@sha1:4444444444444444444444444444444444444444"
-		setInventory(entry("treasury"))
+		setInventory(organizationEntry("treasury"))
 		c.lastAppliedRevision(t, org, revision)
 		held := revision
 
 		// A settled status without an applied revision keeps the last one.
 		revision = ""
-		setInventory(entry("treasury"))
+		setInventory(organizationEntry("treasury"))
 		assert.Never(t, func() bool {
 			return ap(c.get(t, org)).LastAppliedRevision != held
 		}, 2*time.Second, tick, "a status without lastAppliedRevision changed the organization's last applied revision")
@@ -362,7 +335,7 @@ func fluxCases(t *testing.T, c *cluster) {
 
 		// The file is back: no longer Orphaned, and the workers run again.
 		revision = "main@sha1:3333333333333333333333333333333333333333"
-		setInventory(entry("treasury"))
+		setInventory(organizationEntry("treasury"))
 		c.orphaned(t, org, metav1.ConditionFalse, v1alpha1.ReasonInInventory)
 		c.lastAppliedRevision(t, org, revision)
 		c.replicas(t, ns, 3)
@@ -417,6 +390,89 @@ func fluxCases(t *testing.T, c *cluster) {
 		assert.Nil(t, meta.FindStatusCondition(c.get(t, applied).Status.Conditions, v1alpha1.ConditionOrphaned))
 		assert.Empty(t, ap(c.get(t, applied)).LastAppliedRevision)
 	})
+
+	t.Run("an organization that another namespace's Kustomization applied is Orphaned once it leaves that Kustomization's inventory", func(t *testing.T) {
+		// Not the installation's Kustomization: one of the installation's
+		// own GitOps, in another namespace, read with the chart's RBAC.
+		const gitopsNS, gitopsKS = "flux-system", "organizations"
+		createNamespace(t, c.admin, gitopsNS)
+		c.create(t, appliedKustomization(gitopsNS, gitopsKS))
+		// It applies other objects too, which stay when the organization's
+		// file goes.
+		other := map[string]any{"id": "default_settings__ConfigMap", "v": "v1"}
+		revision := "main@sha1:5555555555555555555555555555555555555555"
+		c.kustomizationStatus(t, gitopsNS, gitopsKS, true, revision, other, organizationEntry("ledger"))
+
+		org := &orgv1.Organization{
+			ObjectMeta: metav1.ObjectMeta{Name: "ledger", Labels: map[string]string{v1alpha1.FluxNameLabel: gitopsKS, v1alpha1.FluxNamespaceLabel: gitopsNS}},
+			Spec: orgv1.OrganizationSpec{AgentPlatform: &orgv1.AgentPlatformSpec{
+				Enabled: true, Harnesses: []string{curatedHarness}, Workers: withReplicas(2),
+			}},
+		}
+		c.create(t, org)
+		ns := c.readyNamespace(t, org).Name
+		c.modelConfig(t, ns, "anthropic", false)
+		c.orphaned(t, org, metav1.ConditionFalse, v1alpha1.ReasonInInventory)
+		c.lastAppliedRevision(t, org, revision)
+		c.replicas(t, ns, 2)
+
+		// Its file is gone from that Kustomization's path: Orphaned, and the
+		// workers stop. The last revision that held it stays.
+		c.kustomizationStatus(t, gitopsNS, gitopsKS, true, "main@sha1:6666666666666666666666666666666666666666", other)
+		c.orphaned(t, org, metav1.ConditionTrue, v1alpha1.ReasonMissingFromGit)
+		c.lastAppliedRevision(t, org, revision)
+		c.replicas(t, ns, 0)
+
+		// It carries the delete pull request's URL: the delete merged.
+		require.EventuallyWithT(t, func(ct *assert.CollectT) {
+			got := c.get(ct, org)
+			got.Annotations = map[string]string{v1alpha1.DeletePullRequestAnnotation: "https://github.com/giantswarm/test-configs/pull/8"}
+			assert.NoError(ct, c.admin.Update(t.Context(), got))
+		}, timeout, tick)
+		c.orphaned(t, org, metav1.ConditionTrue, v1alpha1.ReasonDeleteMerged)
+		c.replicas(t, ns, 0)
+	})
+}
+
+// organizationEntry is Flux's inventory entry of the Organization name: the
+// ID of a cluster-scoped object has an empty namespace.
+func organizationEntry(name string) any {
+	return map[string]any{"id": "_" + name + "_security.giantswarm.io_Organization", "v": "v1alpha1"}
+}
+
+// appliedKustomization is a Kustomization ns/name that applies Organizations
+// from the installation's source and leaves them in place when it goes.
+func appliedKustomization(ns, name string) *unstructured.Unstructured {
+	return newObject(kustomizationGVK, ns, name, nil, map[string]any{
+		intervalField: fluxInterval, "path": "./management-clusters/test", "prune": true, "deletionPolicy": "Orphan",
+		"sourceRef": map[string]any{kindField: fluxSourceKind, nameField: fluxSource, "namespace": fluxNS},
+	})
+}
+
+// kustomizationStatus records on the Kustomization ns/name the status
+// kustomize-controller writes: settled (Ready for its generation) or
+// reconciling, with the inventory of the last apply and revision as its last
+// applied revision.
+func (c *cluster) kustomizationStatus(t *testing.T, ns, name string, settled bool, revision string, entries ...any) {
+	t.Helper()
+	if entries == nil {
+		entries = []any{}
+	}
+	require.EventuallyWithT(t, func(ct *assert.CollectT) {
+		got := c.read(t, kustomizationGVK, ns, name)
+		condition := map[string]any{"type": "Ready", "status": "True", "reason": "ReconciliationSucceeded", "message": "Applied revision"}
+		if !settled {
+			condition = map[string]any{"type": "Reconciling", "status": "True", "reason": "Progressing", "message": "Reconciliation in progress"}
+		}
+		condition["lastTransitionTime"] = metav1.Now().UTC().Format(time.RFC3339)
+		got.Object["status"] = map[string]any{
+			"observedGeneration":  got.GetGeneration(),
+			"conditions":          []any{condition},
+			"inventory":           map[string]any{"entries": entries},
+			"lastAppliedRevision": revision,
+		}
+		assert.NoError(ct, c.admin.Status().Update(t.Context(), got))
+	}, timeout, tick)
 }
 
 // editKustomization sets one value of the organization Kustomization fluxNS/name, as the admin.

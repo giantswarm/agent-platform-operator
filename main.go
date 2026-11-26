@@ -100,7 +100,7 @@ func run() error {
 	flag.StringVar(&cfg.Flux.Path, "organization-path", "./agent-platform/organizations/{name}", "An organization's path in --flux-source-name, with {name} replaced by its name. Keep it outside what the installation's Kustomization applies")
 	flag.StringVar(&cfg.Flux.Interval, "organization-kustomization-interval", "10m", "spec.interval of the organizations' Kustomizations")
 	flag.StringVar(&cfg.Flux.ClusterRole, "organization-flux-cluster-role", "agent-platform:organization-flux", "ClusterRole an organization's Flux ServiceAccount is bound to, in its organization namespace only")
-	flag.StringVar(&installationKustomization, "installation-kustomization", "", "<namespace>/<name> of the installation's Kustomization that applies the Organizations (a bare name is in --flux-namespace). An organization it applied is Orphaned while it is missing from its inventory. Empty: no Orphaned condition")
+	flag.StringVar(&installationKustomization, "installation-kustomization", "", "<namespace>/<name> of the installation's Kustomization that applies the Organizations (a bare name is in --flux-namespace). Set: an organization that a Flux Kustomization applied, this one or any other as its ownership labels name it, is Orphaned while it is missing from that Kustomization's inventory, and the operator is not ready while this Kustomization cannot be read. Empty: no Orphaned condition")
 	flag.DurationVar(&cfg.Erasure.SnapshotDelay, "snapshot-erase-delay", 5*time.Minute, "How long after the first deletion of a deleted organization's snapshot prefix it is deleted again: at least Substrate's --actor-workflow-deadline (5m by default), so an upload that started before the last actor went has ended")
 	flag.DurationVar(&cfg.Erasure.Poll, "erasure-poll-interval", 10*time.Second, "How often a cleanup step that waits for something to be gone looks again")
 	flag.DurationVar(&syncPeriod, "sync-period", 10*time.Minute, "How often every organization is reconciled without a change")
@@ -256,7 +256,7 @@ func run() error {
 	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
 		return err
 	}
-	// A mistyped name would leave Orphaned unset for good, in silence.
+	// A mistyped name, or no right to read Kustomizations, shows on the pod.
 	if check := controller.InstallationCheck(mgr.GetAPIReader(), cfg.Flux); check != nil {
 		if err := mgr.AddReadyzCheck("installation-kustomization", check); err != nil {
 			return err

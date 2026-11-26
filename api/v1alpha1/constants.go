@@ -63,7 +63,7 @@ const (
 	// False while none or more than one does, so curated Agents cannot run.
 	// Set only where the operator copies the curated objects.
 	ConditionDefaultModelConfigured = "DefaultModelConfigured"
-	// ConditionOrphaned is True when the object carries the installation
+	// ConditionOrphaned is True when the object carries a Flux
 	// Kustomization's ownership labels but is missing from that
 	// Kustomization's inventory: its file is gone from git. Its reason is
 	// DeleteMerged or MissingFromGit. It is False while the object is in the

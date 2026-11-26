@@ -56,9 +56,10 @@
 // status.namespace) stay.
 //
 // With the installation's Kustomization configured, the reconciler sets the
-// Orphaned condition of an organization that Kustomization applied: True
-// while the organization is missing from its inventory (its file is gone from
-// git), with reason DeleteMerged or MissingFromGit.
+// Orphaned condition of an organization that a Flux Kustomization applied
+// (the installation's or any other, as its ownership labels name it): True
+// while the organization is missing from that Kustomization's inventory (its
+// file is gone from git), with reason DeleteMerged or MissingFromGit.
 //
 // Every organization with the Agent Platform enabled carries the finalizer
 // v1alpha1.Finalizer. An Organization without the switch gets nothing. A
@@ -172,8 +173,9 @@ type Config struct {
 }
 
 // CacheOptions limit what the manager caches: the organization namespaces,
-// the reconciler's own ServiceAccounts, ResourceQuotas and, in the Flux
-// namespace, Kustomizations, the installation's Kustomization, every RoleBinding
+// the reconciler's own ServiceAccounts, ResourceQuotas, the organizations'
+// Kustomizations in the Flux namespace or, with the Orphaned condition, every
+// Kustomization with only the Organizations of its inventory, every RoleBinding
 // (a binding of an organization namespace that holds a name the reconciler
 // needs carries no label of the reconciler's),
 // the metadata of every ModelConfig and every Agent and, of the network
@@ -210,15 +212,14 @@ func CacheOptions(cfg Config, syncPeriod time.Duration) cache.Options {
 		}
 	}
 	if f := cfg.Flux; f.watched() {
-		// The organizations' Kustomizations and the installation's.
+		// The organizations' Kustomizations and, with the Orphaned
+		// condition, every Kustomization: any one may apply an Organization.
+		// An empty map caches every namespace.
 		namespaces := map[string]cache.Config{}
-		if f.commitMode() {
+		if f.commitMode() && !f.orphans() {
 			namespaces[f.Namespace] = cache.Config{LabelSelector: hasLabel(ObjectLabel)}
 		}
-		if f.orphans() {
-			namespaces[f.Installation.Namespace] = cache.Config{}
-		}
-		byObject[object(f.Kustomization)] = cache.ByObject{Namespaces: namespaces, Transform: stripInventory(f.Installation)}
+		byObject[object(f.Kustomization)] = cache.ByObject{Namespaces: namespaces, Transform: organizationInventory}
 	}
 	return cache.Options{
 		SyncPeriod:       &syncPeriod,
@@ -234,8 +235,8 @@ type OrganizationReconciler struct {
 	// APIReader reads from the API server: the organization namespace is
 	// looked up there, so a namespace the cache has not seen yet is found.
 	APIReader client.Reader
-	// Cache reads the installation Kustomization from the manager's cache,
-	// which watches it; nil reads it from the API server.
+	// Cache reads the Kustomizations from the manager's cache, which watches
+	// them; nil reads them from the API server.
 	Cache  client.Reader
 	Config Config
 }
@@ -287,7 +288,7 @@ func (r *OrganizationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		b = b.Watches(agent, handler.EnqueueRequestsFromMapFunc(r.organizationsOfAgent), builder.OnlyMetadata, builder.WithPredicates(specOrLabels))
 	}
 	if r.Config.Flux.watched() {
-		b = b.Watches(object(r.Config.Flux.Kustomization), handler.EnqueueRequestsFromMapFunc(r.organizationsOfKustomization), builder.WithPredicates(r.kustomizationChanged()))
+		b = b.Watches(object(r.Config.Flux.Kustomization), handler.EnqueueRequestsFromMapFunc(r.organizationsOfKustomization), builder.WithPredicates(kustomizationChanged()))
 	}
 	for _, gvk := range copied {
 		b = b.Watches(object(gvk), handler.EnqueueRequestsFromMapFunc(r.organizationsOfCopy), builder.WithPredicates(specOrLabels))
@@ -342,12 +343,17 @@ func (r *OrganizationReconciler) allOrganizations(ctx context.Context) []reconci
 	}
 	reqs := make([]reconcile.Request, 0, len(list.Items))
 	for i := range list.Items {
-		org := &list.Items[i]
-		if enabled(org) || controllerutil.ContainsFinalizer(org, v1alpha1.Finalizer) {
-			reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(org)})
+		if kept(&list.Items[i]) {
+			reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])})
 		}
 	}
 	return reqs
+}
+
+// kept reports whether the reconciler keeps org: its Agent Platform is
+// enabled, or it carries the finalizer.
+func kept(org *orgv1.Organization) bool {
+	return enabled(org) || controllerutil.ContainsFinalizer(org, v1alpha1.Finalizer)
 }
 
 // organizationsOfCopy maps an object of the platform namespace (a network
