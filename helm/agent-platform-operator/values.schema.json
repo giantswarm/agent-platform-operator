@@ -13,11 +13,11 @@
                 },
                 "migrationPoll": {
                     "type": "string",
-                    "description": "How often an organization whose chart source waits at its major looks for migrate's annotation again."
+                    "description": "How often a waiting organization looks for migrate's annotation again."
                 },
                 "migrationReport": {
                     "type": "string",
-                    "description": "agent-manager migrate's report ConfigMap in an organization namespace. A move of an existing organization's OCIRepository to a higher major (`2.x` to `3.x`) waits until migrate annotates it `agent-platform.giantswarm.io/agent-chart-ready-major` with the new major (every release there on that major's values), or no HelmRelease there uses the source; meanwhile the organization is not Ready (`ChartSourceHeld`). The operator may read this one ConfigMap name only."
+                    "description": "agent-manager migrate's report ConfigMap in an organization namespace. A move to a higher major (`2.x` to `3.x`) waits until migrate annotates it `agent-platform.giantswarm.io/agent-chart-ready-major` with the new major (organization not Ready, `ChartSourceHeld`, meanwhile). The operator reads this one ConfigMap name only."
                 },
                 "ociRepositoryApiVersion": {
                     "type": "string",
@@ -25,7 +25,7 @@
                 },
                 "ociUrl": {
                     "type": "string",
-                    "description": "OCI URL of the agent chart. The OCIRepository kept in every organization namespace is named after its last segment (`agent`); the organization's HelmReleases reference it by that name. The operator brings its url, interval and ref back to these values on every reconcile, also in existing organizations. Empty keeps none."
+                    "description": "OCI URL of the agent chart. The OCIRepository kept in every organization namespace is named after its last segment (`agent`); the organization's HelmReleases reference it by that name. Every reconcile resets its url, interval and ref to these values. Empty keeps none."
                 },
                 "semver": {
                     "type": "string",
