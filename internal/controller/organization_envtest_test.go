@@ -500,3 +500,51 @@ func (c *cluster) namespacesOf(t *testing.T, org *v1alpha1.AgentPlatformOrganiza
 	require.NoError(t, c.admin.List(t.Context(), list, client.MatchingLabels{v1alpha1.OrganizationUIDLabel: string(org.UID)}))
 	return list.Items
 }
+
+// A configured range of several majors is reported (ChartRangeInvalid) also
+// when the chart source already carries it: Flux would otherwise move the
+// source to a major migrate never marked, with Ready staying true (D-GO-37).
+func TestChartRangeInvalidEnvtest(t *testing.T) {
+	const open = ">=2.6.0"
+	c := startEnvtest(t, func(cfg *controller.Config) { cfg.Chart.Semver = open })
+
+	invalid := func(ct *assert.CollectT, org *v1alpha1.AgentPlatformOrganization) {
+		ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, v1alpha1.ConditionReady)
+		if assert.NotNil(ct, ready) {
+			assert.Equal(ct, metav1.ConditionFalse, ready.Status)
+			assert.Equal(ct, "ChartRangeInvalid", ready.Reason)
+			assert.Contains(ct, ready.Message, open)
+		}
+	}
+
+	t.Run("a missing source is not created", func(t *testing.T) {
+		org := c.organization(t, "org-open-missing", "open-missing")
+		require.EventuallyWithT(t, func(ct *assert.CollectT) { invalid(ct, org) }, timeout, tick)
+		c.absent(t, ociGVK, c.get(t, org).Status.Namespace, agentChart)
+	})
+
+	t.Run("a source that carries the range already stays not Ready", func(t *testing.T) {
+		org := c.organization(t, "org-open-carried", "open-carried")
+		var ns string
+		require.EventuallyWithT(t, func(ct *assert.CollectT) {
+			ns = c.get(ct, org).Status.Namespace
+			assert.NotEmpty(ct, ns)
+		}, timeout, tick)
+		require.EventuallyWithT(t, func(ct *assert.CollectT) { invalid(ct, org) }, timeout, tick)
+
+		// The copy an older operator wrote: the open range, the operator's
+		// own labels, the operator's url and interval.
+		src := newObject(ociGVK, ns, agentChart, map[string]string{controller.ObjectLabel: controller.ScopeNamespace},
+			map[string]any{urlField: c.config.Chart.URL, intervalField: c.config.Chart.Interval, "ref": map[string]any{semverField: open}})
+		require.NoError(t, c.admin.Create(t.Context(), src))
+
+		c.poke(t, org)
+		require.Never(t, func() bool {
+			ready := meta.FindStatusCondition(c.get(t, org).Status.Conditions, v1alpha1.ConditionReady)
+			return ready == nil || ready.Status == metav1.ConditionTrue
+		}, 3*time.Second, tick, "an organization whose source carries an invalid range is Ready")
+		require.EventuallyWithT(t, func(ct *assert.CollectT) { invalid(ct, org) }, timeout, tick)
+		ref, _, _ := unstructured.NestedMap(c.read(t, ociGVK, ns, agentChart).Object, "spec", "ref")
+		assert.Equal(t, map[string]any{semverField: open}, ref, "the operator leaves the ref as it is")
+	})
+}

@@ -143,7 +143,7 @@ type cluster struct {
 // commit mode, as the chart's ServiceAccount. Skipped without envtest binaries: run via
 // `make test-envtest`, which resolves KUBEBUILDER_ASSETS with setup-envtest
 // (and needs helm).
-func startEnvtest(t *testing.T) *cluster {
+func startEnvtest(t *testing.T, options ...func(*controller.Config)) *cluster {
 	t.Helper()
 	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
 		t.Skip("KUBEBUILDER_ASSETS not set; run via `make test-envtest`")
@@ -264,6 +264,10 @@ func startEnvtest(t *testing.T) *cluster {
 			Installation: types.NamespacedName{Namespace: fluxNS, Name: installationKS},
 		},
 	}}
+
+	for _, option := range options {
+		option(&c.config)
+	}
 
 	asOperator := rest.CopyConfig(cfg)
 	asOperator.Impersonate = rest.ImpersonationConfig{UserName: operator}

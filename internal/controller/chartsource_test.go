@@ -20,6 +20,7 @@ import (
 )
 
 const (
+	noReport      = "no migrate run has written its report"
 	v2Line        = "2.x"
 	chartNS       = "agents-payments-abcde"
 	chartRange    = "2.7.x"
@@ -208,6 +209,17 @@ func deployed(hr *unstructured.Unstructured, version string) *unstructured.Unstr
 	return hr
 }
 
+// deployedHistory is a release whose Helm history lists versions newest
+// first, as Flux writes it (status.history[0] is the last deployed).
+func deployedHistory(hr *unstructured.Unstructured, versions ...string) *unstructured.Unstructured {
+	var history []any
+	for _, v := range versions {
+		history = append(history, map[string]any{"chartVersion": v, "status": "deployed"})
+	}
+	_ = unstructured.SetNestedSlice(hr.Object, history, "status", "history")
+	return hr
+}
+
 // migrateReport is agent-manager migrate's report in chartNS, marked ready
 // for major, naming releases, when major is not empty.
 func migrateReport(major string, releases ...string) *corev1.ConfigMap {
@@ -245,7 +257,7 @@ func TestEnsureChartSourceWaitsForMigrateAcrossAMajor(t *testing.T) {
 		mentions string
 	}{
 		{name: "a release on the source and no report: held", semver: v3, from: v2Ref,
-			objects: []client.Object{chartRelease("triage", chart.Name())}, mentions: "no migrate run has written its report"},
+			objects: []client.Object{chartRelease("triage", chart.Name())}, mentions: noReport},
 		{name: "a report without the mark: held", semver: v3, from: v2Ref,
 			objects: []client.Object{chartRelease("triage", chart.Name()), migrateReport("")}, mentions: "names releases not on 3.x values yet"},
 		{name: "a report marked for the old major: held", semver: v3, from: v2Ref,
@@ -255,6 +267,10 @@ func TestEnsureChartSourceWaitsForMigrateAcrossAMajor(t *testing.T) {
 		{name: "a release created after migrate's run: held", semver: v3, from: v2Ref,
 			objects:  []client.Object{chartRelease("triage", chart.Name()), chartRelease("late", chart.Name()), migrateReport("3", "triage")},
 			mentions: "HelmReleases [late] on the source were created after that run"},
+		{name: "a source on a tag names no major: held", semver: v3, from: map[string]any{"tag": "latest"},
+			objects: []client.Object{chartRelease("triage", chart.Name())}, mentions: noReport},
+		{name: "a source on a digest names no major: held", semver: v3, from: map[string]any{"digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"},
+			objects: []client.Object{chartRelease("triage", chart.Name())}, mentions: noReport},
 		{name: "a release of another kind with the source's name does not count", semver: v3, from: v2Ref,
 			objects: []client.Object{func() client.Object {
 				hr := chartRelease("chart", chart.Name())
@@ -383,11 +399,13 @@ func TestEnsureChartSourceRecreatedWaitsForMigrate(t *testing.T) {
 		objects []client.Object
 		created bool
 	}{
-		"a release on 2.x, no mark: not created": {v3, []client.Object{deployed(chartRelease("triage", chart.Name()), "2.6.1")}, false},
-		"a release on 2.x, marked: created":      {v3, []client.Object{deployed(chartRelease("triage", chart.Name()), "2.6.1"), migrateReport("3", "triage")}, true},
-		"a release already on 3.x: created":      {v3, []client.Object{deployed(chartRelease("triage", chart.Name()), "3.0.0")}, true},
-		"a release never deployed: created":      {v3, []client.Object{chartRelease("triage", chart.Name())}, true},
-		"within a major nothing waits":           {chartRange, []client.Object{deployed(chartRelease("triage", chart.Name()), "2.6.1")}, true},
+		"a release on 2.x, no mark: not created":                                  {v3, []client.Object{deployed(chartRelease("triage", chart.Name()), "2.6.1")}, false},
+		"a release on 2.x, marked: created":                                       {v3, []client.Object{deployed(chartRelease("triage", chart.Name()), "2.6.1"), migrateReport("3", "triage")}, true},
+		"a release already on 3.x: created":                                       {v3, []client.Object{deployed(chartRelease("triage", chart.Name()), "3.0.0")}, true},
+		"a release never deployed: created":                                       {v3, []client.Object{chartRelease("triage", chart.Name())}, true},
+		"a release deployed 2.x once, now on 3.x (newest history first): created": {v3, []client.Object{deployedHistory(chartRelease("triage", chart.Name()), "3.0.0", "2.6.1")}, true},
+		"a release now on 2.x after 3.x (newest history first): not created":      {v3, []client.Object{deployedHistory(chartRelease("triage", chart.Name()), "2.6.1", "3.0.0")}, false},
+		"within a major nothing waits":                                            {chartRange, []client.Object{deployed(chartRelease("triage", chart.Name()), "2.6.1")}, true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			c := fake.NewClientBuilder().WithScheme(gateScheme(t)).WithObjects(tc.objects...).Build()

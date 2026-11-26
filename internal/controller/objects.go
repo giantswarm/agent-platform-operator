@@ -257,11 +257,15 @@ func (r *OrganizationReconciler) ensureChartSource(ctx context.Context, ns strin
 	}
 	wantSpec, _ := want.Object["spec"].(map[string]any)
 	var held error
+	if invalid != nil {
+		// An invalid range is reported also when the source already carries
+		// it: Flux would move it to a major migrate never marked (D-GO-37).
+		held = invalid
+	}
 	if !reflect.DeepEqual(spec[fieldRef], wantSpec[fieldRef]) {
 		have, _ := spec[fieldRef].(map[string]any)
 		switch {
 		case invalid != nil:
-			held = invalid
 		case crossesMajor(have, target):
 			ready, why, err := r.migrationReady(ctx, ns, want.GetName(), target, false)
 			if err != nil {
