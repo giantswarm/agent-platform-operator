@@ -111,8 +111,10 @@ func (c *cluster) organizationWithAdmins(t *testing.T, name string, admins ...or
 	org := &orgv1.Organization{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
 		Spec: orgv1.OrganizationSpec{
-			Admins:        admins,
-			AgentPlatform: &orgv1.AgentPlatformSpec{Enabled: true, Harnesses: []string{curatedHarness}, Workers: withReplicas(1)},
+			Admins: admins,
+			Capabilities: orgv1.OrganizationCapabilities{
+				AgentPlatform: &orgv1.AgentPlatformSpec{Enabled: true, Harnesses: []string{curatedHarness}, Workers: withReplicas(1)},
+			},
 		},
 	}
 	require.NoError(t, c.admin.Create(t.Context(), org))

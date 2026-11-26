@@ -18,9 +18,9 @@ is rendered by the agent-platform chart, not here.
 In commit mode (commitMode.sourceRef.name) the operator also creates, updates
 and deletes the organizations' Kustomizations and Flux ServiceAccounts in the
 Flux namespace. With commitMode.installationKustomization it reads and
-watches the Kustomizations of every namespace for the Orphaned condition:
-the one an organization's Flux ownership labels name can be in any namespace,
-and RBAC cannot narrow a read to the Kustomizations that apply an
+watches the Kustomizations of every namespace for the AgentPlatformOrphaned
+condition: the one an organization's Flux ownership labels name can be in any
+namespace, and RBAC cannot narrow a read to the Kustomizations that apply an
 Organization.
 
 On the Organizations (security.giantswarm.io) the operator reads them, adds
@@ -92,8 +92,9 @@ rules:
     verbs: ["get", "create"]
   # The organization's Flux Kustomization: kept in commit mode, deleted by
   # the erasure; with the installation's set, the one that applied each
-  # organization is read for the Orphaned condition, in any namespace. The
-  # erasure deletes the HelmReleases and the Agents of its namespace too.
+  # organization is read for the AgentPlatformOrphaned condition, in any
+  # namespace. The erasure deletes the HelmReleases and the Agents of its
+  # namespace too.
   {{- $c := .Values.commitMode }}
   - apiGroups: ["kustomize.toolkit.fluxcd.io"]
     resources: ["kustomizations"]

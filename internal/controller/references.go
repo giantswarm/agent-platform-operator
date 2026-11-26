@@ -58,11 +58,11 @@ type verdict struct {
 	reason string
 }
 
-// verdictOf is the verdict of a copy that err left: a cause of Ready=False
-// (the source is missing, the name is taken by another writer's object) is
-// unmet; any other failure is unknown. As in split, only a *notReadyError
-// itself is a cause: one wrapped or joined with others may hide a failure,
-// and a failure must never delete a copy.
+// verdictOf is the verdict of a copy that err left: a cause of
+// AgentPlatformReady=False (the source is missing, the name is taken by another
+// writer's object) is unmet; any other failure is unknown. As in split, only a
+// *notReadyError itself is a cause: one wrapped or joined with others may hide
+// a failure, and a failure must never delete a copy.
 func verdictOf(err error, what string) verdict {
 	if err == nil {
 		return verdict{state: met}
@@ -83,7 +83,8 @@ type curatedSet struct {
 	templates map[string]*unstructured.Unstructured
 	servers   map[string]*unstructured.Unstructured
 	listErr   map[string]error
-	// harnesses are the verdicts of the Harness copies spec.agentPlatform.harnesses names.
+	// harnesses are the verdicts of the Harness copies
+	// spec.capabilities.agentPlatform.harnesses names.
 	harnesses map[string]verdict
 	// checked are the verdicts read from the sources alone; copied those
 	// of the copies written (copy).
@@ -195,7 +196,7 @@ func (s *curatedSet) resolveOnce(ctx context.Context, ref reference, write bool)
 		if v, ok := s.harnesses[ref.name]; ok {
 			return v
 		}
-		return verdict{state: unmet, reason: fmt.Sprintf("the Harness %s is not in the organization's spec.agentPlatform.harnesses", ref.name)}
+		return verdict{state: unmet, reason: fmt.Sprintf("the Harness %s is not in the organization's spec.capabilities.agentPlatform.harnesses", ref.name)}
 	case kindAgent:
 		for i := range s.agents {
 			if s.agents[i].GetName() == ref.name {

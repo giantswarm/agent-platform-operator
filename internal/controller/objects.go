@@ -98,7 +98,8 @@ func (r *OrganizationReconciler) create(ctx context.Context, obj client.Object, 
 }
 
 // copyObject copies a platform object of gvk into ns. A missing source makes
-// the organization not Ready; its creation reconciles the organization again.
+// the organization AgentPlatformReady=False; its creation reconciles the
+// organization again.
 func (r *OrganizationReconciler) copyObject(ctx context.Context, gvk schema.GroupVersionKind, name, ns string) error {
 	src, err := r.platformObject(ctx, gvk, name)
 	if err != nil {
@@ -120,11 +121,11 @@ func copyOf(src *unstructured.Unstructured, ns string) *unstructured.Unstructure
 	return obj
 }
 
-// ensureScoped creates obj as the reconciler's own of scope, or brings its
-// own copy back to it when same(copy's spec, obj's spec) is false or its
-// labels differ. An object of that name the reconciler did not write is left
-// alone; for a curated copy that makes the organization not Ready, since the
-// name is the curated object's.
+// ensureScoped creates obj as the reconciler's own of scope, or brings its own
+// copy back to it when same(copy's spec, obj's spec) is false or its labels
+// differ. An object of that name the reconciler did not write is left alone;
+// for a curated copy that makes the organization AgentPlatformReady=False,
+// since the name is the curated object's.
 func (r *OrganizationReconciler) ensureScoped(ctx context.Context, ns, scope string, obj *unstructured.Unstructured, from string, same func(have, want any) bool) error {
 	want := stamp(obj, ns, scope, from)
 	kind := obj.GetKind()
@@ -253,10 +254,10 @@ func copiedLabels(have, want map[string]string, takesSourceKagentLabels bool) ma
 // ensureServiceAccount creates the ServiceAccount, the reconciler's own of
 // scope; one that exists is kept as it is (a ServiceAccount has nothing to
 // drift). A curated one is the workers' identity, so one of that name that is
-// not curated, another writer's or the reconciler's own of another scope,
-// makes the organization not Ready. The cache holds only ServiceAccounts
-// labelled ObjectLabel, so a name it misses that create finds taken is read
-// from the API server.
+// not curated, another writer's or the reconciler's own of another scope, makes
+// the organization AgentPlatformReady=False. The cache holds only
+// ServiceAccounts labelled ObjectLabel, so a name it misses that create finds
+// taken is read from the API server.
 func (r *OrganizationReconciler) ensureServiceAccount(ctx context.Context, ns, name, scope string) error {
 	key := client.ObjectKey{Namespace: ns, Name: name}
 	existing := &corev1.ServiceAccount{}
@@ -310,7 +311,7 @@ func (r *OrganizationReconciler) ensureRoleBinding(ctx context.Context, want *rb
 		return fmt.Errorf("get RoleBinding %s/%s: %w", ns, name, err)
 	case existing.Labels[ObjectLabel] != want.Labels[ObjectLabel]:
 		// Another object holds the name: it is left as it is, and the
-		// organization is not Ready until the name is free.
+		// organization is AgentPlatformReady=False until the name is free.
 		return &notReadyError{reason: reasonNameTaken, message: fmt.Sprintf("the RoleBinding %s/%s is not the operator's %s binding, so the operator cannot write it", ns, name, want.Labels[ObjectLabel])}
 	case existing.RoleRef == want.RoleRef && reflect.DeepEqual(existing.Subjects, want.Subjects) && existing.Annotations[CopiedFromAnnotation] == want.Annotations[CopiedFromAnnotation]:
 		return nil

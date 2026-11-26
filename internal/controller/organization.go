@@ -1,5 +1,6 @@
 // Package controller reconciles each Organization (security.giantswarm.io)
-// whose spec.agentPlatform.enabled is true into its organization namespace.
+// whose spec.capabilities.agentPlatform.enabled is true into its organization
+// namespace.
 //
 // The organization namespace is agents-<name>: an Organization is
 // cluster-scoped, so its name is unique in the cluster. The namespace is
@@ -7,10 +8,11 @@
 // the API server, never from the cache, and writes only a namespace that
 // carries the organization's UID: a namespace of that name that another
 // writer created, or one left by an earlier Organization of the same name,
-// makes the organization Ready=False with reason NameTaken. A name that does
-// not fit in a namespace name (agents-<name> is a DNS label of at most 63
-// characters) makes it Ready=False with reason NamespaceNameInvalid, and it
-// gets no namespace. The namespace has no ownerReference.
+// makes the organization AgentPlatformReady=False with reason NameTaken. A
+// name that does not fit in a namespace name (agents-<name> is a DNS label of
+// at most 63 characters) makes it AgentPlatformReady=False with reason
+// NamespaceNameInvalid, and it gets no namespace. The namespace has no
+// ownerReference.
 //
 // In the namespace the reconciler keeps, from the first reconcile on:
 //
@@ -27,7 +29,8 @@
 //     follows that list and is deleted when the list is empty;
 //   - read-only copies of the curated objects of the platform namespace
 //     (Config.Curated): the Harnesses the organization's
-//     spec.agentPlatform.harnesses names, pointed at the organization's own
+//     spec.capabilities.agentPlatform.harnesses names, pointed at the
+//     organization's own
 //     pool and snapshot prefix with kagent's memory off; the curated
 //     WorkerPool with its ServiceAccount, scaled by the worker replica rule
 //     (workerReplicas); the Agents and AgentTemplates labelled
@@ -50,28 +53,31 @@
 // agent-platform:organizations-admin for the whole cluster. The reconciler
 // writes no binding for it.
 //
-// The reconciler writes the organization's state to status.agentPlatform and
-// its conditions to status.conditions, with a merge patch under an optimistic
-// lock, so the status fields of other writers (organization-operator's
-// status.namespace) stay.
+// The reconciler writes the organization's namespace to the agentPlatform
+// entry of status.namespaces, what it observed to
+// status.capabilities.agentPlatform and its AgentPlatform conditions to
+// status.conditions, with a merge patch under an optimistic lock, so the
+// status fields and entries of other writers (organization-operator's
+// status.namespace and kaas entry of status.namespaces) stay.
 //
 // With the installation's Kustomization configured, the reconciler sets the
-// Orphaned condition of an organization that a Flux Kustomization applied
-// (the installation's or any other, as its ownership labels name it): True
-// while the organization is missing from that Kustomization's inventory (its
-// file is gone from git), with reason DeleteMerged or MissingFromGit.
+// AgentPlatformOrphaned condition of an organization that a Flux
+// Kustomization applied (the installation's or any other, as its ownership
+// labels name it): True while the organization is missing from that
+// Kustomization's inventory (its file is gone from git), with reason
+// DeleteMerged or MissingFromGit.
 //
 // Every organization with the Agent Platform enabled carries the finalizer
 // v1alpha1.Finalizer. An Organization without the switch gets nothing. A
 // switch-off is not supported yet: the agent-platform chart's admission
 // policy refuses it. Where the reconciler finds the switch off on an
 // organization with its finalizer all the same, it changes nothing, erases
-// nothing and sets Ready=False with reason AgentPlatformDisabled (see
-// reportSwitchOff). A deleted organization is
-// erased in order (erase): its Flux Kustomization or HelmReleases and its
-// Agents; its sessions through kagent, until Substrate holds no actor of it;
-// its snapshot prefix, twice; its namespace; its Flux ServiceAccount; then
-// the finalizer goes.
+// nothing and sets AgentPlatformReady=False with reason AgentPlatformDisabled
+// (see reportSwitchOff). A deleted organization is erased in order (erase):
+// its Flux Kustomization or HelmReleases and its Agents; its sessions through
+// kagent, until Substrate holds no actor of it; its snapshot prefix, twice;
+// its namespace; its Flux ServiceAccount; then the finalizer goes. The
+// AgentPlatformErasing condition names the step.
 //
 // The logic of the network policies, the OCIRepository, the Helm
 // ServiceAccount and the WorkerPool and Harness copies is agent-manager's
@@ -174,7 +180,8 @@ type Config struct {
 
 // CacheOptions limit what the manager caches: the organization namespaces,
 // the reconciler's own ServiceAccounts, ResourceQuotas, the organizations'
-// Kustomizations in the Flux namespace or, with the Orphaned condition, every
+// Kustomizations in the Flux namespace or, with the AgentPlatformOrphaned
+// condition, every
 // Kustomization with only the Organizations of its inventory, every RoleBinding
 // (a binding of an organization namespace that holds a name the reconciler
 // needs carries no label of the reconciler's),
@@ -212,8 +219,9 @@ func CacheOptions(cfg Config, syncPeriod time.Duration) cache.Options {
 		}
 	}
 	if f := cfg.Flux; f.watched() {
-		// The organizations' Kustomizations and, with the Orphaned
-		// condition, every Kustomization: any one may apply an Organization.
+		// The organizations' Kustomizations and, with the
+		// AgentPlatformOrphaned condition, every Kustomization: any one may
+		// apply an Organization.
 		// An empty map caches every namespace.
 		namespaces := map[string]cache.Config{}
 		if f.commitMode() && !f.orphans() {
@@ -418,17 +426,17 @@ func (r *OrganizationReconciler) Reconcile(ctx context.Context, req reconcile.Re
 }
 
 // reportSwitchOff reports an organization whose Agent Platform was turned
-// off, or whose spec.agentPlatform was removed, after it was on. A switch-off
-// is not supported yet, and the agent-platform chart's admission policy
-// refuses it; when it gets through all the same, the reconciler changes
-// nothing and erases nothing: the namespace, its contents, the admins binding
-// and the finalizer stay as they are. Only Ready says so. A delete of the
-// Organization still erases it.
+// off, or whose spec.capabilities.agentPlatform was removed, after it was on.
+// A switch-off is not supported yet, and the agent-platform chart's admission
+// policy refuses it; when it gets through all the same, the reconciler
+// changes nothing and erases nothing: the namespace, its contents, the admins
+// binding and the finalizer stay as they are. Only AgentPlatformReady says
+// so. A delete of the Organization still erases it.
 func (r *OrganizationReconciler) reportSwitchOff(ctx context.Context, org *orgv1.Organization) error {
 	status := stateOf(org)
 	meta.SetStatusCondition(&status.Conditions, metav1.Condition{
-		Type: v1alpha1.ConditionReady, Status: metav1.ConditionFalse, Reason: reasonAgentPlatformOff,
-		Message:            "spec.agentPlatform.enabled is off or spec.agentPlatform is gone: turning the Agent Platform off is not supported yet, and nothing was changed or erased; turn it on again, or delete the Organization to erase it",
+		Type: orgv1.AgentPlatformReady, Status: metav1.ConditionFalse, Reason: reasonAgentPlatformOff,
+		Message:            "spec.capabilities.agentPlatform.enabled is off or spec.capabilities.agentPlatform is gone: turning the Agent Platform off is not supported yet, and nothing was changed or erased; turn it on again, or delete the Organization to erase it",
 		ObservedGeneration: org.Generation,
 	})
 	return r.writeStatus(ctx, org, status)
@@ -436,37 +444,55 @@ func (r *OrganizationReconciler) reportSwitchOff(ctx context.Context, org *orgv1
 
 // enabled reports whether org has the Agent Platform switched on.
 func enabled(org *orgv1.Organization) bool {
-	return org.Spec.AgentPlatform != nil && org.Spec.AgentPlatform.Enabled
+	ap := org.Spec.Capabilities.AgentPlatform
+	return ap != nil && ap.Enabled
 }
 
-// platformSpec is org's spec.agentPlatform, the zero value when it has none.
+// platformSpec is org's spec.capabilities.agentPlatform, the zero value when
+// it has none.
 func platformSpec(org *orgv1.Organization) orgv1.AgentPlatformSpec {
-	if org.Spec.AgentPlatform == nil {
+	if org.Spec.Capabilities.AgentPlatform == nil {
 		return orgv1.AgentPlatformSpec{}
 	}
-	return *org.Spec.AgentPlatform
+	return *org.Spec.Capabilities.AgentPlatform
 }
 
-// platformStatus is org's status.agentPlatform, the zero value when it has
-// none.
+// platformStatus is org's status.capabilities.agentPlatform, the zero value
+// when it has none.
 func platformStatus(org *orgv1.Organization) orgv1.AgentPlatformStatus {
-	if org.Status.AgentPlatform == nil {
+	if org.Status.Capabilities.AgentPlatform == nil {
 		return orgv1.AgentPlatformStatus{}
 	}
-	return *org.Status.AgentPlatform
+	return *org.Status.Capabilities.AgentPlatform
 }
 
-// orgState is the part of an Organization's status the reconciler writes: its
-// own block, status.agentPlatform, and status.conditions.
+// platformNamespace is the name of the agentPlatform entry of org's
+// status.namespaces, "" when it has none.
+func platformNamespace(org *orgv1.Organization) string {
+	for _, ns := range org.Status.Namespaces {
+		if ns.Capability == orgv1.CapabilityAgentPlatform {
+			return ns.Name
+		}
+	}
+	return ""
+}
+
+// orgState is the part of an Organization's status the reconciler writes:
+// status.capabilities.agentPlatform, the agentPlatform entry of
+// status.namespaces, and status.conditions, of which it sets the
+// AgentPlatform conditions only.
 type orgState struct {
 	orgv1.AgentPlatformStatus
+	// Namespace is the name of the agentPlatform entry of status.namespaces;
+	// empty leaves the entry as it is.
+	Namespace  string
 	Conditions []metav1.Condition
 }
 
 // stateOf is a copy of the part of org's status the reconciler writes.
 func stateOf(org *orgv1.Organization) *orgState {
-	s := &orgState{}
-	if ap := org.Status.AgentPlatform; ap != nil {
+	s := &orgState{Namespace: platformNamespace(org)}
+	if ap := org.Status.Capabilities.AgentPlatform; ap != nil {
 		ap.DeepCopyInto(&s.AgentPlatformStatus)
 	}
 	for i := range org.Status.Conditions {
@@ -475,16 +501,32 @@ func stateOf(org *orgv1.Organization) *orgState {
 	return s
 }
 
-// applyTo sets s in org's status.
+// applyTo sets s in org's status. The entries of status.namespaces of other
+// capabilities stay as they are.
 func (s *orgState) applyTo(org *orgv1.Organization) {
 	ap := s.AgentPlatformStatus
-	org.Status.AgentPlatform = ap.DeepCopy()
+	org.Status.Capabilities.AgentPlatform = ap.DeepCopy()
 	org.Status.Conditions = s.Conditions
+	if s.Namespace == "" || platformNamespace(org) == s.Namespace {
+		return
+	}
+	namespaces := make([]orgv1.OrganizationNamespace, 0, len(org.Status.Namespaces)+1)
+	for _, ns := range org.Status.Namespaces {
+		if ns.Capability != orgv1.CapabilityAgentPlatform {
+			namespaces = append(namespaces, ns)
+		}
+	}
+	org.Status.Namespaces = append(namespaces, orgv1.OrganizationNamespace{Name: s.Namespace, Capability: orgv1.CapabilityAgentPlatform})
 }
 
 // writeStatus writes s to org's status when it changed it. The merge patch
-// carries only what changed, so the fields of other writers stay; it
-// replaces the whole conditions list, so it is sent under an optimistic lock.
+// carries only what changed, so the fields of other writers stay. It replaces
+// a whole list, status.conditions or status.namespaces, with the one of the
+// copy it is made from, which holds the other writers' entries
+// (organization-operator's kaas entry of status.namespaces, which it applies
+// as its own field manager): it is sent under an optimistic lock, so the API
+// server refuses it with a conflict once another writer changed the status
+// since that copy was read, and the reconcile is retried.
 func (r *OrganizationReconciler) writeStatus(ctx context.Context, org *orgv1.Organization, s *orgState) error {
 	before := org.DeepCopy()
 	s.applyTo(org)
@@ -534,19 +576,19 @@ func (r *OrganizationReconciler) reconcile(ctx context.Context, org *orgv1.Organ
 	return errors.Join(errs...)
 }
 
-// notReadyError is a cause of Ready=False that a retry does not change: the
-// reconcile has done what it can.
+// notReadyError is a cause of AgentPlatformReady=False that a retry does not
+// change: the reconcile has done what it can.
 type notReadyError struct{ reason, message string }
 
 func (e *notReadyError) Error() string { return e.message }
 
-// readyCondition is the Ready condition a reconcile that returned err leaves,
-// and the error to retry: the failures in err, without its causes of
-// Ready=False. A failure makes the reason ReconcileFailed; the message names
-// the failures and then the causes of Ready=False, so a cause stays visible
-// while a failure lasts.
+// readyCondition is the AgentPlatformReady condition a reconcile that
+// returned err leaves, and the error to retry: the failures in err, without
+// its causes of AgentPlatformReady=False. A failure makes the reason
+// ReconcileFailed; the message names the failures and then the causes of
+// AgentPlatformReady=False, so a cause stays visible while a failure lasts.
 func readyCondition(err error, generation int64) (metav1.Condition, error) {
-	ready := metav1.Condition{Type: v1alpha1.ConditionReady, Status: metav1.ConditionTrue, Reason: reasonReconciled, ObservedGeneration: generation}
+	ready := metav1.Condition{Type: orgv1.AgentPlatformReady, Status: metav1.ConditionTrue, Reason: reasonReconciled, ObservedGeneration: generation}
 	failed, notReady := split(err)
 	err = errors.Join(failed...)
 	messages := make([]string, 0, 1+len(notReady))
@@ -570,9 +612,10 @@ func readyCondition(err error, generation int64) (metav1.Condition, error) {
 }
 
 // split sorts the errors joined in err into failures to retry and causes of
-// Ready=False. Only a *notReadyError itself is a cause of Ready=False: an
-// error that wraps one (fmt.Errorf with %w) is a failure, because it can wrap
-// a failure too, and a failure must never be lost to a cause.
+// AgentPlatformReady=False. Only a *notReadyError itself is a cause of
+// AgentPlatformReady=False: an error that wraps one (fmt.Errorf with %w) is a
+// failure, because it can wrap a failure too, and a failure must never be
+// lost to a cause.
 func split(err error) (failed []error, notReady []*notReadyError) {
 	if err == nil {
 		return nil, nil
@@ -624,8 +667,8 @@ func (r *OrganizationReconciler) namespace(ctx context.Context, org *orgv1.Organ
 }
 
 // namespaceName is the name of org's namespace, agents-<name>, or a cause of
-// Ready=False when that is not a valid namespace name (a DNS label of at
-// most 63 characters): org gets no namespace.
+// AgentPlatformReady=False when that is not a valid namespace name (a DNS
+// label of at most 63 characters): org gets no namespace.
 func namespaceName(org *orgv1.Organization) (string, error) {
 	name := NamespacePrefix + org.Name
 	if errs := validation.IsDNS1123Label(name); len(errs) > 0 {

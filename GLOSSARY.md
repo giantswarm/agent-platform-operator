@@ -24,7 +24,8 @@ _Avoid_: Mirror
 
 **Orphaned organization**:
 An organization absent from the settled inventory of the Flux Kustomization that
-applied it (the one its ownership labels name).
+applied it (the one its ownership labels name): its `AgentPlatformOrphaned`
+condition is `True`.
 Orphaning prevents new work; deletion requires a separate administrative action.
 
 **Snapshot store**:

@@ -84,10 +84,10 @@ func curatedCases(t *testing.T, c *cluster) {
 			assert.Equal(ct, agentPrompt, str(a, "spec", "template", promptField))
 		})
 
-		// A Harness taken out of spec.agentPlatform.harnesses goes.
+		// A Harness taken out of spec.capabilities.agentPlatform.harnesses goes.
 		require.EventuallyWithT(t, func(ct *assert.CollectT) {
 			got := c.get(ct, org)
-			got.Spec.AgentPlatform.Harnesses = nil
+			got.Spec.Capabilities.AgentPlatform.Harnesses = nil
 			assert.NoError(ct, c.admin.Update(t.Context(), got))
 		}, timeout, tick)
 		c.eventuallyAbsent(t, harnessGVK, ns, curatedHarness)
@@ -151,7 +151,7 @@ func curatedCases(t *testing.T, c *cluster) {
 	t.Run("an organization without a workers block runs one worker, and one with 0 set runs none", func(t *testing.T) {
 		// As git and agent-manager write it: no workers block at all.
 		unset := newObject(orgv1.GroupVersion.WithKind("Organization"), "", "workers-unset", nil,
-			map[string]any{"agentPlatform": map[string]any{"enabled": true, "harnesses": []any{curatedHarness}}})
+			map[string]any{"capabilities": map[string]any{"agentPlatform": map[string]any{"enabled": true, "harnesses": []any{curatedHarness}}}})
 		require.NoError(t, c.admin.Create(t.Context(), unset))
 		org := &orgv1.Organization{}
 		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKeyFromObject(unset), org))
@@ -161,7 +161,7 @@ func curatedCases(t *testing.T, c *cluster) {
 
 		// The switch alone.
 		bare := newObject(orgv1.GroupVersion.WithKind("Organization"), "", "workers-bare", nil,
-			map[string]any{"agentPlatform": map[string]any{"enabled": true}})
+			map[string]any{"capabilities": map[string]any{"agentPlatform": map[string]any{"enabled": true}}})
 		require.NoError(t, c.admin.Create(t.Context(), bare))
 		org = &orgv1.Organization{}
 		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKeyFromObject(bare), org))
@@ -176,8 +176,8 @@ func curatedCases(t *testing.T, c *cluster) {
 		c.modelConfig(t, zeroNS, "anthropic", false)
 		c.eventually(t, agentGVK, zeroNS, curatedAgent, nil)
 		got := c.get(t, zero)
-		if assert.NotNil(t, got.Spec.AgentPlatform.Workers.Replicas) {
-			assert.Zero(t, *got.Spec.AgentPlatform.Workers.Replicas, "an explicit 0 was not kept")
+		if assert.NotNil(t, got.Spec.Capabilities.AgentPlatform.Workers.Replicas) {
+			assert.Zero(t, *got.Spec.Capabilities.AgentPlatform.Workers.Replicas, "an explicit 0 was not kept")
 		}
 		c.replicas(t, zeroNS, 0)
 		c.poke(t, zero)
@@ -238,7 +238,7 @@ func curatedCases(t *testing.T, c *cluster) {
 		c.poke(t, org)
 		c.replicas(t, ns, 1)
 		require.EventuallyWithT(t, func(ct *assert.CollectT) {
-			ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, v1alpha1.ConditionReady)
+			ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, orgv1.AgentPlatformReady)
 			if assert.NotNil(ct, ready) {
 				assert.Equal(ct, metav1.ConditionFalse, ready.Status)
 				assert.Contains(ct, ready.Message, "list the sessions of "+ns)
@@ -399,7 +399,7 @@ func curatedCases(t *testing.T, c *cluster) {
 				t.Cleanup(func() { setPoolSA(context.WithoutCancel(t.Context()), poolSA) })
 
 				require.EventuallyWithT(t, func(ct *assert.CollectT) {
-					ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, v1alpha1.ConditionReady)
+					ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, orgv1.AgentPlatformReady)
 					if assert.NotNil(ct, ready) {
 						assert.Equal(ct, metav1.ConditionFalse, ready.Status)
 						assert.Equal(ct, "NameTaken", ready.Reason)
@@ -584,7 +584,7 @@ func (c *cluster) modelConfig(t *testing.T, ns, name string, marked bool) *unstr
 func (c *cluster) defaultModel(t *testing.T, org *orgv1.Organization, ns string, status metav1.ConditionStatus, model string) {
 	t.Helper()
 	require.EventuallyWithT(t, func(ct *assert.CollectT) {
-		cond := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, v1alpha1.ConditionDefaultModelConfigured)
+		cond := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, orgv1.AgentPlatformDefaultModelConfigured)
 		if assert.NotNil(ct, cond) {
 			assert.Equal(ct, status, cond.Status, "DefaultModelConfigured: %s", cond.Message)
 		}

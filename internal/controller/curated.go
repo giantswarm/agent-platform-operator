@@ -107,12 +107,13 @@ func (c *curated) kept(gvk schema.GroupVersionKind, name string) {
 	c.keep[gvk][name] = true
 }
 
-// keepCurated keeps the curated copies in ns: the Harnesses spec.agentPlatform.harnesses
-// names, the WorkerPool, and the curated Agents and AgentTemplates whose
-// references are all met, with the AgentTemplates and RemoteMCPServers they
-// refer to (references.go). It sets the organization's DefaultModelConfigured
-// condition in status, and removes the copies whose source is no longer
-// curated for the organization or whose references are no longer met.
+// keepCurated keeps the curated copies in ns: the Harnesses
+// spec.capabilities.agentPlatform.harnesses names, the WorkerPool, and the
+// curated Agents and AgentTemplates whose references are all met, with the
+// AgentTemplates and RemoteMCPServers they refer to (references.go). It sets
+// the organization's AgentPlatformDefaultModelConfigured condition in status,
+// and removes the copies whose source is no longer curated for the organization
+// or whose references are no longer met.
 func (r *OrganizationReconciler) keepCurated(ctx context.Context, org *orgv1.Organization, ns string, status *orgState) error {
 	c := r.Config.Curated
 	models, err := r.modelConfigs(ctx, ns)
@@ -165,7 +166,7 @@ func (r *OrganizationReconciler) keepCurated(ctx context.Context, org *orgv1.Org
 		})
 	}
 
-	// The rule reads the Orphaned condition this reconcile set.
+	// The rule reads the AgentPlatformOrphaned condition this reconcile set.
 	current := org.DeepCopy()
 	status.applyTo(current)
 	use := usage{models: len(models) > 0}
@@ -194,16 +195,18 @@ type usage struct {
 }
 
 // workerReplicas is the worker replica rule: the organization's
-// spec.agentPlatform.workers.replicas (1 when it is not set) while its namespace holds a
-// ModelConfig and an Agent or a session; 0 while it holds no ModelConfig (no
-// agent can run without a model), while it holds no Agent and no session
-// (nothing needs a worker), and while it is Orphaned. A deleted organization
-// runs its replicas until its sessions are gone, whatever else holds, since
-// kagent needs a worker to suspend an actor, and 0 after.
+// spec.capabilities.agentPlatform.workers.replicas (1 when it is not set)
+// while its namespace holds a ModelConfig and an Agent or a session; 0 while
+// it holds no ModelConfig (no agent can run without a model), while it holds
+// no Agent and no session (nothing needs a worker), and while its
+// AgentPlatformOrphaned condition is True. A deleted organization runs its
+// replicas until its sessions are gone (the erasure step its
+// AgentPlatformErasing condition records), whatever else holds, since kagent
+// needs a worker to suspend an actor, and 0 after.
 func workerReplicas(org *orgv1.Organization, use usage) int64 {
 	replicas := int64(platformSpec(org).Workers.ReplicasOrDefault())
 	if org.DeletionTimestamp != nil {
-		if sessionsGone(platformStatus(org).ErasureStep) {
+		if sessionsGone(erasureStep(org.Status.Conditions)) {
 			return 0
 		}
 		return replicas
@@ -215,7 +218,7 @@ func workerReplicas(org *orgv1.Organization, use usage) int64 {
 }
 
 func orphaned(org *orgv1.Organization) bool {
-	return meta.IsStatusConditionTrue(org.Status.Conditions, v1alpha1.ConditionOrphaned)
+	return meta.IsStatusConditionTrue(org.Status.Conditions, orgv1.AgentPlatformOrphaned)
 }
 
 // inUse reports whether the organization namespace ns needs its workers: it
@@ -269,8 +272,8 @@ func (r *OrganizationReconciler) modelConfigs(ctx context.Context, ns string) ([
 }
 
 // defaultModelConfig is the name of the one ModelConfig marked as the
-// default ("" when none or several are) and the DefaultModelConfigured
-// condition that says which.
+// default ("" when none or several are) and the
+// AgentPlatformDefaultModelConfigured condition that says which.
 func defaultModelConfig(models []metav1.PartialObjectMetadata, ns string, generation int64) (string, metav1.Condition) {
 	var marked []string
 	for _, mc := range models {
@@ -279,7 +282,7 @@ func defaultModelConfig(models []metav1.PartialObjectMetadata, ns string, genera
 		}
 	}
 	slices.Sort(marked)
-	cond := metav1.Condition{Type: v1alpha1.ConditionDefaultModelConfigured, Status: metav1.ConditionFalse, ObservedGeneration: generation}
+	cond := metav1.Condition{Type: orgv1.AgentPlatformDefaultModelConfigured, Status: metav1.ConditionFalse, ObservedGeneration: generation}
 	switch len(marked) {
 	case 0:
 		cond.Reason = reasonNoDefaultModelConfig
@@ -424,8 +427,8 @@ func (r *OrganizationReconciler) ensureCurated(ctx context.Context, ns string, s
 	return r.ensureScoped(ctx, ns, ScopeCurated, obj, objectRef(src), equal)
 }
 
-// platformObject reads the object of gvk named name in the platform
-// namespace. A missing one makes the organization not Ready; its creation
+// platformObject reads the object of gvk named name in the platform namespace.
+// A missing one makes the organization AgentPlatformReady=False; its creation
 // reconciles the organization again.
 func (r *OrganizationReconciler) platformObject(ctx context.Context, gvk schema.GroupVersionKind, name string) (*unstructured.Unstructured, error) {
 	src := object(gvk)

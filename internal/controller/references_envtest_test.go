@@ -16,8 +16,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	orgv1 "github.com/giantswarm/organization-operator/api/v1alpha1"
-
-	"github.com/giantswarm/agent-platform-operator/api/v1alpha1"
 )
 
 // templateRefField is an Agent's and a sub-agent's reference to an
@@ -28,7 +26,7 @@ const templateRefField = "templateRef"
 // run in TestOrganizationEnvtest: a curated Agent is copied only when every
 // object it refers to is a curated copy in the organization namespace.
 func referenceCases(t *testing.T, c *cluster) {
-	t.Run("a curated Agent on a Harness outside spec.agentPlatform.harnesses is left out until the organization adds it", func(t *testing.T) {
+	t.Run("a curated Agent on a Harness outside spec.capabilities.agentPlatform.harnesses is left out until the organization adds it", func(t *testing.T) {
 		org := c.organizationWith(t, "refs-harness", orgv1.AgentPlatformSpec{Workers: withReplicas(1)})
 		ns := c.readyNamespace(t, org).Name
 		// The curated AgentTemplate names no Harness: its copy shows that
@@ -40,7 +38,7 @@ func referenceCases(t *testing.T, c *cluster) {
 		setHarnesses := func(harnesses []string) {
 			require.EventuallyWithT(t, func(ct *assert.CollectT) {
 				got := c.get(ct, org)
-				got.Spec.AgentPlatform.Harnesses = harnesses
+				got.Spec.Capabilities.AgentPlatform.Harnesses = harnesses
 				assert.NoError(ct, c.admin.Update(t.Context(), got))
 			}, timeout, tick)
 		}
@@ -48,7 +46,8 @@ func referenceCases(t *testing.T, c *cluster) {
 		c.eventually(t, harnessGVK, ns, curatedHarness, nil)
 		c.eventually(t, agentGVK, ns, curatedAgent, nil)
 
-		// The Harness goes out of spec.agentPlatform.harnesses: so does the Agent's copy.
+		// The Harness goes out of spec.capabilities.agentPlatform.harnesses: so
+		// does the Agent's copy.
 		setHarnesses(nil)
 		c.eventuallyAbsent(t, agentGVK, ns, curatedAgent)
 		c.eventuallyAbsent(t, harnessGVK, ns, curatedHarness)
@@ -137,7 +136,7 @@ func referenceCases(t *testing.T, c *cluster) {
 		c.createSource(t, templateGVK, ref, curatedLabels, templateSpec("Curated.", nil))
 		c.createSource(t, agentGVK, name, curatedLabels, map[string]any{harnessRefField: nameRef(curatedHarness), templateRefField: nameRef(ref)})
 		require.EventuallyWithT(t, func(ct *assert.CollectT) {
-			ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, v1alpha1.ConditionReady)
+			ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, orgv1.AgentPlatformReady)
 			if assert.NotNil(ct, ready) {
 				assert.Equal(ct, metav1.ConditionFalse, ready.Status)
 				assert.Equal(ct, "NameTaken", ready.Reason)

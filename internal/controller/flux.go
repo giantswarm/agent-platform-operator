@@ -65,10 +65,10 @@ type FluxConfig struct {
 	// in the organization namespace, and nowhere else.
 	ClusterRole string
 	// Installation is the installation's Kustomization that applies the
-	// Organizations. A name turns the Orphaned condition on, for an
-	// organization that any Kustomization applied, and the operator is not
-	// ready while this one cannot be read. An empty name sets no Orphaned
-	// condition.
+	// Organizations. A name turns the AgentPlatformOrphaned condition on, for
+	// an organization that any Kustomization applied, and the operator is not
+	// ready while this one cannot be read. An empty name sets no
+	// AgentPlatformOrphaned condition.
 	Installation types.NamespacedName
 }
 
@@ -76,7 +76,8 @@ type FluxConfig struct {
 // ServiceAccount per organization.
 func (f FluxConfig) commitMode() bool { return f.Namespace != "" && f.SourceName != "" }
 
-// orphans reports whether the reconciler sets the Orphaned condition.
+// orphans reports whether the reconciler sets the AgentPlatformOrphaned
+// condition.
 func (f FluxConfig) orphans() bool { return f.Installation.Name != "" }
 
 // appliedBy is the Flux Kustomization whose ownership labels o carries: the
@@ -166,12 +167,12 @@ func (r *OrganizationReconciler) ensureFluxServiceAccount(ctx context.Context, o
 	return nil
 }
 
-// ensureKustomization creates the organization's Kustomization, or brings
-// its spec and labels back to what the reconciler keeps; fields the API
-// server defaults, the status and other writers' metadata stay. It is read
-// from the cache, and a miss is confirmed from the API server: without the
-// Orphaned condition the cache holds only labelled Kustomizations, so one of
-// that name without the labels would read as missing.
+// ensureKustomization creates the organization's Kustomization, or brings its
+// spec and labels back to what the reconciler keeps; fields the API server
+// defaults, the status and other writers' metadata stay. It is read from the
+// cache, and a miss is confirmed from the API server: without the
+// AgentPlatformOrphaned condition the cache holds only labelled Kustomizations,
+// so one of that name without the labels would read as missing.
 func (r *OrganizationReconciler) ensureKustomization(ctx context.Context, org *orgv1.Organization, name string) error {
 	f := r.Config.Flux
 	want := r.kustomization(org, name)
@@ -302,13 +303,13 @@ func nameTaken(kind, ns, name string) error {
 	return &notReadyError{reason: reasonNameTaken, message: fmt.Sprintf("the %s %s/%s is not the operator's for this organization, so the operator cannot write it", kind, ns, name)}
 }
 
-// setOrphaned sets the Orphaned condition in status from the inventory of the
-// Kustomization whose ownership labels the organization carries, whichever
-// it is. An organization without those labels was not applied from git and
-// has no Orphaned condition. While the inventory cannot be read (the
-// Kustomization is missing, or has not recorded one yet) the condition stays
-// as it was: a passing gap must neither stop an organization's workers nor
-// start an orphan's.
+// setOrphaned sets the AgentPlatformOrphaned condition in status from the
+// inventory of the Kustomization whose ownership labels the organization
+// carries, whichever it is. An organization without those labels was not
+// applied from git and has no AgentPlatformOrphaned condition. While the
+// inventory cannot be read (the Kustomization is missing, or has not recorded
+// one yet) the condition stays as it was: a passing gap must neither stop an
+// organization's workers nor start an orphan's.
 func (r *OrganizationReconciler) setOrphaned(ctx context.Context, org *orgv1.Organization, status *orgState) error {
 	f := r.Config.Flux
 	owner, fromGit := appliedBy(org)
@@ -316,14 +317,14 @@ func (r *OrganizationReconciler) setOrphaned(ctx context.Context, org *orgv1.Org
 		// Without the installation Kustomization nothing sets it: one left
 		// from an earlier configuration would stop the workers for good.
 		// Without the ownership labels it was not applied from git.
-		meta.RemoveStatusCondition(&status.Conditions, v1alpha1.ConditionOrphaned)
+		meta.RemoveStatusCondition(&status.Conditions, orgv1.AgentPlatformOrphaned)
 		status.LastAppliedRevision = ""
 		return nil
 	}
 	ks := object(f.Kustomization)
 	err := r.cacheReader().Get(ctx, owner, ks)
 	if apierrors.IsNotFound(err) {
-		logf.FromContext(ctx).Info("the Kustomization that applied the organization is missing; Orphaned stays as it was", "kustomization", owner)
+		logf.FromContext(ctx).Info("the Kustomization that applied the organization is missing; AgentPlatformOrphaned stays as it was", "kustomization", owner)
 		return nil
 	}
 	if err != nil {
@@ -333,12 +334,12 @@ func (r *OrganizationReconciler) setOrphaned(ctx context.Context, org *orgv1.Org
 	// inventory only once the apply and its health checks succeeded: until
 	// then a new organization would read as missing from git.
 	if why := unsettled(ks); why != "" {
-		logf.FromContext(ctx).V(1).Info("the Kustomization that applied the organization is not settled; Orphaned stays as it was", "kustomization", owner, "why", why)
+		logf.FromContext(ctx).V(1).Info("the Kustomization that applied the organization is not settled; AgentPlatformOrphaned stays as it was", "kustomization", owner, "why", why)
 		return nil
 	}
 	inventory, found, err := unstructured.NestedMap(ks.Object, "status", "inventory")
 	if err != nil || !found {
-		logf.FromContext(ctx).V(1).Info("the Kustomization that applied the organization has no inventory; Orphaned stays as it was", "kustomization", owner)
+		logf.FromContext(ctx).V(1).Info("the Kustomization that applied the organization has no inventory; AgentPlatformOrphaned stays as it was", "kustomization", owner)
 		return nil
 	}
 	// An inventory without entries is empty: Flux omits an empty list.
@@ -347,7 +348,7 @@ func (r *OrganizationReconciler) setOrphaned(ctx context.Context, org *orgv1.Org
 	// namespace for the cluster-scoped Organization.
 	id := "_" + org.Name + organizationEntrySuffix
 	cond := metav1.Condition{
-		Type: v1alpha1.ConditionOrphaned, Status: metav1.ConditionFalse, Reason: v1alpha1.ReasonInInventory,
+		Type: orgv1.AgentPlatformOrphaned, Status: metav1.ConditionFalse, Reason: orgv1.AgentPlatformOrphanedInInventory,
 		Message:            fmt.Sprintf("in the inventory of the Kustomization %s", owner),
 		ObservedGeneration: org.Generation,
 	}
@@ -358,10 +359,10 @@ func (r *OrganizationReconciler) setOrphaned(ctx context.Context, org *orgv1.Org
 			status.LastAppliedRevision = revision
 		}
 	} else {
-		cond.Status, cond.Reason = metav1.ConditionTrue, v1alpha1.ReasonMissingFromGit
+		cond.Status, cond.Reason = metav1.ConditionTrue, orgv1.AgentPlatformOrphanedMissingFromGit
 		cond.Message = fmt.Sprintf("missing from the inventory of the Kustomization %s: its file is gone from git; the workers are stopped", owner)
 		if pr := org.GetAnnotations()[v1alpha1.DeletePullRequestAnnotation]; pr != "" {
-			cond.Reason = v1alpha1.ReasonDeleteMerged
+			cond.Reason = orgv1.AgentPlatformOrphanedDeleteMerged
 			cond.Message = fmt.Sprintf("missing from the inventory of the Kustomization %s after the delete pull request %s: pending erase; the workers are stopped", owner, pr)
 		}
 	}
@@ -439,9 +440,10 @@ var organizationEntrySuffix = "_" + orgv1.GroupVersion.Group + "_Organization"
 
 // organizationInventory is the cache's transform of a Kustomization: the
 // managed fields go, and its inventory keeps the Organizations' entries only,
-// the ones the reconciler reads. A Kustomization's inventory lists every
-// object it applied, and with the Orphaned condition on every Kustomization
-// of the cluster is cached, since any one of them may apply an Organization.
+// the ones the reconciler reads. A Kustomization's inventory lists every object
+// it applied, and with the AgentPlatformOrphaned condition on every
+// Kustomization of the cluster is cached, since any one of them may apply an
+// Organization.
 func organizationInventory(o any) (any, error) {
 	u, ok := o.(*unstructured.Unstructured)
 	if !ok {
@@ -510,9 +512,9 @@ func kustomizationChanged() predicate.Funcs {
 			return true
 		}
 		// kustomize-controller patches the conditions several times per
-		// reconcile: only a move into or out of settled, a new inventory or
-		// a new applied revision can change an organization's Orphaned
-		// condition or its last applied revision.
+		// reconcile: only a move into or out of settled, a new inventory or a
+		// new applied revision can change an organization's
+		// AgentPlatformOrphaned condition or its last applied revision.
 		if (unsettled(o) == "") != (unsettled(n) == "") {
 			return true
 		}

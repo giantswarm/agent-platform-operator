@@ -2,6 +2,7 @@ package controller_test
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -42,9 +43,9 @@ func TestOrganizationEnvtest(t *testing.T) {
 		assert.Empty(t, ns.OwnerReferences)
 
 		org = c.get(t, org)
-		assert.Equal(t, ns.Name, ap(org).Namespace)
+		assert.Equal(t, ns.Name, agentsNamespace(org))
 		assert.Equal(t, "s3://"+snapshotBucket+"/"+string(org.UID), ap(org).SnapshotPrefix)
-		ready := meta.FindStatusCondition(org.Status.Conditions, v1alpha1.ConditionReady)
+		ready := meta.FindStatusCondition(org.Status.Conditions, orgv1.AgentPlatformReady)
 		require.NotNil(t, ready)
 		assert.Equal(t, metav1.ConditionTrue, ready.Status)
 		assert.Equal(t, org.Generation, ready.ObservedGeneration)
@@ -80,7 +81,7 @@ func TestOrganizationEnvtest(t *testing.T) {
 		// A spec change reconciles the organization once more; its Ready
 		// condition observes the new generation after that reconcile.
 		org = c.get(t, org)
-		org.Spec.AgentPlatform.Workers = withReplicas(2)
+		org.Spec.Capabilities.AgentPlatform.Workers = withReplicas(2)
 		require.NoError(t, c.admin.Update(t.Context(), org))
 		c.readyAt(t, org, org.Generation)
 
@@ -95,7 +96,7 @@ func TestOrganizationEnvtest(t *testing.T) {
 
 		org := c.organization(t, "nopolicy")
 		require.EventuallyWithT(t, func(ct *assert.CollectT) {
-			ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, v1alpha1.ConditionReady)
+			ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, orgv1.AgentPlatformReady)
 			if assert.NotNil(ct, ready) {
 				assert.Equal(ct, metav1.ConditionFalse, ready.Status)
 				assert.Equal(ct, "SourceMissing", ready.Reason)
@@ -135,12 +136,12 @@ func TestOrganizationEnvtest(t *testing.T) {
 
 		require.EventuallyWithT(t, func(ct *assert.CollectT) {
 			got := c.get(ct, org)
-			ready := meta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionReady)
+			ready := meta.FindStatusCondition(got.Status.Conditions, orgv1.AgentPlatformReady)
 			if assert.NotNil(ct, ready) {
 				assert.Equal(ct, metav1.ConditionFalse, ready.Status)
 				assert.Equal(ct, "NamespaceTerminating", ready.Reason)
 			}
-			assert.Equal(ct, ns.Name, ap(got).Namespace)
+			assert.Equal(ct, ns.Name, agentsNamespace(got))
 		}, timeout, tick)
 		assert.Len(t, c.namespacesOf(t, org), 1, "a terminating namespace was replaced while it still exists")
 	})
@@ -150,7 +151,7 @@ func TestOrganizationEnvtest(t *testing.T) {
 		require.NoError(t, c.admin.Create(t.Context(), none))
 		off := &orgv1.Organization{
 			ObjectMeta: metav1.ObjectMeta{Name: "switched-off"},
-			Spec:       orgv1.OrganizationSpec{AgentPlatform: &orgv1.AgentPlatformSpec{Harnesses: []string{curatedHarness}}},
+			Spec:       orgv1.OrganizationSpec{Capabilities: orgv1.OrganizationCapabilities{AgentPlatform: &orgv1.AgentPlatformSpec{Harnesses: []string{curatedHarness}}}},
 		}
 		require.NoError(t, c.admin.Create(t.Context(), off))
 		// An enabled organization created after both is reconciled, so the
@@ -176,14 +177,14 @@ func TestOrganizationEnvtest(t *testing.T) {
 		var generation int64
 		require.EventuallyWithT(t, func(ct *assert.CollectT) {
 			got := c.get(ct, org)
-			got.Spec.AgentPlatform.Enabled = false
+			got.Spec.Capabilities.AgentPlatform.Enabled = false
 			got.Spec.Admins = []orgv1.OrganizationAdmin{{Kind: orgv1.OrganizationAdminGroup, Name: leadGroup}}
 			if assert.NoError(ct, c.admin.Update(t.Context(), got)) {
 				generation = got.Generation
 			}
 		}, timeout, tick)
 		require.EventuallyWithT(t, func(ct *assert.CollectT) {
-			ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, v1alpha1.ConditionReady)
+			ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, orgv1.AgentPlatformReady)
 			if assert.NotNil(ct, ready) {
 				assert.Equal(ct, metav1.ConditionFalse, ready.Status)
 				assert.Equal(ct, "AgentPlatformDisabled", ready.Reason)
@@ -194,7 +195,7 @@ func TestOrganizationEnvtest(t *testing.T) {
 
 		got := c.get(t, org)
 		assert.Contains(t, got.Finalizers, v1alpha1.Finalizer)
-		assert.Equal(t, ns.Name, ap(got).Namespace)
+		assert.Equal(t, ns.Name, agentsNamespace(got))
 		still := &corev1.Namespace{}
 		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKeyFromObject(ns), still))
 		assert.Nil(t, still.DeletionTimestamp, "the namespace of a switched-off organization is being deleted")
@@ -202,31 +203,44 @@ func TestOrganizationEnvtest(t *testing.T) {
 		c.adminsAre(t, key, group(adminGroup))
 
 		// On again, it is Ready on the same namespace, with the new admins.
-		got.Spec.AgentPlatform.Enabled = true
+		got.Spec.Capabilities.AgentPlatform.Enabled = true
 		require.NoError(t, c.admin.Update(t.Context(), got))
 		c.readyAt(t, got, got.Generation)
 		assert.Equal(t, ns.Name, c.readyNamespace(t, org).Name)
 		c.adminsAre(t, key, group(leadGroup))
 	})
 
-	t.Run("the status fields of another writer stay", func(t *testing.T) {
-		org := c.organization(t, "shared-status")
-		c.readyNamespace(t, org)
-		// organization-operator writes status.namespace, and another
-		// controller a condition of its own.
+	t.Run("the status fields and entries of another field manager stay", func(t *testing.T) {
+		// Before the Agent Platform is on, organization-operator applies, as
+		// its own field manager, status.namespace, its kaas entry of
+		// status.namespaces and a condition of its own.
+		org := &orgv1.Organization{ObjectMeta: metav1.ObjectMeta{Name: "shared-status"}}
+		require.NoError(t, c.admin.Create(t.Context(), org))
+		kaas := orgv1.OrganizationNamespace{Name: "org-shared-status", Capability: orgv1.CapabilityKaaS}
+		raw, err := json.Marshal(struct {
+			Status orgv1.OrganizationStatus `json:"status"`
+		}{orgv1.OrganizationStatus{
+			Namespace:  kaas.Name,
+			Namespaces: []orgv1.OrganizationNamespace{kaas},
+			Conditions: []metav1.Condition{{Type: "KaaSReady", Status: metav1.ConditionTrue, Reason: "Reconciled", LastTransitionTime: metav1.Now()}},
+		}})
+		require.NoError(t, err)
+		applied := &unstructured.Unstructured{}
+		require.NoError(t, json.Unmarshal(raw, &applied.Object))
+		applied.SetGroupVersionKind(orgv1.GroupVersion.WithKind("Organization"))
+		applied.SetName(org.Name)
+		require.NoError(t, c.admin.Status().Apply(t.Context(), client.ApplyConfigurationFromUnstructured(applied),
+			client.FieldOwner("organization-operator"), client.ForceOwnership))
+
+		// On: the operator's first status write adds its entry to both lists.
 		got := c.get(t, org)
-		got.Status.Namespace = "org-shared-status"
-		meta.SetStatusCondition(&got.Status.Conditions, metav1.Condition{Type: "KaaSReady", Status: metav1.ConditionTrue, Reason: "Reconciled"})
-		require.NoError(t, c.admin.Status().Update(t.Context(), got))
-
-		// A spec change makes the operator write its status again.
-		got = c.get(t, org)
-		got.Spec.AgentPlatform.Workers = withReplicas(2)
+		got.Spec.Capabilities.AgentPlatform = &orgv1.AgentPlatformSpec{Enabled: true, Harnesses: []string{curatedHarness}, Workers: withReplicas(1)}
 		require.NoError(t, c.admin.Update(t.Context(), got))
-		c.readyAt(t, got, got.Generation)
+		ns := c.readyNamespace(t, org)
 
 		got = c.get(t, org)
-		assert.Equal(t, "org-shared-status", got.Status.Namespace)
+		assert.Equal(t, kaas.Name, got.Status.Namespace)
+		assert.ElementsMatch(t, []orgv1.OrganizationNamespace{kaas, {Name: ns.Name, Capability: orgv1.CapabilityAgentPlatform}}, got.Status.Namespaces)
 		assert.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, "KaaSReady"), "conditions: %+v", got.Status.Conditions)
 	})
 
@@ -236,13 +250,13 @@ func TestOrganizationEnvtest(t *testing.T) {
 		org := c.organization(t, "squatted")
 		require.EventuallyWithT(t, func(ct *assert.CollectT) {
 			got := c.get(ct, org)
-			ready := meta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionReady)
+			ready := meta.FindStatusCondition(got.Status.Conditions, orgv1.AgentPlatformReady)
 			if assert.NotNil(ct, ready) {
 				assert.Equal(ct, metav1.ConditionFalse, ready.Status)
 				assert.Equal(ct, "NameTaken", ready.Reason)
 				assert.Contains(ct, ready.Message, squatted.Name)
 			}
-			assert.Empty(ct, ap(got).Namespace)
+			assert.Empty(ct, agentsNamespace(got))
 		}, timeout, tick)
 		ns := &corev1.Namespace{}
 		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKeyFromObject(squatted), ns))
@@ -263,12 +277,12 @@ func TestOrganizationEnvtest(t *testing.T) {
 			org := c.organization(t, name)
 			require.EventuallyWithT(t, func(ct *assert.CollectT) {
 				got := c.get(ct, org)
-				ready := meta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionReady)
+				ready := meta.FindStatusCondition(got.Status.Conditions, orgv1.AgentPlatformReady)
 				if assert.NotNil(ct, ready) {
 					assert.Equal(ct, metav1.ConditionFalse, ready.Status)
 					assert.Equal(ct, "NamespaceNameInvalid", ready.Reason)
 				}
-				assert.Empty(ct, ap(got).Namespace)
+				assert.Empty(ct, agentsNamespace(got))
 			}, timeout, tick, name)
 			err := c.admin.Get(t.Context(), client.ObjectKey{Name: controller.NamespacePrefix + name}, &corev1.Namespace{})
 			assert.True(t, apierrors.IsNotFound(err), "%s: %v", name, err)
@@ -293,13 +307,13 @@ func (c *cluster) organization(t *testing.T, name string) *orgv1.Organization {
 }
 
 // organizationWith creates an Organization named name whose
-// spec.agentPlatform is spec, with the switch on.
+// spec.capabilities.agentPlatform is spec, with the switch on.
 func (c *cluster) organizationWith(t *testing.T, name string, spec orgv1.AgentPlatformSpec) *orgv1.Organization {
 	t.Helper()
 	spec.Enabled = true
 	org := &orgv1.Organization{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
-		Spec:       orgv1.OrganizationSpec{AgentPlatform: &spec},
+		Spec:       orgv1.OrganizationSpec{Capabilities: orgv1.OrganizationCapabilities{AgentPlatform: &spec}},
 	}
 	require.NoError(t, c.admin.Create(t.Context(), org))
 	return org
@@ -311,11 +325,11 @@ func (c *cluster) readyNamespace(t *testing.T, org *orgv1.Organization) *corev1.
 	ns := &corev1.Namespace{}
 	require.EventuallyWithT(t, func(ct *assert.CollectT) {
 		got := c.get(ct, org)
-		if !assert.NotEmpty(ct, ap(got).Namespace) {
+		if !assert.NotEmpty(ct, agentsNamespace(got)) {
 			return
 		}
-		assert.True(ct, meta.IsStatusConditionTrue(got.Status.Conditions, v1alpha1.ConditionReady), "conditions: %+v", got.Status.Conditions)
-		assert.NoError(ct, c.admin.Get(t.Context(), client.ObjectKey{Name: ap(got).Namespace}, ns))
+		assert.True(ct, meta.IsStatusConditionTrue(got.Status.Conditions, orgv1.AgentPlatformReady), "conditions: %+v", got.Status.Conditions)
+		assert.NoError(ct, c.admin.Get(t.Context(), client.ObjectKey{Name: agentsNamespace(got)}, ns))
 	}, timeout, tick)
 	return ns
 }
@@ -324,7 +338,7 @@ func (c *cluster) readyNamespace(t *testing.T, org *orgv1.Organization) *corev1.
 func (c *cluster) readyAt(t *testing.T, org *orgv1.Organization, generation int64) {
 	t.Helper()
 	require.EventuallyWithT(t, func(ct *assert.CollectT) {
-		ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, v1alpha1.ConditionReady)
+		ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, orgv1.AgentPlatformReady)
 		if assert.NotNil(ct, ready) {
 			assert.Equal(ct, metav1.ConditionTrue, ready.Status)
 			assert.Equal(ct, generation, ready.ObservedGeneration)
@@ -339,13 +353,34 @@ func (c *cluster) get(t require.TestingT, org *orgv1.Organization) *orgv1.Organi
 	return got
 }
 
-// ap is org's status.agentPlatform, the zero value before the operator
-// wrote it.
+// ap is org's status.capabilities.agentPlatform, the zero value before the
+// operator wrote it.
 func ap(org *orgv1.Organization) orgv1.AgentPlatformStatus {
-	if org.Status.AgentPlatform == nil {
+	if org.Status.Capabilities.AgentPlatform == nil {
 		return orgv1.AgentPlatformStatus{}
 	}
-	return *org.Status.AgentPlatform
+	return *org.Status.Capabilities.AgentPlatform
+}
+
+// agentsNamespace is the name of the agentPlatform entry of org's
+// status.namespaces, "" before the operator wrote it.
+func agentsNamespace(org *orgv1.Organization) string {
+	for _, ns := range org.Status.Namespaces {
+		if ns.Capability == orgv1.CapabilityAgentPlatform {
+			return ns.Name
+		}
+	}
+	return ""
+}
+
+// erasureStep is the reason of org's AgentPlatformErasing condition while it
+// is True, "" before the erasure.
+func erasureStep(org *orgv1.Organization) string {
+	erasing := meta.FindStatusCondition(org.Status.Conditions, orgv1.AgentPlatformErasing)
+	if erasing == nil || erasing.Status != metav1.ConditionTrue {
+		return ""
+	}
+	return erasing.Reason
 }
 
 // namespacesOf are the namespaces labelled with org's UID.

@@ -148,7 +148,7 @@ func erasureCases(t *testing.T, c *cluster) {
 		})
 	})
 
-	t.Run("a failing erasure step keeps Ready=False Deleting with the step and is retried", func(t *testing.T) {
+	t.Run("a failing erasure step keeps AgentPlatformReady=False Deleting with the step and is retried", func(t *testing.T) {
 		org := c.organization(t, "erase-fail")
 		ns := c.readyNamespace(t, org).Name
 		prefix := ap(c.get(t, org)).SnapshotPrefix
@@ -158,8 +158,8 @@ func erasureCases(t *testing.T, c *cluster) {
 
 		require.EventuallyWithT(t, func(ct *assert.CollectT) {
 			got := c.get(ct, org)
-			assert.Equal(ct, orgv1.AgentPlatformErasureSnapshots, ap(got).ErasureStep)
-			ready := meta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionReady)
+			assert.Equal(ct, orgv1.AgentPlatformErasingSnapshots, erasureStep(got))
+			ready := meta.FindStatusCondition(got.Status.Conditions, orgv1.AgentPlatformReady)
 			if assert.NotNil(ct, ready) {
 				assert.Equal(ct, metav1.ConditionFalse, ready.Status)
 				assert.Equal(ct, "Deleting", ready.Reason)
@@ -174,6 +174,16 @@ func erasureCases(t *testing.T, c *cluster) {
 		assert.NotEmpty(t, c.namespacesOf(t, org), "the namespace went while the snapshots were not erased")
 
 		c.bucket.failWith(prefix, nil)
+		// The first delete that succeeds turns AgentPlatformSnapshotsErased
+		// True at its time, which the second delete waits from.
+		require.EventuallyWithT(t, func(ct *assert.CollectT) {
+			erased := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, orgv1.AgentPlatformSnapshotsErased)
+			deletions := all(c.log.of(prefix), evSnapshotsDeleted)
+			if assert.NotNil(ct, erased) && assert.NotEmpty(ct, deletions) {
+				assert.Equal(ct, metav1.ConditionTrue, erased.Status)
+				assert.WithinDuration(ct, deletions[0].at, erased.LastTransitionTime.Time, 2*time.Second)
+			}
+		}, timeout, tick)
 		c.gone(t, org)
 		c.deletedTwice(t, c.log.of(prefix))
 	})
@@ -222,7 +232,7 @@ func erasureCases(t *testing.T, c *cluster) {
 
 		require.NoError(t, c.admin.Delete(t.Context(), org))
 		require.EventuallyWithT(t, func(ct *assert.CollectT) {
-			ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, v1alpha1.ConditionReady)
+			ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, orgv1.AgentPlatformReady)
 			if assert.NotNil(ct, ready) {
 				assert.Equal(ct, "Deleting", ready.Reason)
 				assert.Contains(ct, ready.Message, "the namespace "+ns+" does not carry "+v1alpha1.OrganizationUIDLabel)
@@ -249,10 +259,10 @@ func erasureCases(t *testing.T, c *cluster) {
 		c.sessions.add(ns, "erin@example.com", "88888888-8888-8888-8888-888888888888")
 		c.bucket.objects[prefix] = 1
 		got := c.get(t, org)
-		got.Spec.AgentPlatform.Enabled = false
+		got.Spec.Capabilities.AgentPlatform.Enabled = false
 		require.NoError(t, c.admin.Update(t.Context(), got))
 		require.EventuallyWithT(t, func(ct *assert.CollectT) {
-			ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, v1alpha1.ConditionReady)
+			ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, orgv1.AgentPlatformReady)
 			if assert.NotNil(ct, ready) {
 				assert.Equal(ct, "AgentPlatformDisabled", ready.Reason)
 			}
@@ -536,7 +546,9 @@ type observed struct {
 // controllers envtest does not run: it removes the hold finalizer from each
 // of held once its deletion is recorded, and finalizes the organization
 // namespace. It also records each change of the WorkerPool copy's replicas,
-// and counts the workloads left at the first session listing.
+// the first one before it returns, so the replicas before the deletion are
+// recorded however soon the erasure scales the pool, and counts the
+// workloads left at the first session listing.
 func (c *cluster) observeErasure(t *testing.T, org *orgv1.Organization, ns string, held ...client.Object) *observed {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -558,10 +570,21 @@ func (c *cluster) observeErasure(t *testing.T, org *orgv1.Organization, ns strin
 		<-done
 		c.sessions.onList = nil
 	})
+	replicas := int64(-1)
+	recordReplicas := func(ctx context.Context) {
+		pool := &unstructured.Unstructured{}
+		pool.SetGroupVersionKind(poolGVK)
+		if err := c.admin.Get(ctx, client.ObjectKey{Namespace: ns, Name: curatedPool}, pool); err == nil {
+			if n, _, _ := unstructured.NestedInt64(pool.Object, "spec", "replicas"); n != replicas {
+				c.log.add(evWorkers, ns, fmt.Sprint(n))
+				replicas = n
+			}
+		}
+	}
+	recordReplicas(ctx)
 	go func() {
 		defer close(done)
 		recorded := map[string]bool{}
-		replicas := int64(-1)
 		for {
 			select {
 			case <-ctx.Done():
@@ -588,14 +611,7 @@ func (c *cluster) observeErasure(t *testing.T, org *orgv1.Organization, ns strin
 				namespace.Spec.Finalizers = nil
 				_ = c.admin.SubResource("finalize").Update(ctx, namespace)
 			}
-			pool := &unstructured.Unstructured{}
-			pool.SetGroupVersionKind(poolGVK)
-			if err := c.admin.Get(ctx, client.ObjectKey{Namespace: ns, Name: curatedPool}, pool); err == nil {
-				if n, _, _ := unstructured.NestedInt64(pool.Object, "spec", "replicas"); n != replicas {
-					c.log.add(evWorkers, ns, fmt.Sprint(n))
-					replicas = n
-				}
-			}
+			recordReplicas(ctx)
 		}
 	}()
 	return seen
