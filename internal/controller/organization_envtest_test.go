@@ -146,7 +146,7 @@ func TestOrganizationEnvtest(t *testing.T) {
 		// again on its own (MigrationPoll) and moves.
 		require.NoError(t, c.admin.Create(t.Context(), &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
 			Namespace: ns.Name, Name: controller.DefaultMigrationReport,
-			Annotations: map[string]string{controller.MigrationReadyAnnotation: "2"},
+			Annotations: map[string]string{controller.MigrationReadyAnnotation: "2", controller.MigrationReadyReleasesAnnotation: "triage"},
 		}}))
 		c.eventually(t, ociGVK, ns.Name, agentChart, func(ct *assert.CollectT, u *unstructured.Unstructured) {
 			ref, _, _ := unstructured.NestedMap(u.Object, "spec", "ref")

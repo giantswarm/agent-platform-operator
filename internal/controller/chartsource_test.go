@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -201,14 +202,30 @@ func chartRelease(name, source string) *unstructured.Unstructured {
 	return u
 }
 
+// deployed is a release that last deployed chart version.
+func deployed(hr *unstructured.Unstructured, version string) *unstructured.Unstructured {
+	_ = unstructured.SetNestedSlice(hr.Object, []any{map[string]any{"chartVersion": version, "status": "deployed"}}, "status", "history")
+	return hr
+}
+
 // migrateReport is agent-manager migrate's report in chartNS, marked ready
-// for major when it is not empty.
-func migrateReport(major string) *corev1.ConfigMap {
+// for major, naming releases, when major is not empty.
+func migrateReport(major string, releases ...string) *corev1.ConfigMap {
 	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: chartNS, Name: DefaultMigrationReport}}
 	if major != "" {
-		cm.Annotations = map[string]string{MigrationReadyAnnotation: major}
+		cm.Annotations = map[string]string{MigrationReadyAnnotation: major, MigrationReadyReleasesAnnotation: strings.Join(releases, ",")}
 	}
 	return cm
+}
+
+// gateScheme knows ConfigMaps and the HelmRelease as unstructured.
+func gateScheme(t *testing.T) *runtime.Scheme {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	scheme.AddKnownTypeWithName(testHelmReleaseGVK, &unstructured.Unstructured{})
+	scheme.AddKnownTypeWithName(testHelmReleaseGVK.GroupVersion().WithKind("HelmReleaseList"), &unstructured.UnstructuredList{})
+	return scheme
 }
 
 // A move of an organization's chart source to a higher major waits for
@@ -234,7 +251,16 @@ func TestEnsureChartSourceWaitsForMigrateAcrossAMajor(t *testing.T) {
 		{name: "a report marked for the old major: held", semver: v3, from: v2Ref,
 			objects: []client.Object{chartRelease("triage", chart.Name()), migrateReport("2")}, mentions: "ready for 2.x only"},
 		{name: "a report marked for the new major: moved", semver: v3, from: v2Ref,
-			objects: []client.Object{chartRelease("triage", chart.Name()), migrateReport("3")}, moved: true},
+			objects: []client.Object{chartRelease("triage", chart.Name()), migrateReport("3", "triage")}, moved: true},
+		{name: "a release created after migrate's run: held", semver: v3, from: v2Ref,
+			objects:  []client.Object{chartRelease("triage", chart.Name()), chartRelease("late", chart.Name()), migrateReport("3", "triage")},
+			mentions: "HelmReleases [late] on the source were created after that run"},
+		{name: "a release of another kind with the source's name does not count", semver: v3, from: v2Ref,
+			objects: []client.Object{func() client.Object {
+				hr := chartRelease("chart", chart.Name())
+				_ = unstructured.SetNestedField(hr.Object, "HelmChart", "spec", "chartRef", "kind")
+				return hr
+			}()}, moved: true},
 		{name: "no release on the source: moved without a report", semver: v3, from: v2Ref,
 			objects: []client.Object{chartRelease("dashboards", "dashboards")}, moved: true},
 		{name: "a move within a major never waits", semver: chartRange, from: map[string]any{fieldSemver: "2.6.x"},
@@ -246,10 +272,7 @@ func TestEnsureChartSourceWaitsForMigrateAcrossAMajor(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			scheme := runtime.NewScheme()
-			require.NoError(t, corev1.AddToScheme(scheme))
-			scheme.AddKnownTypeWithName(testHelmReleaseGVK, &unstructured.Unstructured{})
-			scheme.AddKnownTypeWithName(testHelmReleaseGVK.GroupVersion().WithKind("HelmReleaseList"), &unstructured.UnstructuredList{})
+			scheme := gateScheme(t)
 			spec := chartSpec(map[string]any{fieldURL: "oci://old.example.com/charts/giantswarm/agent", fieldRef: tc.from})
 			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(append(tc.objects, chartCopy(ownLabels(ScopeNamespace), spec))...).Build()
 			cfg := chart
@@ -313,4 +336,76 @@ func TestRequeueAfter(t *testing.T) {
 	assert.Zero(t, requeueAfter(nil))
 	assert.Zero(t, requeueAfter(errors.Join(errors.New("failed"), &notReadyError{reason: reasonNameTaken})))
 	assert.Equal(t, time.Second, requeueAfter(errors.Join(&notReadyError{requeueAfter: time.Minute}, &notReadyError{requeueAfter: time.Second})))
+}
+
+// A configured range of no release major or of several creates and moves
+// nothing and says so (ChartRangeInvalid), never waiting silently for a mark
+// migrate cannot write (D-GO-29).
+func TestEnsureChartSourceRefusesARangeOfNoneOrSeveralMajors(t *testing.T) {
+	for rng, mentions := range map[string]string{
+		"3.0.0-rc.1":     "admits no release version",
+		"not a range":    "admits no release version",
+		">=2.6.0":        "admits majors [2 3 4",
+		"2.6.0 || 3.0.1": "admits majors [2 3]",
+	} {
+		t.Run(rng, func(t *testing.T) {
+			from := map[string]any{fieldSemver: v2Line}
+			c := fake.NewClientBuilder().WithScheme(gateScheme(t)).WithObjects(chartCopy(ownLabels(ScopeNamespace), chartSpec(map[string]any{fieldRef: from}))).Build()
+			cfg := chart
+			cfg.Semver = rng
+			r := &OrganizationReconciler{Client: c, Config: Config{Chart: cfg, Erasure: ErasureConfig{HelmRelease: testHelmReleaseGVK}}}
+			err := r.ensureChartSource(t.Context(), chartNS)
+			var nr *notReadyError
+			require.ErrorAs(t, err, &nr)
+			assert.Equal(t, reasonChartRangeInvalid, nr.reason)
+			assert.Contains(t, nr.message, mentions)
+			got := chartCopy(nil, nil)
+			require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(got), got))
+			ref, _, _ := unstructured.NestedMap(got.Object, "spec", fieldRef)
+			assert.Equal(t, from, ref, "the ref stays")
+
+			// Missing, it is not created on such a range.
+			c = fake.NewClientBuilder().WithScheme(gateScheme(t)).Build()
+			r.Client = c
+			require.ErrorAs(t, r.ensureChartSource(t.Context(), chartNS), &nr)
+			assert.Equal(t, reasonChartRangeInvalid, nr.reason)
+			assert.Error(t, c.Get(t.Context(), client.ObjectKeyFromObject(got), chartCopy(nil, nil)))
+		})
+	}
+}
+
+// A recreated source (missing while releases use it) waits for migrate's
+// mark when a release there last deployed a lower major (D-GO-29).
+func TestEnsureChartSourceRecreatedWaitsForMigrate(t *testing.T) {
+	const v3 = ">=3.0.0 <4.0.0"
+	for name, tc := range map[string]struct {
+		semver  string
+		objects []client.Object
+		created bool
+	}{
+		"a release on 2.x, no mark: not created": {v3, []client.Object{deployed(chartRelease("triage", chart.Name()), "2.6.1")}, false},
+		"a release on 2.x, marked: created":      {v3, []client.Object{deployed(chartRelease("triage", chart.Name()), "2.6.1"), migrateReport("3", "triage")}, true},
+		"a release already on 3.x: created":      {v3, []client.Object{deployed(chartRelease("triage", chart.Name()), "3.0.0")}, true},
+		"a release never deployed: created":      {v3, []client.Object{chartRelease("triage", chart.Name())}, true},
+		"within a major nothing waits":           {chartRange, []client.Object{deployed(chartRelease("triage", chart.Name()), "2.6.1")}, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := fake.NewClientBuilder().WithScheme(gateScheme(t)).WithObjects(tc.objects...).Build()
+			cfg := chart
+			cfg.Semver = tc.semver
+			r := &OrganizationReconciler{Client: c, Config: Config{Chart: cfg, Erasure: ErasureConfig{HelmRelease: testHelmReleaseGVK}}}
+			err := r.ensureChartSource(t.Context(), chartNS)
+			getErr := c.Get(t.Context(), client.ObjectKeyFromObject(chartCopy(nil, nil)), chartCopy(nil, nil))
+			if tc.created {
+				require.NoError(t, err)
+				require.NoError(t, getErr)
+				return
+			}
+			var nr *notReadyError
+			require.ErrorAs(t, err, &nr)
+			assert.Equal(t, reasonChartSourceHeld, nr.reason)
+			assert.Contains(t, nr.message, "HelmReleases on it: [triage]")
+			assert.Error(t, getErr, "not created")
+		})
+	}
 }

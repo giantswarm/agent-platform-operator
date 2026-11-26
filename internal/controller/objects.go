@@ -214,15 +214,35 @@ func (r *OrganizationReconciler) ensureScoped(ctx context.Context, ns, scope str
 // not Ready (reason ChartSourceHeld) and looks again after MigrationPoll. A
 // release still on the old major's values would otherwise fail every upgrade
 // on the new chart (agent chart 3.0 refuses muster.requireApproval) and stay
-// on its old revision until edited by hand.
+// on its old revision until edited by hand. A missing source whose
+// namespace has releases deployed from a lower major is not created until
+// the same mark. A configured range of no or several majors creates and
+// moves nothing (reason ChartRangeInvalid).
 func (r *OrganizationReconciler) ensureChartSource(ctx context.Context, ns string) error {
 	want := r.Config.Chart.object(ns)
 	wantLabels := stamp(want, ns, ScopeNamespace, "")
 	kind := want.GetKind()
+	poll := r.Config.Chart.MigrationPoll
+	if poll <= 0 {
+		poll = DefaultMigrationPoll
+	}
+	target, invalid := r.Config.Chart.targetMajor(ns)
 	existing := object(want.GroupVersionKind())
 	err := r.Client.Get(ctx, client.ObjectKeyFromObject(want), existing)
 	switch {
 	case apierrors.IsNotFound(err):
+		if invalid != nil {
+			return invalid
+		}
+		// A recreated source: releases deployed from a lower major still
+		// wait for migrate's mark, as a move of the source would.
+		ready, why, err := r.migrationReady(ctx, ns, want.GetName(), target, true)
+		if err != nil {
+			return err
+		}
+		if !ready {
+			return chartSourceHeld(ns, want.GetName(), target, why, poll)
+		}
 		return r.create(ctx, want, kind)
 	case err != nil:
 		return fmt.Errorf("get %s %s/%s: %w", kind, ns, want.GetName(), err)
@@ -239,20 +259,21 @@ func (r *OrganizationReconciler) ensureChartSource(ctx context.Context, ns strin
 	var held error
 	if !reflect.DeepEqual(spec[fieldRef], wantSpec[fieldRef]) {
 		have, _ := spec[fieldRef].(map[string]any)
-		if major := r.Config.Chart.majorMove(have); major > 0 {
-			ready, why, err := r.migrationReady(ctx, ns, want.GetName(), major)
+		switch {
+		case invalid != nil:
+			held = invalid
+		case crossesMajor(have, target):
+			ready, why, err := r.migrationReady(ctx, ns, want.GetName(), target, false)
 			if err != nil {
 				return err
 			}
 			if !ready {
-				poll := r.Config.Chart.MigrationPoll
-				if poll <= 0 {
-					poll = DefaultMigrationPoll
-				}
-				held = chartSourceHeld(ns, want.GetName(), major, why, poll)
-				wantSpec = maps.Clone(wantSpec)
-				wantSpec[fieldRef] = spec[fieldRef]
+				held = chartSourceHeld(ns, want.GetName(), target, why, poll)
 			}
+		}
+		if held != nil {
+			wantSpec = maps.Clone(wantSpec)
+			wantSpec[fieldRef] = spec[fieldRef]
 		}
 	}
 	labels := copiedLabels(existing.GetLabels(), wantLabels, false)
