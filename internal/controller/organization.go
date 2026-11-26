@@ -466,9 +466,9 @@ func platformStatus(org *orgv1.Organization) orgv1.AgentPlatformStatus {
 	return *org.Status.Capabilities.AgentPlatform
 }
 
-// platformNamespace is the name of the agentPlatform entry of org's
+// organizationNamespace is the name of the agentPlatform entry of org's
 // status.namespaces, "" when it has none.
-func platformNamespace(org *orgv1.Organization) string {
+func organizationNamespace(org *orgv1.Organization) string {
 	for _, ns := range org.Status.Namespaces {
 		if ns.Capability == orgv1.CapabilityAgentPlatform {
 			return ns.Name
@@ -491,7 +491,7 @@ type orgState struct {
 
 // stateOf is a copy of the part of org's status the reconciler writes.
 func stateOf(org *orgv1.Organization) *orgState {
-	s := &orgState{Namespace: platformNamespace(org)}
+	s := &orgState{Namespace: organizationNamespace(org)}
 	if ap := org.Status.Capabilities.AgentPlatform; ap != nil {
 		ap.DeepCopyInto(&s.AgentPlatformStatus)
 	}
@@ -507,7 +507,7 @@ func (s *orgState) applyTo(org *orgv1.Organization) {
 	ap := s.AgentPlatformStatus
 	org.Status.Capabilities.AgentPlatform = ap.DeepCopy()
 	org.Status.Conditions = s.Conditions
-	if s.Namespace == "" || platformNamespace(org) == s.Namespace {
+	if s.Namespace == "" || organizationNamespace(org) == s.Namespace {
 		return
 	}
 	namespaces := make([]orgv1.OrganizationNamespace, 0, len(org.Status.Namespaces)+1)

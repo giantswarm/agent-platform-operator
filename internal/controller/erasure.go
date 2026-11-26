@@ -227,16 +227,16 @@ func (r *OrganizationReconciler) eraseStep(ctx context.Context, org *orgv1.Organ
 func (r *OrganizationReconciler) erasedNamespace(ctx context.Context, org *orgv1.Organization) (string, error) {
 	name, err := namespaceName(org)
 	if err != nil {
-		return platformNamespace(org), nil //nolint:nilerr // such an organization never had a namespace
+		return organizationNamespace(org), nil //nolint:nilerr // such an organization never had a namespace
 	}
 	ns := &corev1.Namespace{}
 	if err := r.APIReader.Get(ctx, client.ObjectKey{Name: name}, ns); apierrors.IsNotFound(err) {
-		return platformNamespace(org), nil
+		return organizationNamespace(org), nil
 	} else if err != nil {
 		return "", fmt.Errorf("get the namespace %s: %w", name, err)
 	}
 	if ns.Labels[v1alpha1.OrganizationUIDLabel] != string(org.UID) {
-		if platformNamespace(org) == "" {
+		if organizationNamespace(org) == "" {
 			// The organization never had it: the name was taken before.
 			return "", nil
 		}

@@ -120,7 +120,7 @@
             "properties": {
                 "enabled": {
                     "type": "boolean",
-                    "description": "Copy the curated objects of `platformNamespace`, read-only, into every organization namespace: the Harnesses an organization's `spec.harnesses` names (pointed at its own pool and snapshot prefix, kagent memory off), the WorkerPool `workerPool` with its ServiceAccount, the Agents and AgentTemplates labelled `agent-platform.giantswarm.io/curated: \"true\"` (their template's `modelConfig` set to the organization's default ModelConfig) and the curated RemoteMCPServers they name, each only when every object it refers to is copied too. Needs `snapshots.bucket`, `erasure.kagent.target`, `erasure.substrate.target` and an API server that serves `kagentApiVersion` and `workerPoolApiVersion`."
+                    "description": "Copy the curated objects of `platformNamespace`, read-only, into every organization namespace: the Harnesses an organization's `spec.capabilities.agentPlatform.harnesses` names (pointed at its own pool and snapshot prefix, kagent memory off), the WorkerPool `workerPool` with its ServiceAccount, the Agents and AgentTemplates labelled `agent-platform.giantswarm.io/curated: \"true\"` (their template's `modelConfig` set to the organization's default ModelConfig) and the curated RemoteMCPServers they name, each only when every object it refers to is copied too. Needs `snapshots.bucket`, `erasure.kagent.target`, `erasure.substrate.target` and an API server that serves `kagentApiVersion` and `workerPoolApiVersion`."
                 },
                 "kagentApiVersion": {
                     "type": "string",
@@ -158,7 +158,7 @@
                         },
                         "target": {
                             "type": "string",
-                            "description": "The kagent controller's gRPC API (`grpc://host:port` or `grpcs://host[:port]`), through which cleanup deletes a deleted organization's sessions, and the worker replica rule asks whether an organization with a ModelConfig and no Agent still has a session, as the operator's ServiceAccount. While it cannot answer, such an organization keeps its workers and is not Ready. Empty skips them; required with `curated.enabled`."
+                            "description": "The kagent controller's gRPC API (`grpc://host:port` or `grpcs://host[:port]`), through which cleanup deletes a deleted organization's sessions, and the worker replica rule asks whether an organization with a ModelConfig and no Agent still has a session, as the operator's ServiceAccount. While it cannot answer, such an organization keeps its workers and is `AgentPlatformReady=False`. Empty skips them; required with `curated.enabled`."
                         }
                     }
                 },
@@ -527,7 +527,7 @@
             "properties": {
                 "bucket": {
                     "type": "string",
-                    "description": "Bucket of the organizations' worker snapshots: an organization's `status.snapshotPrefix` is `s3://<bucket>/<uid>`. Empty leaves it empty."
+                    "description": "Bucket of the organizations' worker snapshots: an organization's `status.capabilities.agentPlatform.snapshotPrefix` is `s3://<bucket>/<uid>`. Empty leaves it empty."
                 },
                 "credentials": {
                     "type": "object",
