@@ -33,11 +33,19 @@ type ChartSource struct {
 	APIVersion   string
 }
 
+// The OCIRepository fields ChartSource derives.
+const (
+	fieldURL      = "url"
+	fieldInterval = "interval"
+	fieldRef      = "ref"
+	fieldSemver   = "semver"
+)
+
 // Name is the OCIRepository's name: the chart's.
 func (c ChartSource) Name() string { return path.Base(c.URL) }
 
 func (c ChartSource) object(ns string) *unstructured.Unstructured {
-	ref := map[string]any{"semver": c.Semver}
+	ref := map[string]any{fieldSemver: c.Semver}
 	if c.SemverFilter != "" {
 		ref["semverFilter"] = c.SemverFilter
 	}
@@ -46,9 +54,9 @@ func (c ChartSource) object(ns string) *unstructured.Unstructured {
 		fieldKind:    "OCIRepository",
 		"metadata":   map[string]any{fieldName: c.Name(), fieldNamespace: ns},
 		"spec": map[string]any{
-			"interval": c.Interval,
-			"url":      c.URL,
-			"ref":      ref,
+			fieldInterval: c.Interval,
+			fieldURL:      c.URL,
+			fieldRef:      ref,
 		},
 	}}
 }
@@ -180,19 +188,55 @@ func (r *OrganizationReconciler) ensureScoped(ctx context.Context, ns, scope str
 	return nil
 }
 
-// ensureExists creates obj when nothing of its name exists and never changes
-// it after: the agent chart's source moves to another range only through a
-// migration, as in agent-manager.
-func (r *OrganizationReconciler) ensureExists(ctx context.Context, ns string, obj *unstructured.Unstructured) error {
-	stamp(obj, ns, ScopeNamespace, "")
-	err := r.Client.Get(ctx, client.ObjectKeyFromObject(obj), object(obj.GroupVersionKind()))
-	if err == nil {
+// ensureChartSource keeps the agent chart's OCIRepository in ns at
+// Config.Chart. It creates it, and on every reconcile brings the fields the
+// operator derives (spec.url, spec.interval and the whole spec.ref) back to
+// the configured ones, so a platform release that moves the chart (another
+// registry, range or filter) reaches every organization, not only new ones.
+// Every other spec field, label and annotation stays as it is, and a source
+// at the configured spec is not written. An object of that name the operator
+// did not write is left alone. No organization pins its own chart: the
+// AgentPlatformOrganization has no such field, and only the operator writes
+// the source.
+func (r *OrganizationReconciler) ensureChartSource(ctx context.Context, ns string) error {
+	want := r.Config.Chart.object(ns)
+	wantLabels := stamp(want, ns, ScopeNamespace, "")
+	kind := want.GetKind()
+	existing := object(want.GroupVersionKind())
+	err := r.Client.Get(ctx, client.ObjectKeyFromObject(want), existing)
+	switch {
+	case apierrors.IsNotFound(err):
+		return r.create(ctx, want, kind)
+	case err != nil:
+		return fmt.Errorf("get %s %s/%s: %w", kind, ns, want.GetName(), err)
+	}
+	if existing.GetLabels()[ObjectLabel] != ScopeNamespace {
+		logf.FromContext(ctx).V(1).Info("leaving an object the reconciler did not write", "namespace", ns, "kind", kind, "name", want.GetName())
 		return nil
 	}
-	if !apierrors.IsNotFound(err) {
-		return fmt.Errorf("get %s %s/%s: %w", obj.GetKind(), ns, obj.GetName(), err)
+	spec, _ := existing.Object["spec"].(map[string]any)
+	if spec == nil {
+		spec = map[string]any{}
 	}
-	return r.create(ctx, obj, obj.GetKind())
+	wantSpec, _ := want.Object["spec"].(map[string]any)
+	labels := copiedLabels(existing.GetLabels(), wantLabels, false)
+	same := maps.Equal(labels, existing.GetLabels())
+	for k, v := range wantSpec {
+		same = same && reflect.DeepEqual(spec[k], v)
+	}
+	if same {
+		return nil
+	}
+	from := map[string]any{fieldURL: spec[fieldURL], fieldRef: spec[fieldRef], fieldInterval: spec[fieldInterval]}
+	maps.Copy(spec, wantSpec)
+	existing.Object["spec"] = spec
+	existing.SetLabels(labels)
+	if err := r.Client.Update(ctx, existing, client.FieldOwner(fieldManager)); err != nil {
+		return fmt.Errorf("update %s %s/%s: %w", kind, ns, want.GetName(), err)
+	}
+	logf.FromContext(ctx).Info("organization chart source updated", "namespace", ns, "kind", kind, "name", want.GetName(),
+		"from", from, "to", wantSpec)
+	return nil
 }
 
 // contains reports whether every field of want is in have with the same

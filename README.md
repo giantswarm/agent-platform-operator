@@ -53,7 +53,7 @@ The operator finds the namespace by the `organization-uid` label, never by its n
 In the namespace the operator keeps, from the first reconcile on:
 
 - the network policies `networkPolicy.names`, copied from `platformNamespace`;
-- the agent chart's OCIRepository (`agentChart.*`), named after the chart (`agent`);
+- the agent chart's OCIRepository (`agentChart.*`), named after the chart (`agent`). Every reconcile brings its `spec.url`, `spec.interval` and `spec.ref` back to `agentChart.*`, so a changed chart URL, range or filter reaches existing organizations too; its other fields and labels stay. Organizations do not pin their own chart version;
 - the Helm ServiceAccount `helmReleaseServiceAccount`, which the organization's HelmReleases run as, with a RoleBinding to the ClusterRole `agent-platform-tenant-flux`;
 - a mirror of each admin binding in the parent namespace: the same name, the roleRef `agent-platform:organizations-admin`, and the `User` and `Group` subjects only. The operator skips ServiceAccount subjects and subjects whose name starts with `system:`. A subject that leaves the parent binding leaves the mirror, and the mirror goes when the parent binding goes or its deletion starts (a finalizer may hold it). These parent bindings are mirrored:
   - every RoleBinding to the ClusterRole `agent-platform:organizations-admin`;

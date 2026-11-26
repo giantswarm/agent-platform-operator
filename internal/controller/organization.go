@@ -12,7 +12,8 @@
 // In the namespace the reconciler keeps, from the first reconcile on:
 //
 //   - the network policies copied from the platform namespace;
-//   - the agent chart's OCIRepository;
+//   - the agent chart's OCIRepository, whose url, interval and ref follow
+//     Config.Chart (ensureChartSource);
 //   - the Helm ServiceAccount the organization's HelmReleases run as, with its
 //     RoleBinding to the ClusterRole Config.HelmClusterRole
 //     (agent-platform-tenant-flux by default);
@@ -412,7 +413,7 @@ func (r *OrganizationReconciler) reconcile(ctx context.Context, org *v1alpha1.Ag
 	}
 	var errs []error
 	if r.Config.Chart.URL != "" {
-		errs = append(errs, r.ensureExists(ctx, ns.Name, r.Config.Chart.object(ns.Name)))
+		errs = append(errs, r.ensureChartSource(ctx, ns.Name))
 	}
 	if sa := r.Config.HelmServiceAccount; sa != "" {
 		errs = append(errs, r.ensureServiceAccount(ctx, ns.Name, sa, ScopeNamespace), r.ensureHelmRoleBinding(ctx, ns.Name))

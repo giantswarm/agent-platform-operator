@@ -77,6 +77,48 @@ func TestOrganizationEnvtest(t *testing.T) {
 		assert.Equal(t, []rbacv1.Subject{{Kind: rbacv1.ServiceAccountKind, Name: helmSA, Namespace: ns.Name}}, rb.Subjects)
 	})
 
+	t.Run("the chart source follows the operator's configuration", func(t *testing.T) {
+		org := c.organization(t, "org-chart", "chart")
+		ns := c.readyNamespace(t, org)
+
+		// The copy an older operator release wrote: another registry and
+		// range, plus a field and a label the operator does not derive.
+		oci := c.read(t, ociGVK, ns.Name, agentChart)
+		require.NoError(t, unstructured.SetNestedField(oci.Object, "oci://old.example.com/charts/agent", "spec", "url"))
+		require.NoError(t, unstructured.SetNestedMap(oci.Object, map[string]any{"semver": "1.x", "semverFilter": "-dev"}, "spec", "ref"))
+		require.NoError(t, unstructured.SetNestedField(oci.Object, "5m", "spec", "interval"))
+		require.NoError(t, unstructured.SetNestedField(oci.Object, true, "spec", "insecure"))
+		labels := oci.GetLabels()
+		labels["example.com/note"] = "kept"
+		oci.SetLabels(labels)
+		require.NoError(t, c.admin.Update(t.Context(), oci))
+
+		c.poke(t, org)
+		oci = c.eventually(t, ociGVK, ns.Name, agentChart, func(ct *assert.CollectT, u *unstructured.Unstructured) {
+			url, _, _ := unstructured.NestedString(u.Object, "spec", "url")
+			ref, _, _ := unstructured.NestedMap(u.Object, "spec", "ref")
+			interval, _, _ := unstructured.NestedString(u.Object, "spec", "interval")
+			assert.Equal(ct, c.config.Chart.URL, url)
+			assert.Equal(ct, map[string]any{"semver": c.config.Chart.Semver}, ref)
+			assert.Equal(ct, c.config.Chart.Interval, interval)
+		})
+		insecure, _, _ := unstructured.NestedBool(oci.Object, "spec", "insecure")
+		assert.True(t, insecure, "a field the operator does not derive was dropped")
+		assert.Equal(t, "kept", oci.GetLabels()["example.com/note"])
+
+		// A reconcile of a source at the configured spec writes nothing.
+		c.poke(t, org)
+		rv := oci.GetResourceVersion()
+		require.Never(t, func() bool {
+			u := &unstructured.Unstructured{}
+			u.SetGroupVersionKind(ociGVK)
+			if err := c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns.Name, Name: agentChart}, u); err != nil {
+				return true
+			}
+			return u.GetResourceVersion() != rv
+		}, 2*time.Second, tick, "the chart source was written again with nothing to change")
+	})
+
 	t.Run("another writer's annotation on the Helm RoleBinding stays", func(t *testing.T) {
 		org := c.organization(t, "org-notes", "notes")
 		ns := c.readyNamespace(t, org)

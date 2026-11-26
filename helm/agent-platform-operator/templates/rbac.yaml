@@ -80,9 +80,11 @@ rules:
     resources: ["serviceaccounts"]
     verbs: ["update"]
   {{- end }}
+  # The agent chart's OCIRepository: created, and brought back to
+  # agentChart.* on every reconcile.
   - apiGroups: ["source.toolkit.fluxcd.io"]
     resources: ["ocirepositories"]
-    verbs: ["get", "create"]
+    verbs: ["get", "create", "update"]
   # The organization's Flux Kustomization: kept in commit mode, deleted by
   # the erasure; the installation's is read for the Orphaned condition. The
   # erasure deletes the HelmReleases and the Agents of its namespace too.

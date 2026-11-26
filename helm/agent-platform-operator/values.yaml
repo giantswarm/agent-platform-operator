@@ -31,7 +31,9 @@ networkPolicy:
 agentChart:
   # -- OCI URL of the agent chart. The OCIRepository kept in every
   # organization namespace is named after its last segment (`agent`); the
-  # organization's HelmReleases reference it by that name. Empty keeps none.
+  # organization's HelmReleases reference it by that name. The operator brings
+  # its url, interval and ref back to these values on every reconcile, also in
+  # existing organizations. Empty keeps none.
   ociUrl: oci://gsoci.azurecr.io/charts/giantswarm/agent
   # -- Semver range the OCIRepository tracks.
   semver: "2.x"

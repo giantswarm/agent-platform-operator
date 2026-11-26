@@ -17,7 +17,7 @@
                 },
                 "ociUrl": {
                     "type": "string",
-                    "description": "OCI URL of the agent chart. The OCIRepository kept in every organization namespace is named after its last segment (`agent`); the organization's HelmReleases reference it by that name. Empty keeps none."
+                    "description": "OCI URL of the agent chart. The OCIRepository kept in every organization namespace is named after its last segment (`agent`); the organization's HelmReleases reference it by that name. The operator brings its url, interval and ref back to these values on every reconcile, also in existing organizations. Empty keeps none."
                 },
                 "semver": {
                     "type": "string",

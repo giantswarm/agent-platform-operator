@@ -18,7 +18,7 @@ Reconciles each AgentPlatformOrganization (agent-platform.giantswarm.io) into it
 | platformNamespace | string | `"kagent"` | The platform namespace (kagent's) the network policies are copied from. |
 | networkPolicy.flavor | string | `""` | Kind of the network policies copied into every organization namespace: `kubernetes` (NetworkPolicy) or `cilium` (CiliumNetworkPolicy). Empty copies none. |
 | networkPolicy.names | list | `[]` | Names of the network policies in `platformNamespace` copied into every organization namespace (the platform's worker policy, `substrate-workers` with Cilium, `substrate-workers-ingress` with Kubernetes network policies). |
-| agentChart.ociUrl | string | `"oci://gsoci.azurecr.io/charts/giantswarm/agent"` | OCI URL of the agent chart. The OCIRepository kept in every organization namespace is named after its last segment (`agent`); the organization's HelmReleases reference it by that name. Empty keeps none. |
+| agentChart.ociUrl | string | `"oci://gsoci.azurecr.io/charts/giantswarm/agent"` | OCI URL of the agent chart. The OCIRepository kept in every organization namespace is named after its last segment (`agent`); the organization's HelmReleases reference it by that name. The operator brings its url, interval and ref back to these values on every reconcile, also in existing organizations. Empty keeps none. |
 | agentChart.semver | string | `"2.x"` | Semver range the OCIRepository tracks. |
 | agentChart.semverFilter | string | `""` | Regular expression the chart's tags must match before the range is evaluated (the OCIRepository's `ref.semverFilter`); empty filters nothing. |
 | agentChart.interval | string | `"30m"` | OCIRepository.spec.interval. |
