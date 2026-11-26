@@ -283,7 +283,7 @@ func fluxCases(t *testing.T, c *cluster) {
 		// Applied by the installation Kustomization, as Flux labels it.
 		fromGit := map[string]string{v1alpha1.FluxNameLabel: installationKS, v1alpha1.FluxNamespaceLabel: fluxNS}
 		org := &orgv1.Organization{
-			ObjectMeta: metav1.ObjectMeta{Name: "treasury", Labels: fromGit},
+			ObjectMeta: metav1.ObjectMeta{Name: "treasury", Labels: fromGit, Annotations: pruneDisabled()},
 			Spec: orgv1.OrganizationSpec{AgentPlatform: &orgv1.AgentPlatformSpec{
 				Enabled: true, Harnesses: []string{curatedHarness}, Workers: withReplicas(3),
 			}},
@@ -325,11 +325,7 @@ func fluxCases(t *testing.T, c *cluster) {
 		c.replicas(t, ns, 0)
 
 		// agent-manager's delete pull request marked it: the delete merged.
-		require.EventuallyWithT(t, func(ct *assert.CollectT) {
-			got := c.get(ct, org)
-			got.Annotations = map[string]string{v1alpha1.DeletePullRequestAnnotation: "https://github.com/giantswarm/test-configs/pull/7"}
-			assert.NoError(ct, c.admin.Update(t.Context(), got))
-		}, timeout, tick)
+		c.markDeletePullRequest(t, org, "https://github.com/giantswarm/test-configs/pull/7")
 		c.orphaned(t, org, metav1.ConditionTrue, v1alpha1.ReasonDeleteMerged)
 		c.replicas(t, ns, 0)
 
@@ -404,7 +400,11 @@ func fluxCases(t *testing.T, c *cluster) {
 		c.kustomizationStatus(t, gitopsNS, gitopsKS, true, revision, other, organizationEntry("ledger"))
 
 		org := &orgv1.Organization{
-			ObjectMeta: metav1.ObjectMeta{Name: "ledger", Labels: map[string]string{v1alpha1.FluxNameLabel: gitopsKS, v1alpha1.FluxNamespaceLabel: gitopsNS}},
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        "ledger",
+				Labels:      map[string]string{v1alpha1.FluxNameLabel: gitopsKS, v1alpha1.FluxNamespaceLabel: gitopsNS},
+				Annotations: pruneDisabled(),
+			},
 			Spec: orgv1.OrganizationSpec{AgentPlatform: &orgv1.AgentPlatformSpec{
 				Enabled: true, Harnesses: []string{curatedHarness}, Workers: withReplicas(2),
 			}},
@@ -424,11 +424,7 @@ func fluxCases(t *testing.T, c *cluster) {
 		c.replicas(t, ns, 0)
 
 		// It carries the delete pull request's URL: the delete merged.
-		require.EventuallyWithT(t, func(ct *assert.CollectT) {
-			got := c.get(ct, org)
-			got.Annotations = map[string]string{v1alpha1.DeletePullRequestAnnotation: "https://github.com/giantswarm/test-configs/pull/8"}
-			assert.NoError(ct, c.admin.Update(t.Context(), got))
-		}, timeout, tick)
+		c.markDeletePullRequest(t, org, "https://github.com/giantswarm/test-configs/pull/8")
 		c.orphaned(t, org, metav1.ConditionTrue, v1alpha1.ReasonDeleteMerged)
 		c.replicas(t, ns, 0)
 	})
@@ -440,8 +436,29 @@ func organizationEntry(name string) any {
 	return map[string]any{"id": "_" + name + "_security.giantswarm.io_Organization", "v": "v1alpha1"}
 }
 
+// pruneDisabled are the annotations of an Organization in git: Flux leaves
+// the object in place when its file goes, though its Kustomization prunes.
+func pruneDisabled() map[string]string {
+	return map[string]string{"kustomize.toolkit.fluxcd.io/prune": "disabled"}
+}
+
+// markDeletePullRequest adds to org's annotations the URL of the delete pull
+// request that removes its file, as agent-manager does.
+func (c *cluster) markDeletePullRequest(t *testing.T, org *orgv1.Organization, url string) {
+	t.Helper()
+	require.EventuallyWithT(t, func(ct *assert.CollectT) {
+		got := c.get(ct, org)
+		if got.Annotations == nil {
+			got.Annotations = map[string]string{}
+		}
+		got.Annotations[v1alpha1.DeletePullRequestAnnotation] = url
+		assert.NoError(ct, c.admin.Update(t.Context(), got))
+	}, timeout, tick)
+}
+
 // appliedKustomization is a Kustomization ns/name that applies Organizations
-// from the installation's source and leaves them in place when it goes.
+// from the installation's source and prunes what leaves it, but for the
+// objects that carry pruneDisabled; it leaves them in place when it goes.
 func appliedKustomization(ns, name string) *unstructured.Unstructured {
 	return newObject(kustomizationGVK, ns, name, nil, map[string]any{
 		intervalField: fluxInterval, "path": "./management-clusters/test", "prune": true, "deletionPolicy": "Orphan",
