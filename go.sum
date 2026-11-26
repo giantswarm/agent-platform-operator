@@ -64,8 +64,8 @@ github.com/fsnotify/fsnotify v1.9.0 h1:2Ml+OJNzbYCTzsxtv8vKSFD9PbJjmhYF14k/jKC7S
 github.com/fsnotify/fsnotify v1.9.0/go.mod h1:8jBTzvmWwFyi3Pb8djgCCO5IBqzKJ/Jwo8TRcHyHii0=
 github.com/fxamacker/cbor/v2 v2.9.1 h1:2rWm8B193Ll4VdjsJY28jxs70IdDsHRWgQYAI80+rMQ=
 github.com/fxamacker/cbor/v2 v2.9.1/go.mod h1:vM4b+DJCtHn+zz7h3FFp/hDAI9WNWCsZj23V5ytsSxQ=
-github.com/giantswarm/organization-operator v1.6.5-0.20261126132037-fe4507764d20 h1:wQgooIpbOKoghYydtmD7OF1iy3IRB4QAk+raYuEoFUc=
-github.com/giantswarm/organization-operator v1.6.5-0.20261126132037-fe4507764d20/go.mod h1:Y6vvoyrHoQ2fpMo+kr29RTKemI4E1uty/KUT7P5loJM=
+github.com/giantswarm/organization-operator v1.6.5-0.20261126222953-a0e2ace225a7 h1:MbU+2Hzdduy46ZKOLDmgcu01KjYUtp8ZA7kS4zaidSU=
+github.com/giantswarm/organization-operator v1.6.5-0.20261126222953-a0e2ace225a7/go.mod h1:Y6vvoyrHoQ2fpMo+kr29RTKemI4E1uty/KUT7P5loJM=
 github.com/go-logr/logr v1.4.4 h1:tG4xh9yMsRCAiodLVTxyrkzSZ9+o0L1Kg/+cPVcbP/8=
 github.com/go-logr/logr v1.4.4/go.mod h1:9T104GzyrTigFIr8wt5mBrctHMim0Nb2HLGrmQ40KvY=
 github.com/go-logr/stdr v1.2.2 h1:hSWxHoqTgW2S2qGc0LTAI563KZ5YKYRhT3MFKZMbjag=
