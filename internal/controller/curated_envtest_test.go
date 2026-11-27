@@ -20,6 +20,8 @@ import (
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	orgv1 "github.com/giantswarm/organization-operator/api/v1alpha1"
+
 	"github.com/giantswarm/agent-platform-operator/api/v1alpha1"
 	"github.com/giantswarm/agent-platform-operator/internal/controller"
 )
@@ -28,7 +30,7 @@ import (
 // the default ModelConfig and the object quota, run in TestOrganizationEnvtest.
 func curatedCases(t *testing.T, c *cluster) {
 	t.Run("an organization gets read-only copies of the curated objects", func(t *testing.T) {
-		org := c.organizationWith(t, "org-curated", "curated", v1alpha1.AgentPlatformOrganizationSpec{Harnesses: []string{curatedHarness}})
+		org := c.organizationWith(t, "curated", orgv1.AgentPlatformSpec{Harnesses: []string{curatedHarness}})
 		ns := c.readyNamespace(t, org).Name
 		org = c.get(t, org)
 
@@ -82,17 +84,17 @@ func curatedCases(t *testing.T, c *cluster) {
 			assert.Equal(ct, agentPrompt, str(a, "spec", "template", promptField))
 		})
 
-		// A Harness taken out of spec.harnesses goes.
+		// A Harness taken out of spec.capabilities.agentPlatform.harnesses goes.
 		require.EventuallyWithT(t, func(ct *assert.CollectT) {
 			got := c.get(ct, org)
-			got.Spec.Harnesses = nil
+			got.Spec.Capabilities.AgentPlatform.Harnesses = nil
 			assert.NoError(ct, c.admin.Update(t.Context(), got))
 		}, timeout, tick)
 		c.eventuallyAbsent(t, harnessGVK, ns, curatedHarness)
 	})
 
 	t.Run("the kagent and Substrate CRDs refuse a copy their schema refuses", func(t *testing.T) {
-		org := c.organizationWith(t, "org-schema", "schema", v1alpha1.AgentPlatformOrganizationSpec{Harnesses: []string{curatedHarness}})
+		org := c.organizationWith(t, "schema", orgv1.AgentPlatformSpec{Harnesses: []string{curatedHarness}})
 		ns := c.readyNamespace(t, org).Name
 		harness := c.eventually(t, harnessGVK, ns, curatedHarness, nil)
 		pool := c.eventually(t, poolGVK, ns, curatedPool, nil)
@@ -135,7 +137,7 @@ func curatedCases(t *testing.T, c *cluster) {
 	})
 
 	t.Run("the pool runs no workers without a ModelConfig, and its replicas once a ModelConfig and the curated Agent's copy are there", func(t *testing.T) {
-		org := c.organizationWith(t, "org-workers", "workers", v1alpha1.AgentPlatformOrganizationSpec{Harnesses: []string{curatedHarness}, Workers: withReplicas(3)})
+		org := c.organizationWith(t, "workers", orgv1.AgentPlatformSpec{Harnesses: []string{curatedHarness}, Workers: withReplicas(3)})
 		ns := c.readyNamespace(t, org).Name
 		c.replicas(t, ns, 0)
 
@@ -148,43 +150,34 @@ func curatedCases(t *testing.T, c *cluster) {
 
 	t.Run("an organization without a workers block runs one worker, and one with 0 set runs none", func(t *testing.T) {
 		// As git and agent-manager write it: no workers block at all.
-		unset := newObject(v1alpha1.GroupVersion.WithKind("AgentPlatformOrganization"), "org-workers-unset", "unset", nil, map[string]any{"harnesses": []any{curatedHarness}})
-		createNamespace(t, c.admin, "org-workers-unset")
+		unset := newObject(orgv1.GroupVersion.WithKind("Organization"), "", "workers-unset", nil,
+			map[string]any{"capabilities": map[string]any{"agentPlatform": map[string]any{"enabled": true, "harnesses": []any{curatedHarness}}}})
 		require.NoError(t, c.admin.Create(t.Context(), unset))
-		org := &v1alpha1.AgentPlatformOrganization{}
+		org := &orgv1.Organization{}
 		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKeyFromObject(unset), org))
-		if assert.NotNil(t, org.Spec.Workers.Replicas, "the CRD wrote no default") {
-			assert.Equal(t, v1alpha1.DefaultWorkerReplicas, *org.Spec.Workers.Replicas)
-		}
 		ns := c.readyNamespace(t, org).Name
 		c.modelConfig(t, ns, "anthropic", false)
 		c.replicas(t, ns, 1)
 
-		// No spec at all.
-		bare := &unstructured.Unstructured{}
-		bare.SetGroupVersionKind(v1alpha1.GroupVersion.WithKind("AgentPlatformOrganization"))
-		bare.SetNamespace("org-workers-bare")
-		bare.SetName("bare")
-		createNamespace(t, c.admin, "org-workers-bare")
+		// The switch alone.
+		bare := newObject(orgv1.GroupVersion.WithKind("Organization"), "", "workers-bare", nil,
+			map[string]any{"capabilities": map[string]any{"agentPlatform": map[string]any{"enabled": true}}})
 		require.NoError(t, c.admin.Create(t.Context(), bare))
-		org = &v1alpha1.AgentPlatformOrganization{}
+		org = &orgv1.Organization{}
 		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKeyFromObject(bare), org))
-		if assert.NotNil(t, org.Spec.Workers.Replicas, "the CRD wrote no default into an organization without a spec") {
-			assert.Equal(t, v1alpha1.DefaultWorkerReplicas, *org.Spec.Workers.Replicas)
-		}
 		bareNS := c.readyNamespace(t, org).Name
 		c.modelConfig(t, bareNS, "anthropic", false)
-		// No spec.harnesses, so no curated Agent: an Agent of its own.
+		// No harnesses, so no curated Agent: an Agent of its own.
 		require.NoError(t, c.admin.Create(t.Context(), newObject(agentGVK, bareNS, "triage", nil, agentSpec("Triage.", nil))))
 		c.replicas(t, bareNS, 1)
 
-		zero := c.organizationWith(t, "org-workers-zero", "zero", v1alpha1.AgentPlatformOrganizationSpec{Harnesses: []string{curatedHarness}, Workers: withReplicas(0)})
+		zero := c.organizationWith(t, "workers-zero", orgv1.AgentPlatformSpec{Harnesses: []string{curatedHarness}, Workers: withReplicas(0)})
 		zeroNS := c.readyNamespace(t, zero).Name
 		c.modelConfig(t, zeroNS, "anthropic", false)
 		c.eventually(t, agentGVK, zeroNS, curatedAgent, nil)
 		got := c.get(t, zero)
-		if assert.NotNil(t, got.Spec.Workers.Replicas) {
-			assert.Zero(t, *got.Spec.Workers.Replicas, "an explicit 0 was not kept")
+		if assert.NotNil(t, got.Spec.Capabilities.AgentPlatform.Workers.Replicas) {
+			assert.Zero(t, *got.Spec.Capabilities.AgentPlatform.Workers.Replicas, "an explicit 0 was not kept")
 		}
 		c.replicas(t, zeroNS, 0)
 		c.poke(t, zero)
@@ -207,7 +200,7 @@ func curatedCases(t *testing.T, c *cluster) {
 		setCurated(t.Context(), false)
 		t.Cleanup(func() { setCurated(context.WithoutCancel(t.Context()), true) })
 
-		org := c.organization(t, "org-workers-agents", "agents")
+		org := c.organization(t, "workers-agents")
 		ns := c.readyNamespace(t, org).Name
 		c.eventuallyAbsent(t, agentGVK, ns, curatedAgent)
 		// A model and no Agent: no worker.
@@ -245,7 +238,7 @@ func curatedCases(t *testing.T, c *cluster) {
 		c.poke(t, org)
 		c.replicas(t, ns, 1)
 		require.EventuallyWithT(t, func(ct *assert.CollectT) {
-			ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, v1alpha1.ConditionReady)
+			ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, orgv1.AgentPlatformReady)
 			if assert.NotNil(ct, ready) {
 				assert.Equal(ct, metav1.ConditionFalse, ready.Status)
 				assert.Contains(ct, ready.Message, "list the sessions of "+ns)
@@ -263,7 +256,7 @@ func curatedCases(t *testing.T, c *cluster) {
 	})
 
 	t.Run("the curated Agents run on the one ModelConfig marked as the default", func(t *testing.T) {
-		org := c.organization(t, "org-models", "models")
+		org := c.organization(t, "models")
 		ns := c.readyNamespace(t, org).Name
 		c.defaultModel(t, org, ns, metav1.ConditionFalse, "")
 
@@ -281,9 +274,9 @@ func curatedCases(t *testing.T, c *cluster) {
 	})
 
 	t.Run("a change of a curated source is copied into every organization", func(t *testing.T) {
-		harnesses := v1alpha1.AgentPlatformOrganizationSpec{Harnesses: []string{curatedHarness}}
-		one := c.organizationWith(t, "org-resync-one", "one", harnesses)
-		two := c.organizationWith(t, "org-resync-two", "two", harnesses)
+		harnesses := orgv1.AgentPlatformSpec{Harnesses: []string{curatedHarness}}
+		one := c.organizationWith(t, "resync-one", harnesses)
+		two := c.organizationWith(t, "resync-two", harnesses)
 		namespaces := []string{c.readyNamespace(t, one).Name, c.readyNamespace(t, two).Name}
 
 		source := c.read(t, harnessGVK, platformNS, curatedHarness)
@@ -310,8 +303,8 @@ func curatedCases(t *testing.T, c *cluster) {
 	})
 
 	t.Run("a label a curated source loses goes from every copy", func(t *testing.T) {
-		one := c.organization(t, "org-labels-one", "one")
-		two := c.organization(t, "org-labels-two", "two")
+		one := c.organization(t, "labels-one")
+		two := c.organization(t, "labels-two")
 		namespaces := []string{c.readyNamespace(t, one).Name, c.readyNamespace(t, two).Name}
 		const otherLabel = "example.com/owner"
 		for _, ns := range namespaces {
@@ -348,7 +341,7 @@ func curatedCases(t *testing.T, c *cluster) {
 	})
 
 	t.Run("a renamed pool ServiceAccount replaces the old one in the organization namespace", func(t *testing.T) {
-		org := c.organization(t, "org-pool-sa", "pool-sa")
+		org := c.organization(t, "pool-sa")
 		ns := c.readyNamespace(t, org).Name
 		require.EventuallyWithT(t, func(ct *assert.CollectT) {
 			assert.NoError(ct, c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns, Name: poolSA}, &corev1.ServiceAccount{}))
@@ -382,14 +375,14 @@ func curatedCases(t *testing.T, c *cluster) {
 
 	t.Run("a pool ServiceAccount name that is not curated keeps the pool on its ServiceAccount and the organization not Ready", func(t *testing.T) {
 		for _, tc := range []struct {
-			desc, parent, name, sa string
-			foreign                bool
+			desc, name, sa string
+			foreign        bool
 		}{
-			{desc: "another writer's", parent: "org-sa-foreign", name: "sa-foreign", sa: "tenant-worker", foreign: true},
-			{desc: "the Helm ServiceAccount", parent: "org-sa-helm", name: "sa-helm", sa: helmSA},
+			{desc: "another writer's", name: "sa-foreign", sa: "tenant-worker", foreign: true},
+			{desc: "the Helm ServiceAccount", name: "sa-helm", sa: helmSA},
 		} {
 			t.Run(tc.desc, func(t *testing.T) {
-				org := c.organizationWith(t, tc.parent, tc.name, v1alpha1.AgentPlatformOrganizationSpec{Harnesses: []string{curatedHarness}, Workers: withReplicas(2)})
+				org := c.organizationWith(t, tc.name, orgv1.AgentPlatformSpec{Harnesses: []string{curatedHarness}, Workers: withReplicas(2)})
 				ns := c.readyNamespace(t, org).Name
 				model := c.modelConfig(t, ns, "anthropic", false)
 				c.replicas(t, ns, 2)
@@ -406,7 +399,7 @@ func curatedCases(t *testing.T, c *cluster) {
 				t.Cleanup(func() { setPoolSA(context.WithoutCancel(t.Context()), poolSA) })
 
 				require.EventuallyWithT(t, func(ct *assert.CollectT) {
-					ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, v1alpha1.ConditionReady)
+					ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, orgv1.AgentPlatformReady)
 					if assert.NotNil(ct, ready) {
 						assert.Equal(ct, metav1.ConditionFalse, ready.Status)
 						assert.Equal(ct, "NameTaken", ready.Reason)
@@ -423,7 +416,7 @@ func curatedCases(t *testing.T, c *cluster) {
 	})
 
 	t.Run("the chart's default object quota is kept and refuses objects over the count", func(t *testing.T) {
-		org := c.organization(t, "org-quota", "quota")
+		org := c.organization(t, "quota")
 		ns := c.readyNamespace(t, org).Name
 		quota := &corev1.ResourceQuota{}
 		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKey{Namespace: ns, Name: controller.ObjectQuotaName}, quota))
@@ -550,9 +543,9 @@ func (c *cluster) stays(t *testing.T, ns string, n int64) {
 
 // poke reconciles org: an annotation change is an event of its own. It stands
 // for the sync period, which reconciles every organization.
-func (c *cluster) poke(t require.TestingT, org *v1alpha1.AgentPlatformOrganization) {
+func (c *cluster) poke(t require.TestingT, org *orgv1.Organization) {
 	patch := []byte(`{"metadata":{"annotations":{"test.giantswarm.io/poke":"` + time.Now().Format(time.RFC3339Nano) + `"}}}`)
-	got := &v1alpha1.AgentPlatformOrganization{ObjectMeta: metav1.ObjectMeta{Name: org.Name, Namespace: org.Namespace}}
+	got := &orgv1.Organization{ObjectMeta: metav1.ObjectMeta{Name: org.Name}}
 	require.NoError(t, c.admin.Patch(context.Background(), got, client.RawPatch(types.MergePatchType, patch)))
 }
 
@@ -569,8 +562,10 @@ func (c *cluster) agentsIn(t *testing.T, ns string) []string {
 	return names
 }
 
-// workers is a workers block with replicas set to n.
-func withReplicas(n int32) v1alpha1.Workers { return v1alpha1.Workers{Replicas: &n} }
+// withReplicas is a workers block with replicas set to n.
+func withReplicas(n int32) orgv1.AgentPlatformWorkers {
+	return orgv1.AgentPlatformWorkers{Replicas: &n}
+}
 
 // modelConfig creates a ModelConfig in ns, marked as the default when
 // marked.
@@ -586,10 +581,10 @@ func (c *cluster) modelConfig(t *testing.T, ns, name string, marked bool) *unstr
 
 // defaultModel waits until org's DefaultModelConfigured is status and the
 // curated Agent and AgentTemplate copies in ns name model ("" names none).
-func (c *cluster) defaultModel(t *testing.T, org *v1alpha1.AgentPlatformOrganization, ns string, status metav1.ConditionStatus, model string) {
+func (c *cluster) defaultModel(t *testing.T, org *orgv1.Organization, ns string, status metav1.ConditionStatus, model string) {
 	t.Helper()
 	require.EventuallyWithT(t, func(ct *assert.CollectT) {
-		cond := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, v1alpha1.ConditionDefaultModelConfigured)
+		cond := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, orgv1.AgentPlatformDefaultModelConfigured)
 		if assert.NotNil(ct, cond) {
 			assert.Equal(ct, status, cond.Status, "DefaultModelConfigured: %s", cond.Message)
 		}

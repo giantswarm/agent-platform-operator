@@ -9,7 +9,7 @@ goes. No copy with a dangling reference exists.
 
 | Reference | Met when |
 |---|---|
-| An Agent's `harnessRef` | the Harness is in the organization's `spec.harnesses` and its copy is the operator's |
+| An Agent's `harnessRef` | the Harness is in the organization's `spec.capabilities.agentPlatform.harnesses` and its copy is the operator's |
 | An Agent's `templateRef`, a tool's `subAgent.templateRef` | the AgentTemplate in `platformNamespace` carries `agent-platform.giantswarm.io/curated: "true"`, and its own references are met |
 | A tool's `mcp.server` | the RemoteMCPServer in `platformNamespace` carries the curated label, and its own references are met |
 | `systemPromptFrom`, `outputSchemaFrom`, `promptTemplate.dataSources` (ConfigMaps) | never: the operator copies no ConfigMap |
@@ -26,20 +26,21 @@ The organization's Flux ServiceAccount (`agent-platform:organization-flux`)
 writes Agents, AgentTemplates and RemoteMCPServers in its namespace. A dangling
 reference in a read-only curated copy would bind to an object of that name that
 the organization wrote, so a curated Agent would run the organization's
-template or tools. A Harness outside `spec.harnesses` is the organization's
-choice, not a fault: the Agents on it are left out, and the organization stays
-`Ready`.
+template or tools. A Harness outside `spec.capabilities.agentPlatform.harnesses`
+is the organization's choice, not a fault: the Agents on it are left out, and
+the organization stays `AgentPlatformReady`.
 
 An object of the organization that holds the name of a curated copy leaves the
-objects that refer to it out as well, and the organization is `Ready=False`
-with reason `NameTaken`. The operator does not watch the organization's own
+objects that refer to it out as well, and the organization is
+`AgentPlatformReady=False` with reason `NameTaken`. The operator does not watch the organization's own
 objects: once that object is gone, the copies come at the next reconcile,
 within the sync period (`syncPeriod`).
 
 ## When things change
 
-- The organization adds the Harness to `spec.harnesses`, or the platform labels
-  the missing object: the copy is made at the next reconcile.
+- The organization adds the Harness to
+  `spec.capabilities.agentPlatform.harnesses`, or the platform labels the
+  missing object: the copy is made at the next reconcile.
 - A copy goes in order: the Agents first, then the AgentTemplates, then the
   RemoteMCPServers and Harnesses. A kind goes only once no copy of an earlier
   kind is left to go, so a curated Agent copy never outlives an object it

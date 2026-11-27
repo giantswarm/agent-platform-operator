@@ -49,7 +49,7 @@ func ParseObjectQuota(s string) (corev1.ResourceList, error) {
 // ensureObjectQuota keeps the ResourceQuota ObjectQuotaName in ns with
 // Config.ObjectQuota as its hard limits, and removes its own when the limits
 // are empty. A ResourceQuota of that name the reconciler did not write makes
-// the organization not Ready.
+// the organization AgentPlatformReady=False.
 func (r *OrganizationReconciler) ensureObjectQuota(ctx context.Context, ns string) error {
 	want := corev1.ResourceQuotaSpec{Hard: r.Config.ObjectQuota}
 	existing := &corev1.ResourceQuota{}

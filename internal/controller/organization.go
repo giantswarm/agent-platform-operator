@@ -1,13 +1,18 @@
-// Package controller reconciles each AgentPlatformOrganization into its
-// organization namespace.
+// Package controller reconciles each Organization (security.giantswarm.io)
+// whose spec.capabilities.agentPlatform.enabled is true into its organization
+// namespace.
 //
-// The organization namespace is created from the generateName agents-<name>-
-// and labelled with the organization, its parent namespace and its UID. The
-// reconciler finds it by the UID label, read from the API server and never
-// from the cache, so a create that was interrupted before the status was
-// written never makes a second namespace. The namespace has no ownerReference:
-// the garbage collector never acts on a namespaced owner of a cluster-scoped
-// object.
+// The organization namespace is agents-<name>: an Organization is
+// cluster-scoped, so its name is unique in the cluster. The namespace is
+// labelled with the organization's name and UID. The reconciler reads it from
+// the API server, never from the cache, and writes only a namespace that
+// carries the organization's UID: a namespace of that name that another
+// writer created, or one left by an earlier Organization of the same name,
+// makes the organization AgentPlatformReady=False with reason NameTaken. A
+// name that does not fit in a namespace name (agents-<name> is a DNS label of
+// at most 63 characters) makes it AgentPlatformReady=False with reason
+// NamespaceNameInvalid, and it gets no namespace. The namespace has no
+// ownerReference.
 //
 // In the namespace the reconciler keeps, from the first reconcile on:
 //
@@ -20,17 +25,17 @@
 //   - a RoleBinding of each ServiceAccountBinding's ClusterRole to its
 //     ServiceAccount in another namespace (Config.ServiceAccountBindings),
 //     named after the ClusterRole, deleted when it is no longer configured;
-//   - a mirror of every RoleBinding of the parent namespace to the ClusterRole
-//     agent-platform:organizations-admin, and of every rbac-operator
-//     RoleBinding there to cluster-admin, bound to
-//     agent-platform:organizations-admin with the User and Group subjects
-//     only, removed when the parent binding goes;
+//   - the RoleBinding organization-admins (admins.go), which binds
+//     agent-platform:admin to the subjects of the organization's spec.admins,
+//     follows that list and is deleted when the list is empty;
 //   - read-only copies of the curated objects of the platform namespace
-//     (Config.Curated): the Harnesses the organization's spec.harnesses names,
-//     pointed at the organization's own pool and snapshot prefix with kagent's
-//     memory off; the curated WorkerPool with its ServiceAccount, scaled by
-//     the worker replica rule (workerReplicas); the Agents and AgentTemplates
-//     labelled agent-platform.giantswarm.io/curated=true, with the template's
+//     (Config.Curated): the Harnesses the organization's
+//     spec.capabilities.agentPlatform.harnesses names, pointed at the
+//     organization's own
+//     pool and snapshot prefix with kagent's memory off; the curated
+//     WorkerPool with its ServiceAccount, scaled by the worker replica rule
+//     (workerReplicas); the Agents and AgentTemplates labelled
+//     agent-platform.giantswarm.io/curated=true, with the template's
 //     modelConfig set to the organization's default ModelConfig; and the
 //     curated RemoteMCPServers their tools name. An Agent or AgentTemplate is
 //     copied only when every object it refers to is a curated copy too
@@ -45,16 +50,35 @@
 //     ServiceAccount's only one. The Kustomization applies the
 //     organization's path in git into its namespace as that ServiceAccount.
 //
-// With the installation's Kustomization configured, the reconciler sets the
-// Orphaned condition of an organization that Kustomization applied: True
-// while the organization is missing from its inventory (its file is gone from
-// git), with reason DeleteMerged or MissingFromGit.
+// The right to manage Organizations is bound by the installation: it binds
+// agent-platform:organizations-admin for the whole cluster. The reconciler
+// writes no binding for it.
 //
-// Every organization carries the finalizer v1alpha1.Finalizer. A deleted
-// organization is erased in order (erase): its Flux Kustomization or
-// HelmReleases and its Agents; its sessions through kagent, until Substrate
-// holds no actor of it; its snapshot prefix, twice; its namespace; its Flux
-// ServiceAccount; then the finalizer goes.
+// The reconciler writes the organization's namespace to the agentPlatform
+// entry of status.namespaces, what it observed to
+// status.capabilities.agentPlatform and its AgentPlatform conditions to
+// status.conditions, with a merge patch under an optimistic lock, so the
+// status fields and entries of other writers (organization-operator's
+// status.namespace and kaas entry of status.namespaces) stay.
+//
+// With the installation's Kustomization configured, the reconciler sets the
+// AgentPlatformOrphaned condition of an organization that a Flux
+// Kustomization applied (the installation's or any other, as its ownership
+// labels name it): True while the organization is missing from that
+// Kustomization's inventory (its file is gone from git), with reason
+// DeleteMerged or MissingFromGit.
+//
+// Every organization with the Agent Platform enabled carries the finalizer
+// v1alpha1.Finalizer. An Organization without the switch gets nothing. A
+// switch-off is not supported yet: the agent-platform chart's admission
+// policy refuses it. Where the reconciler finds the switch off on an
+// organization with its finalizer all the same, it changes nothing, erases
+// nothing and sets AgentPlatformReady=False with reason AgentPlatformDisabled
+// (see reportSwitchOff). A deleted organization is erased in order (erase):
+// its Flux Kustomization or HelmReleases and its Agents; its sessions through
+// kagent, until Substrate holds no actor of it; its snapshot prefix, twice;
+// its namespace; its Flux ServiceAccount; then the finalizer goes. The
+// AgentPlatformErasing condition names the step.
 //
 // The logic of the network policies, the OCIRepository, the Helm
 // ServiceAccount and the WorkerPool and Harness copies is agent-manager's
@@ -73,11 +97,13 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/selection"
+	"k8s.io/apimachinery/pkg/util/validation"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -89,24 +115,21 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	orgv1 "github.com/giantswarm/organization-operator/api/v1alpha1"
+
 	"github.com/giantswarm/agent-platform-operator/api/v1alpha1"
-	"github.com/giantswarm/agent-platform-operator/pkg/adminmirror"
 )
 
 const (
 	// ObjectLabel marks what the reconciler writes in an organization
-	// namespace, with why it is kept: ScopeNamespace objects always,
-	// ScopeAdminMirror objects while their parent binding exists. An object
-	// without it is never changed or deleted.
-	ObjectLabel      = "agent-platform.giantswarm.io/organization-object"
-	ScopeNamespace   = "namespace"
-	ScopeAdminMirror = "organizations-admin-mirror"
-	// CopiedFromAnnotation names the object a copy or a mirror was made from.
+	// namespace, with why it is kept: ScopeNamespace objects always. An
+	// object without it is never changed or deleted.
+	ObjectLabel    = "agent-platform.giantswarm.io/organization-object"
+	ScopeNamespace = "namespace"
+	// CopiedFromAnnotation names the object a copy was made from.
 	CopiedFromAnnotation = "agent-platform.giantswarm.io/copied-from"
-	// OrganizationsAdminClusterRole is the ClusterRole of every mirror of a
-	// parent namespace's admin bindings (adminmirror).
-	OrganizationsAdminClusterRole = adminmirror.OrganizationsAdminClusterRole
-	// NamespacePrefix starts the generateName of an organization namespace.
+	// NamespacePrefix starts the name of an organization namespace:
+	// agents-<name>.
 	NamespacePrefix = "agents-"
 
 	managedByLabel = "app.kubernetes.io/managed-by"
@@ -118,6 +141,8 @@ const (
 	reasonNamespaceTerminating = "NamespaceTerminating"
 	reasonSourceMissing        = "SourceMissing"
 	reasonNameTaken            = "NameTaken"
+	reasonNamespaceNameInvalid = "NamespaceNameInvalid"
+	reasonAgentPlatformOff     = "AgentPlatformDisabled"
 )
 
 // Config is what the reconciler keeps and where it copies it from.
@@ -155,11 +180,12 @@ type Config struct {
 }
 
 // CacheOptions limit what the manager caches: the organization namespaces,
-// the reconciler's own ServiceAccounts, ResourceQuotas and, in the Flux
-// namespace, Kustomizations, the installation's Kustomization, every RoleBinding
-// (a parent's admin bindings carry no label common to all of them: its
-// organizations-admin bindings have none, and its rbac-operator bindings are
-// told apart by roleRef and label, adminmirror.IsMirroredAdmin),
+// the reconciler's own ServiceAccounts, ResourceQuotas, the organizations'
+// Kustomizations in the Flux namespace or, with the AgentPlatformOrphaned
+// condition, every
+// Kustomization with only the Organizations of its inventory, every RoleBinding
+// (a binding of an organization namespace that holds a name the reconciler
+// needs carries no label of the reconciler's),
 // the metadata of every ModelConfig and every Agent and, of the network
 // policies and the other curated kinds, the platform namespace's and the
 // reconciler's copies.
@@ -194,15 +220,15 @@ func CacheOptions(cfg Config, syncPeriod time.Duration) cache.Options {
 		}
 	}
 	if f := cfg.Flux; f.watched() {
-		// The organizations' Kustomizations and the installation's.
+		// The organizations' Kustomizations and, with the
+		// AgentPlatformOrphaned condition, every Kustomization: any one may
+		// apply an Organization.
+		// An empty map caches every namespace.
 		namespaces := map[string]cache.Config{}
-		if f.commitMode() {
+		if f.commitMode() && !f.orphans() {
 			namespaces[f.Namespace] = cache.Config{LabelSelector: hasLabel(ObjectLabel)}
 		}
-		if f.orphans() {
-			namespaces[f.Installation.Namespace] = cache.Config{}
-		}
-		byObject[object(f.Kustomization)] = cache.ByObject{Namespaces: namespaces, Transform: stripInventory(f.Installation)}
+		byObject[object(f.Kustomization)] = cache.ByObject{Namespaces: namespaces, Transform: organizationInventory}
 	}
 	return cache.Options{
 		SyncPeriod:       &syncPeriod,
@@ -218,14 +244,14 @@ type OrganizationReconciler struct {
 	// APIReader reads from the API server: the organization namespace is
 	// looked up there, so a namespace the cache has not seen yet is found.
 	APIReader client.Reader
-	// Cache reads the installation Kustomization from the manager's cache,
-	// which watches it; nil reads it from the API server.
+	// Cache reads the Kustomizations from the manager's cache, which watches
+	// them; nil reads them from the API server.
 	Cache  client.Reader
 	Config Config
 }
 
 // SetupWithManager registers the controller: one work item per
-// AgentPlatformOrganization.
+// Organization.
 func (r *OrganizationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	inOrganization := handler.EnqueueRequestsFromMapFunc(r.organizationOfNamespace)
 	isOwn := predicate.NewPredicateFuncs(func(o client.Object) bool {
@@ -233,8 +259,8 @@ func (r *OrganizationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return ok
 	})
 	b := ctrl.NewControllerManagedBy(mgr).
-		Named("agentplatformorganization").
-		For(&v1alpha1.AgentPlatformOrganization{}).
+		Named("organization").
+		For(&orgv1.Organization{}).
 		Watches(&corev1.Namespace{}, handler.EnqueueRequestsFromMapFunc(organizationOfLabels)).
 		// A ServiceAccount in an organization namespace, or an organization's
 		// Flux ServiceAccount, which carries the organization's labels.
@@ -242,9 +268,9 @@ func (r *OrganizationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// The quota's own changes, not the usage the quota controller
 		// records with every object it counts.
 		Watches(&corev1.ResourceQuota{}, inOrganization, builder.WithPredicates(isOwn, quotaChanged)).
-		// A parent's organizations-admin binding reconciles the parent's
-		// organizations; a binding in an organization namespace its own.
-		Watches(&rbacv1.RoleBinding{}, handler.EnqueueRequestsFromMapFunc(r.organizationsOfBinding))
+		// Any binding in an organization namespace: the reconciler's own, or
+		// one that holds a name the reconciler needs.
+		Watches(&rbacv1.RoleBinding{}, inOrganization)
 	// A status write changes neither the spec (the generation) nor the
 	// labels: nothing the reconciler copies or decides on.
 	specOrLabels := predicate.Or(predicate.GenerationChangedPredicate{}, predicate.LabelChangedPredicate{})
@@ -271,7 +297,7 @@ func (r *OrganizationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		b = b.Watches(agent, handler.EnqueueRequestsFromMapFunc(r.organizationsOfAgent), builder.OnlyMetadata, builder.WithPredicates(specOrLabels))
 	}
 	if r.Config.Flux.watched() {
-		b = b.Watches(object(r.Config.Flux.Kustomization), handler.EnqueueRequestsFromMapFunc(r.organizationsOfKustomization), builder.WithPredicates(r.kustomizationChanged()))
+		b = b.Watches(object(r.Config.Flux.Kustomization), handler.EnqueueRequestsFromMapFunc(r.organizationsOfKustomization), builder.WithPredicates(kustomizationChanged()))
 	}
 	for _, gvk := range copied {
 		b = b.Watches(object(gvk), handler.EnqueueRequestsFromMapFunc(r.organizationsOfCopy), builder.WithPredicates(specOrLabels))
@@ -290,10 +316,10 @@ var quotaChanged = predicate.Funcs{UpdateFunc: func(e event.UpdateEvent) bool {
 // organizationOfLabels maps an organization namespace to its organization.
 func organizationOfLabels(_ context.Context, o client.Object) []reconcile.Request {
 	l := o.GetLabels()
-	if l[v1alpha1.ParentLabel] == "" || l[v1alpha1.OrganizationLabel] == "" {
+	if l[v1alpha1.OrganizationLabel] == "" {
 		return nil
 	}
-	return []reconcile.Request{{NamespacedName: client.ObjectKey{Namespace: l[v1alpha1.ParentLabel], Name: l[v1alpha1.OrganizationLabel]}}}
+	return []reconcile.Request{{NamespacedName: client.ObjectKey{Name: l[v1alpha1.OrganizationLabel]}}}
 }
 
 // organizationOfNamespace maps an object in an organization namespace to the
@@ -316,36 +342,34 @@ func (r *OrganizationReconciler) organizationOfObject(ctx context.Context, o cli
 	return r.organizationOfNamespace(ctx, o)
 }
 
-// organizationsOf maps to every organization in namespace (every organization
-// when namespace is empty).
-func (r *OrganizationReconciler) organizationsOf(ctx context.Context, namespace string) []reconcile.Request {
-	list := &v1alpha1.AgentPlatformOrganizationList{}
-	if err := r.Client.List(ctx, list, client.InNamespace(namespace)); err != nil {
-		logf.FromContext(ctx).Error(err, "listing the AgentPlatformOrganizations failed", "namespace", namespace)
+// allOrganizations maps to every organization the reconciler keeps: every
+// Organization with the Agent Platform enabled or with its finalizer.
+func (r *OrganizationReconciler) allOrganizations(ctx context.Context) []reconcile.Request {
+	list := &orgv1.OrganizationList{}
+	if err := r.Client.List(ctx, list); err != nil {
+		logf.FromContext(ctx).Error(err, "listing the Organizations failed")
 		return nil
 	}
 	reqs := make([]reconcile.Request, 0, len(list.Items))
 	for i := range list.Items {
-		reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])})
+		if kept(&list.Items[i]) {
+			reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])})
+		}
 	}
 	return reqs
 }
 
-func (r *OrganizationReconciler) organizationsOfBinding(ctx context.Context, o client.Object) []reconcile.Request {
-	var reqs []reconcile.Request
-	if rb, ok := o.(*rbacv1.RoleBinding); ok && adminmirror.IsMirroredAdmin(rb) {
-		reqs = r.organizationsOf(ctx, rb.Namespace)
-	}
-	// Any binding in an organization namespace: the reconciler's own, or
-	// one that holds a name the reconciler needs.
-	return append(reqs, r.organizationOfNamespace(ctx, o)...)
+// kept reports whether the reconciler keeps org: its Agent Platform is
+// enabled, or it carries the finalizer.
+func kept(org *orgv1.Organization) bool {
+	return enabled(org) || controllerutil.ContainsFinalizer(org, v1alpha1.Finalizer)
 }
 
 // organizationsOfCopy maps an object of the platform namespace (a network
 // policy, a curated object) to every organization and a copy to its own.
 func (r *OrganizationReconciler) organizationsOfCopy(ctx context.Context, o client.Object) []reconcile.Request {
 	if o.GetNamespace() == r.Config.PlatformNamespace {
-		return r.organizationsOf(ctx, "")
+		return r.allOrganizations(ctx)
 	}
 	if _, ok := o.GetLabels()[ObjectLabel]; ok {
 		return r.organizationOfNamespace(ctx, o)
@@ -358,22 +382,27 @@ func (r *OrganizationReconciler) organizationsOfCopy(ctx context.Context, o clie
 // to the organization of its namespace.
 func (r *OrganizationReconciler) organizationsOfAgent(ctx context.Context, o client.Object) []reconcile.Request {
 	if o.GetNamespace() == r.Config.PlatformNamespace {
-		return r.organizationsOf(ctx, "")
+		return r.allOrganizations(ctx)
 	}
 	return r.organizationOfNamespace(ctx, o)
 }
 
-// organizationsAdminRoleRef is the roleRef of every mirror.
-var organizationsAdminRoleRef = rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: kindClusterRole, Name: OrganizationsAdminClusterRole}
-
 // Reconcile keeps one organization.
 func (r *OrganizationReconciler) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
-	org := &v1alpha1.AgentPlatformOrganization{}
+	org := &orgv1.Organization{}
 	if err := r.Client.Get(ctx, req.NamespacedName, org); err != nil {
 		return reconcile.Result{}, client.IgnoreNotFound(err)
 	}
 	if org.DeletionTimestamp != nil {
 		return r.erase(ctx, org)
+	}
+	if !enabled(org) {
+		// Without the switch the organization gets nothing. With the
+		// finalizer the switch was on.
+		if !controllerutil.ContainsFinalizer(org, v1alpha1.Finalizer) {
+			return reconcile.Result{}, nil
+		}
+		return reconcile.Result{}, r.reportSwitchOff(ctx, org)
 	}
 	// The finalizer comes first: an organization deleted from here on is
 	// erased.
@@ -384,7 +413,7 @@ func (r *OrganizationReconciler) Reconcile(ctx context.Context, req reconcile.Re
 			return reconcile.Result{}, fmt.Errorf("add the finalizer: %w", err)
 		}
 	}
-	status := org.Status.DeepCopy()
+	status := stateOf(org)
 	status.SnapshotPrefix = r.snapshotPrefix(org)
 	// First: the worker replica rule reads it.
 	orphanedErr := r.setOrphaned(ctx, org, status)
@@ -392,11 +421,8 @@ func (r *OrganizationReconciler) Reconcile(ctx context.Context, req reconcile.Re
 	reconcileErr := errors.Join(orphanedErr, r.reconcile(ctx, org, status))
 	ready, err := readyCondition(reconcileErr, org.Generation)
 	meta.SetStatusCondition(&status.Conditions, ready)
-	if !equality.Semantic.DeepEqual(&org.Status, status) {
-		org.Status = *status
-		if uerr := r.Client.Status().Update(ctx, org, client.FieldOwner(fieldManager)); uerr != nil {
-			return reconcile.Result{}, errors.Join(err, fmt.Errorf("update status: %w", uerr))
-		}
+	if uerr := r.writeStatus(ctx, org, status); uerr != nil {
+		return reconcile.Result{}, errors.Join(err, uerr)
 	}
 	return reconcile.Result{RequeueAfter: requeueAfter(reconcileErr)}, err
 }
@@ -414,9 +440,124 @@ func requeueAfter(err error) time.Duration {
 	return after
 }
 
+// reportSwitchOff reports an organization whose Agent Platform was turned
+// off, or whose spec.capabilities.agentPlatform was removed, after it was on.
+// A switch-off is not supported yet, and the agent-platform chart's admission
+// policy refuses it; when it gets through all the same, the reconciler
+// changes nothing and erases nothing: the namespace, its contents, the admins
+// binding and the finalizer stay as they are. Only AgentPlatformReady says
+// so. A delete of the Organization still erases it.
+func (r *OrganizationReconciler) reportSwitchOff(ctx context.Context, org *orgv1.Organization) error {
+	status := stateOf(org)
+	meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+		Type: orgv1.AgentPlatformReady, Status: metav1.ConditionFalse, Reason: reasonAgentPlatformOff,
+		Message:            "spec.capabilities.agentPlatform.enabled is off or spec.capabilities.agentPlatform is gone: turning the Agent Platform off is not supported yet, and nothing was changed or erased; turn it on again, or delete the Organization to erase it",
+		ObservedGeneration: org.Generation,
+	})
+	return r.writeStatus(ctx, org, status)
+}
+
+// enabled reports whether org has the Agent Platform switched on.
+func enabled(org *orgv1.Organization) bool {
+	ap := org.Spec.Capabilities.AgentPlatform
+	return ap != nil && ap.Enabled
+}
+
+// platformSpec is org's spec.capabilities.agentPlatform, the zero value when
+// it has none.
+func platformSpec(org *orgv1.Organization) orgv1.AgentPlatformSpec {
+	if org.Spec.Capabilities.AgentPlatform == nil {
+		return orgv1.AgentPlatformSpec{}
+	}
+	return *org.Spec.Capabilities.AgentPlatform
+}
+
+// platformStatus is org's status.capabilities.agentPlatform, the zero value
+// when it has none.
+func platformStatus(org *orgv1.Organization) orgv1.AgentPlatformStatus {
+	if org.Status.Capabilities.AgentPlatform == nil {
+		return orgv1.AgentPlatformStatus{}
+	}
+	return *org.Status.Capabilities.AgentPlatform
+}
+
+// organizationNamespace is the name of the agentPlatform entry of org's
+// status.namespaces, "" when it has none.
+func organizationNamespace(org *orgv1.Organization) string {
+	for _, ns := range org.Status.Namespaces {
+		if ns.Capability == orgv1.CapabilityAgentPlatform {
+			return ns.Name
+		}
+	}
+	return ""
+}
+
+// orgState is the part of an Organization's status the reconciler writes:
+// status.capabilities.agentPlatform, the agentPlatform entry of
+// status.namespaces, and status.conditions, of which it sets the
+// AgentPlatform conditions only.
+type orgState struct {
+	orgv1.AgentPlatformStatus
+	// Namespace is the name of the agentPlatform entry of status.namespaces;
+	// empty leaves the entry as it is.
+	Namespace  string
+	Conditions []metav1.Condition
+}
+
+// stateOf is a copy of the part of org's status the reconciler writes.
+func stateOf(org *orgv1.Organization) *orgState {
+	s := &orgState{Namespace: organizationNamespace(org)}
+	if ap := org.Status.Capabilities.AgentPlatform; ap != nil {
+		ap.DeepCopyInto(&s.AgentPlatformStatus)
+	}
+	for i := range org.Status.Conditions {
+		s.Conditions = append(s.Conditions, *org.Status.Conditions[i].DeepCopy())
+	}
+	return s
+}
+
+// applyTo sets s in org's status. The entries of status.namespaces of other
+// capabilities stay as they are.
+func (s *orgState) applyTo(org *orgv1.Organization) {
+	ap := s.AgentPlatformStatus
+	org.Status.Capabilities.AgentPlatform = ap.DeepCopy()
+	org.Status.Conditions = s.Conditions
+	if s.Namespace == "" || organizationNamespace(org) == s.Namespace {
+		return
+	}
+	namespaces := make([]orgv1.OrganizationNamespace, 0, len(org.Status.Namespaces)+1)
+	for _, ns := range org.Status.Namespaces {
+		if ns.Capability != orgv1.CapabilityAgentPlatform {
+			namespaces = append(namespaces, ns)
+		}
+	}
+	org.Status.Namespaces = append(namespaces, orgv1.OrganizationNamespace{Name: s.Namespace, Capability: orgv1.CapabilityAgentPlatform})
+}
+
+// writeStatus writes s to org's status when it changed it. The merge patch
+// carries only what changed, so the fields of other writers stay. It replaces
+// a whole list, status.conditions or status.namespaces, with the one of the
+// copy it is made from, which holds the other writers' entries
+// (organization-operator's kaas entry of status.namespaces, which it applies
+// as its own field manager): it is sent under an optimistic lock, so the API
+// server refuses it with a conflict once another writer changed the status
+// since that copy was read, and the reconcile is retried.
+func (r *OrganizationReconciler) writeStatus(ctx context.Context, org *orgv1.Organization, s *orgState) error {
+	before := org.DeepCopy()
+	s.applyTo(org)
+	if equality.Semantic.DeepEqual(before.Status, org.Status) {
+		return nil
+	}
+	patch := client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})
+	if err := r.Client.Status().Patch(ctx, org, patch, client.FieldOwner(fieldManager)); err != nil {
+		return fmt.Errorf("update status: %w", err)
+	}
+	return nil
+}
+
 // reconcile finds or creates the organization namespace, records it in
 // status and keeps the objects in it.
-func (r *OrganizationReconciler) reconcile(ctx context.Context, org *v1alpha1.AgentPlatformOrganization, status *v1alpha1.AgentPlatformOrganizationStatus) error {
+func (r *OrganizationReconciler) reconcile(ctx context.Context, org *orgv1.Organization, status *orgState) error {
 	ns, err := r.namespace(ctx, org)
 	if err != nil {
 		return err
@@ -432,13 +573,12 @@ func (r *OrganizationReconciler) reconcile(ctx context.Context, org *v1alpha1.Ag
 	if sa := r.Config.HelmServiceAccount; sa != "" {
 		errs = append(errs, r.ensureServiceAccount(ctx, ns.Name, sa, ScopeNamespace), r.ensureHelmRoleBinding(ctx, ns.Name))
 	}
-	errs = append(errs, r.keepServiceAccountBindings(ctx, ns.Name))
+	errs = append(errs, r.keepServiceAccountBindings(ctx, ns.Name), r.keepAdmins(ctx, org, ns.Name))
 	if !r.Config.NetworkPolicyGVK.Empty() {
 		for _, name := range r.Config.NetworkPolicies {
 			errs = append(errs, r.copyObject(ctx, r.Config.NetworkPolicyGVK, name, ns.Name))
 		}
 	}
-	errs = append(errs, r.mirrorAdmins(ctx, org.Namespace, ns.Name))
 	if r.Config.Flux.commitMode() {
 		errs = append(errs, r.keepFlux(ctx, org, ns.Name))
 	}
@@ -451,10 +591,10 @@ func (r *OrganizationReconciler) reconcile(ctx context.Context, org *v1alpha1.Ag
 	return errors.Join(errs...)
 }
 
-// notReadyError is a cause of Ready=False that a retry does not change: the
-// reconcile has done what it can. With requeueAfter the organization is
-// reconciled again after that long, for a cause no watched event ends (the
-// chart source held for migrate, chartSourceHeld).
+// notReadyError is a cause of AgentPlatformReady=False that a retry does not
+// change: the reconcile has done what it can. With requeueAfter the
+// organization is reconciled again after that long, for a cause no watched
+// event ends (the chart source held for migrate, chartSourceHeld).
 type notReadyError struct {
 	reason, message string
 	requeueAfter    time.Duration
@@ -462,13 +602,13 @@ type notReadyError struct {
 
 func (e *notReadyError) Error() string { return e.message }
 
-// readyCondition is the Ready condition a reconcile that returned err leaves,
-// and the error to retry: the failures in err, without its causes of
-// Ready=False. A failure makes the reason ReconcileFailed; the message names
-// the failures and then the causes of Ready=False, so a cause stays visible
-// while a failure lasts.
+// readyCondition is the AgentPlatformReady condition a reconcile that
+// returned err leaves, and the error to retry: the failures in err, without
+// its causes of AgentPlatformReady=False. A failure makes the reason
+// ReconcileFailed; the message names the failures and then the causes of
+// AgentPlatformReady=False, so a cause stays visible while a failure lasts.
 func readyCondition(err error, generation int64) (metav1.Condition, error) {
-	ready := metav1.Condition{Type: v1alpha1.ConditionReady, Status: metav1.ConditionTrue, Reason: reasonReconciled, ObservedGeneration: generation}
+	ready := metav1.Condition{Type: orgv1.AgentPlatformReady, Status: metav1.ConditionTrue, Reason: reasonReconciled, ObservedGeneration: generation}
 	failed, notReady := split(err)
 	err = errors.Join(failed...)
 	messages := make([]string, 0, 1+len(notReady))
@@ -492,9 +632,10 @@ func readyCondition(err error, generation int64) (metav1.Condition, error) {
 }
 
 // split sorts the errors joined in err into failures to retry and causes of
-// Ready=False. Only a *notReadyError itself is a cause of Ready=False: an
-// error that wraps one (fmt.Errorf with %w) is a failure, because it can wrap
-// a failure too, and a failure must never be lost to a cause.
+// AgentPlatformReady=False. Only a *notReadyError itself is a cause of
+// AgentPlatformReady=False: an error that wraps one (fmt.Errorf with %w) is a
+// failure, because it can wrap a failure too, and a failure must never be
+// lost to a cause.
 func split(err error) (failed []error, notReady []*notReadyError) {
 	if err == nil {
 		return nil, nil
@@ -512,41 +653,51 @@ func split(err error) (failed []error, notReady []*notReadyError) {
 	return []error{err}, nil
 }
 
-// namespace is the organization namespace: the one labelled with the
-// organization's UID, read from the API server, or a new one.
-func (r *OrganizationReconciler) namespace(ctx context.Context, org *v1alpha1.AgentPlatformOrganization) (*corev1.Namespace, error) {
-	list := &corev1.NamespaceList{}
-	if err := r.APIReader.List(ctx, list, client.MatchingLabels{v1alpha1.OrganizationUIDLabel: string(org.UID)}); err != nil {
-		return nil, fmt.Errorf("list the namespaces labelled %s=%s: %w", v1alpha1.OrganizationUIDLabel, org.UID, err)
+// namespace is the organization namespace agents-<name>, read from the API
+// server, or a new one. A namespace of that name without the organization's
+// UID is not the organization's: the reconciler does not take it over.
+func (r *OrganizationReconciler) namespace(ctx context.Context, org *orgv1.Organization) (*corev1.Namespace, error) {
+	name, err := namespaceName(org)
+	if err != nil {
+		return nil, err
 	}
-	switch len(list.Items) {
-	case 0:
-	case 1:
-		return &list.Items[0], nil
-	default:
-		names := make([]string, 0, len(list.Items))
-		for i := range list.Items {
-			names = append(names, list.Items[i].Name)
-		}
-		return nil, fmt.Errorf("more than one namespace is labelled %s=%s: %s", v1alpha1.OrganizationUIDLabel, org.UID, strings.Join(names, ", "))
+	ns := &corev1.Namespace{}
+	err = r.APIReader.Get(ctx, client.ObjectKey{Name: name}, ns)
+	switch {
+	case err == nil && ns.Labels[v1alpha1.OrganizationUIDLabel] == string(org.UID):
+		return ns, nil
+	case err == nil:
+		return nil, &notReadyError{reason: reasonNameTaken, message: fmt.Sprintf("the namespace %s exists and is not this organization's (it does not carry %s=%s), so the operator does not take it over", name, v1alpha1.OrganizationUIDLabel, org.UID)}
+	case !apierrors.IsNotFound(err):
+		return nil, fmt.Errorf("get the namespace %s: %w", name, err)
 	}
-	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
-		GenerateName: NamespacePrefix + org.Name + "-",
+	ns = &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+		Name: name,
 		Labels: map[string]string{
 			v1alpha1.OrganizationLabel:    org.Name,
-			v1alpha1.ParentLabel:          org.Namespace,
 			v1alpha1.OrganizationUIDLabel: string(org.UID),
 			managedByLabel:                managedByValue,
 		},
 	}}
 	if err := r.Client.Create(ctx, ns, client.FieldOwner(fieldManager)); err != nil {
-		return nil, fmt.Errorf("create the organization namespace: %w", err)
+		return nil, fmt.Errorf("create the organization namespace %s: %w", name, err)
 	}
 	logf.FromContext(ctx).Info("organization namespace created", "namespace", ns.Name)
 	return ns, nil
 }
 
-func (r *OrganizationReconciler) snapshotPrefix(org *v1alpha1.AgentPlatformOrganization) string {
+// namespaceName is the name of org's namespace, agents-<name>, or a cause of
+// AgentPlatformReady=False when that is not a valid namespace name (a DNS
+// label of at most 63 characters): org gets no namespace.
+func namespaceName(org *orgv1.Organization) (string, error) {
+	name := NamespacePrefix + org.Name
+	if errs := validation.IsDNS1123Label(name); len(errs) > 0 {
+		return "", &notReadyError{reason: reasonNamespaceNameInvalid, message: fmt.Sprintf("the organization gets no namespace: %s is not a valid namespace name: %s", name, strings.Join(errs, "; "))}
+	}
+	return name, nil
+}
+
+func (r *OrganizationReconciler) snapshotPrefix(org *orgv1.Organization) string {
 	if r.Config.SnapshotBucket == "" {
 		return ""
 	}

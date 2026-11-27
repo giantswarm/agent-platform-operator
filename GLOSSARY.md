@@ -22,15 +22,10 @@ organization: a Harness, the WorkerPool with its ServiceAccount, an Agent, an
 AgentTemplate or a RemoteMCPServer.
 _Avoid_: Mirror
 
-**Admin mirror**:
-A RoleBinding in an organization namespace that the operator derives from an
-admin binding of the parent namespace: it always binds
-`agent-platform:organizations-admin` and keeps only the User and Group subjects
-whose names do not start with `system:`, so it is not a copy.
-_Avoid_: Copy
-
 **Orphaned organization**:
-An organization absent from its installation's settled desired inventory.
+An organization absent from the settled inventory of the Flux Kustomization that
+applied it (the one its ownership labels name): its `AgentPlatformOrphaned`
+condition is `True`.
 Orphaning prevents new work; deletion requires a separate administrative action.
 
 **Snapshot store**:

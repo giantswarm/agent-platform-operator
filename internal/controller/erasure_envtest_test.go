@@ -21,6 +21,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	orgv1 "github.com/giantswarm/organization-operator/api/v1alpha1"
+
 	"github.com/giantswarm/agent-platform-operator/api/v1alpha1"
 	"github.com/giantswarm/agent-platform-operator/internal/grpcwire"
 	"github.com/giantswarm/agent-platform-operator/internal/grpcwire/grpcwiretest"
@@ -59,13 +61,13 @@ const (
 // TestOrganizationEnvtest.
 func erasureCases(t *testing.T, c *cluster) {
 	t.Run("a deleted organization is erased in order", func(t *testing.T) {
-		org := c.organizationWith(t, "org-erase", "erase", v1alpha1.AgentPlatformOrganizationSpec{
+		org := c.organizationWith(t, "erase", orgv1.AgentPlatformSpec{
 			Harnesses: []string{curatedHarness}, Workers: withReplicas(2),
 		})
 		ns := c.readyNamespace(t, org).Name
 		org = c.get(t, org)
 		assert.Contains(t, org.Finalizers, v1alpha1.Finalizer)
-		prefix := org.Status.SnapshotPrefix
+		prefix := ap(org).SnapshotPrefix
 		// No ModelConfig: the live pool runs 0 workers.
 		c.replicas(t, ns, 0)
 
@@ -75,7 +77,7 @@ func erasureCases(t *testing.T, c *cluster) {
 		// The UID label outside the Flux namespace names nothing the
 		// operator created: it stays.
 		elsewhere := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{
-			Name: "labelled-elsewhere", Namespace: "org-erase",
+			Name: "labelled-elsewhere", Namespace: platformNS,
 			Labels: map[string]string{v1alpha1.OrganizationUIDLabel: string(org.UID)},
 		}}
 		c.create(t, elsewhere)
@@ -87,7 +89,7 @@ func erasureCases(t *testing.T, c *cluster) {
 		// A session of an Agent deleted before the erasure: no Agent of the
 		// organization names it any more.
 		c.sessions.addOf(ns, "retired", "carol@example.com", "55555555-5555-5555-5555-555555555555")
-		other := c.organization(t, "org-erase-other", "kept")
+		other := c.organization(t, "erase-other")
 		otherNS := c.readyNamespace(t, other).Name
 		c.sessions.add(otherNS, "alice@example.com", "33333333-3333-3333-3333-333333333333")
 		c.actors.linger[ns] = 2
@@ -133,31 +135,31 @@ func erasureCases(t *testing.T, c *cluster) {
 		assert.Less(t, slices.Index(events, workers[1]), firstIndex(events, evSessionsListed))
 		assert.Greater(t, slices.Index(events, workers[2]), firstIndex(events, evNoActor))
 
-		t.Run("an organization re-created with the same parent and name starts empty", func(t *testing.T) {
-			again := c.organizationWith(t, "org-erase", "erase", v1alpha1.AgentPlatformOrganizationSpec{Workers: withReplicas(2)})
-			againNS := c.readyNamespace(t, again).Name
+		t.Run("an organization re-created with the same name starts empty", func(t *testing.T) {
+			again := c.organizationWith(t, "erase", orgv1.AgentPlatformSpec{Workers: withReplicas(2)})
+			againNS := c.readyNamespace(t, again)
 			again = c.get(t, again)
 			assert.NotEqual(t, org.UID, again.UID)
-			assert.NotEqual(t, ns, againNS)
-			assert.NotEqual(t, prefix, again.Status.SnapshotPrefix)
-			assert.Empty(t, c.sessions.left(againNS))
-			assert.Zero(t, c.bucket.objects[again.Status.SnapshotPrefix])
-			c.absent(t, helmReleaseGVK, againNS, "triage")
+			assert.Equal(t, string(again.UID), againNS.Labels[v1alpha1.OrganizationUIDLabel])
+			assert.NotEqual(t, prefix, ap(again).SnapshotPrefix)
+			assert.Empty(t, c.sessions.left(againNS.Name))
+			assert.Zero(t, c.bucket.objects[ap(again).SnapshotPrefix])
+			c.absent(t, helmReleaseGVK, againNS.Name, "triage")
 		})
 	})
 
-	t.Run("a failing erasure step keeps Ready=False Deleting with the step and is retried", func(t *testing.T) {
-		org := c.organization(t, "org-erase-fail", "fails")
+	t.Run("a failing erasure step keeps AgentPlatformReady=False Deleting with the step and is retried", func(t *testing.T) {
+		org := c.organization(t, "erase-fail")
 		ns := c.readyNamespace(t, org).Name
-		prefix := c.get(t, org).Status.SnapshotPrefix
+		prefix := ap(c.get(t, org)).SnapshotPrefix
 		c.bucket.failWith(prefix, errors.New("AccessDenied: the bucket refused the delete"))
 		c.observeErasure(t, org, ns)
 		require.NoError(t, c.admin.Delete(t.Context(), org))
 
 		require.EventuallyWithT(t, func(ct *assert.CollectT) {
 			got := c.get(ct, org)
-			assert.Equal(ct, v1alpha1.ErasureSnapshots, got.Status.ErasureStep)
-			ready := meta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionReady)
+			assert.Equal(ct, orgv1.AgentPlatformErasingSnapshots, erasureStep(got))
+			ready := meta.FindStatusCondition(got.Status.Conditions, orgv1.AgentPlatformReady)
 			if assert.NotNil(ct, ready) {
 				assert.Equal(ct, metav1.ConditionFalse, ready.Status)
 				assert.Equal(ct, "Deleting", ready.Reason)
@@ -172,6 +174,16 @@ func erasureCases(t *testing.T, c *cluster) {
 		assert.NotEmpty(t, c.namespacesOf(t, org), "the namespace went while the snapshots were not erased")
 
 		c.bucket.failWith(prefix, nil)
+		// The first delete that succeeds turns AgentPlatformSnapshotsErased
+		// True at its time, which the second delete waits from.
+		require.EventuallyWithT(t, func(ct *assert.CollectT) {
+			erased := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, orgv1.AgentPlatformSnapshotsErased)
+			deletions := all(c.log.of(prefix), evSnapshotsDeleted)
+			if assert.NotNil(ct, erased) && assert.NotEmpty(ct, deletions) {
+				assert.Equal(ct, metav1.ConditionTrue, erased.Status)
+				assert.WithinDuration(ct, deletions[0].at, erased.LastTransitionTime.Time, 2*time.Second)
+			}
+		}, timeout, tick)
 		c.gone(t, org)
 		c.deletedTwice(t, c.log.of(prefix))
 	})
@@ -180,10 +192,10 @@ func erasureCases(t *testing.T, c *cluster) {
 		// The operator's client last answered on kagent.api.v1alpha1.
 		c.sessions.serving(pkgV1)
 		t.Cleanup(func() { c.sessions.serving(pkgV1alpha1) })
-		org := c.organization(t, "org-erase-v1", "upgraded")
+		org := c.organization(t, "erase-v1")
 		ns := c.readyNamespace(t, org).Name
 		c.sessions.addOf(ns, "retired", "dave@example.com", "66666666-6666-6666-6666-666666666666")
-		other := c.organization(t, "org-erase-v1-other", "kept")
+		other := c.organization(t, "erase-v1-other")
 		otherNS := c.readyNamespace(t, other).Name
 		c.sessions.add(otherNS, "dave@example.com", "77777777-7777-7777-7777-777777777777")
 		c.observeErasure(t, org, ns)
@@ -197,28 +209,71 @@ func erasureCases(t *testing.T, c *cluster) {
 		assert.Equal(t, []string{"77777777-7777-7777-7777-777777777777"}, c.sessions.left(otherNS))
 	})
 
-	t.Run("deleting the parent namespace erases its organizations", func(t *testing.T) {
-		org := c.organization(t, "org-parent-gone", "orphan")
+	t.Run("the erasure stops at a namespace of the organization's name that is not the organization's", func(t *testing.T) {
+		org := c.organization(t, "erase-foreign")
 		ns := c.readyNamespace(t, org).Name
-		prefix := c.get(t, org).Status.SnapshotPrefix
-		c.create(t, newObject(helmReleaseGVK, ns, "triage", nil, helmReleaseSpec))
-		c.sessions.add(ns, "carol@example.com", "44444444-4444-4444-4444-444444444444")
-		c.bucket.objects[prefix] = 1
+		// The namespace carries another organization's UID: as a namespace
+		// another writer created under the name, after the organization's
+		// own went. A workload and a session there are not the
+		// organization's.
+		setUID := func(uid string) {
+			require.EventuallyWithT(t, func(ct *assert.CollectT) {
+				got := &corev1.Namespace{}
+				if assert.NoError(ct, c.admin.Get(t.Context(), client.ObjectKey{Name: ns}, got)) {
+					got.Labels[v1alpha1.OrganizationUIDLabel] = uid
+					assert.NoError(ct, c.admin.Update(t.Context(), got))
+				}
+			}, timeout, tick)
+		}
+		setUID("00000000-0000-0000-0000-000000000000")
+		c.create(t, newObject(helmReleaseGVK, ns, "theirs", nil, helmReleaseSpec))
+		c.sessions.add(ns, "frank@example.com", "99999999-9999-9999-9999-999999999999")
 		c.observeErasure(t, org, ns)
 
-		parent := &corev1.Namespace{}
-		require.NoError(t, c.admin.Get(t.Context(), client.ObjectKey{Name: org.Namespace}, parent))
-		require.NoError(t, c.admin.Delete(t.Context(), parent))
-		// envtest runs no namespace controller: delete what it would, the
-		// objects of the terminating parent.
-		c.deleteNamespaceContent(t, org.Namespace)
-		c.gone(t, org)
+		require.NoError(t, c.admin.Delete(t.Context(), org))
+		require.EventuallyWithT(t, func(ct *assert.CollectT) {
+			ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, orgv1.AgentPlatformReady)
+			if assert.NotNil(ct, ready) {
+				assert.Equal(ct, "Deleting", ready.Reason)
+				assert.Contains(ct, ready.Message, "the namespace "+ns+" does not carry "+v1alpha1.OrganizationUIDLabel)
+			}
+		}, timeout, tick)
+		require.Never(t, func() bool {
+			hr := c.read(t, helmReleaseGVK, ns, "theirs")
+			return hr.GetDeletionTimestamp() != nil || len(c.sessions.left(ns)) == 0
+		}, time.Second, tick, "the erasure deleted a workload or a session of a namespace that is not the organization's")
 
+		// The label restored, the erasure ends. No event of the namespace
+		// reaches the operator in time after the failed step's backoff:
+		// the sync period stands in.
+		setUID(string(org.UID))
+		c.poke(t, org)
+		c.gone(t, org)
+		assert.Empty(t, c.namespacesOf(t, org))
+	})
+
+	t.Run("an organization whose switch was turned off is erased when it is deleted", func(t *testing.T) {
+		org := c.organization(t, "erase-held")
+		ns := c.readyNamespace(t, org).Name
+		prefix := ap(c.get(t, org)).SnapshotPrefix
+		c.sessions.add(ns, "erin@example.com", "88888888-8888-8888-8888-888888888888")
+		c.bucket.objects[prefix] = 1
+		got := c.get(t, org)
+		got.Spec.Capabilities.AgentPlatform.Enabled = false
+		require.NoError(t, c.admin.Update(t.Context(), got))
+		require.EventuallyWithT(t, func(ct *assert.CollectT) {
+			ready := meta.FindStatusCondition(c.get(ct, org).Status.Conditions, orgv1.AgentPlatformReady)
+			if assert.NotNil(ct, ready) {
+				assert.Equal(ct, "AgentPlatformDisabled", ready.Reason)
+			}
+		}, timeout, tick)
+		c.observeErasure(t, org, ns)
+
+		require.NoError(t, c.admin.Delete(t.Context(), org))
+		c.gone(t, org)
 		assert.Empty(t, c.sessions.left(ns))
 		assert.Zero(t, c.bucket.objects[prefix])
-		c.deletedTwice(t, c.log.of(prefix))
 		assert.Empty(t, c.namespacesOf(t, org))
-		c.finalizeNamespace(t, org.Namespace)
 	})
 }
 
@@ -491,8 +546,10 @@ type observed struct {
 // controllers envtest does not run: it removes the hold finalizer from each
 // of held once its deletion is recorded, and finalizes the organization
 // namespace. It also records each change of the WorkerPool copy's replicas,
-// and counts the workloads left at the first session listing.
-func (c *cluster) observeErasure(t *testing.T, org *v1alpha1.AgentPlatformOrganization, ns string, held ...client.Object) *observed {
+// the first one before it returns, so the replicas before the deletion are
+// recorded however soon the erasure scales the pool, and counts the
+// workloads left at the first session listing.
+func (c *cluster) observeErasure(t *testing.T, org *orgv1.Organization, ns string, held ...client.Object) *observed {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -513,10 +570,21 @@ func (c *cluster) observeErasure(t *testing.T, org *v1alpha1.AgentPlatformOrgani
 		<-done
 		c.sessions.onList = nil
 	})
+	replicas := int64(-1)
+	recordReplicas := func(ctx context.Context) {
+		pool := &unstructured.Unstructured{}
+		pool.SetGroupVersionKind(poolGVK)
+		if err := c.admin.Get(ctx, client.ObjectKey{Namespace: ns, Name: curatedPool}, pool); err == nil {
+			if n, _, _ := unstructured.NestedInt64(pool.Object, "spec", "replicas"); n != replicas {
+				c.log.add(evWorkers, ns, fmt.Sprint(n))
+				replicas = n
+			}
+		}
+	}
+	recordReplicas(ctx)
 	go func() {
 		defer close(done)
 		recorded := map[string]bool{}
-		replicas := int64(-1)
 		for {
 			select {
 			case <-ctx.Done():
@@ -543,14 +611,7 @@ func (c *cluster) observeErasure(t *testing.T, org *v1alpha1.AgentPlatformOrgani
 				namespace.Spec.Finalizers = nil
 				_ = c.admin.SubResource("finalize").Update(ctx, namespace)
 			}
-			pool := &unstructured.Unstructured{}
-			pool.SetGroupVersionKind(poolGVK)
-			if err := c.admin.Get(ctx, client.ObjectKey{Namespace: ns, Name: curatedPool}, pool); err == nil {
-				if n, _, _ := unstructured.NestedInt64(pool.Object, "spec", "replicas"); n != replicas {
-					c.log.add(evWorkers, ns, fmt.Sprint(n))
-					replicas = n
-				}
-			}
+			recordReplicas(ctx)
 		}
 	}()
 	return seen
@@ -625,27 +686,10 @@ func (c *cluster) deletedTwice(t *testing.T, events []event) {
 }
 
 // gone waits until org no longer exists.
-func (c *cluster) gone(t *testing.T, org *v1alpha1.AgentPlatformOrganization) {
+func (c *cluster) gone(t *testing.T, org *orgv1.Organization) {
 	t.Helper()
 	require.EventuallyWithT(t, func(ct *assert.CollectT) {
-		err := c.admin.Get(context.Background(), client.ObjectKeyFromObject(org), &v1alpha1.AgentPlatformOrganization{})
+		err := c.admin.Get(context.Background(), client.ObjectKeyFromObject(org), &orgv1.Organization{})
 		assert.True(ct, apierrors.IsNotFound(err), "the organization is still there: %v", err)
 	}, timeout, tick)
-}
-
-// deleteNamespaceContent deletes the AgentPlatformOrganizations in ns, as the
-// namespace controller does in a terminating namespace.
-func (c *cluster) deleteNamespaceContent(t *testing.T, ns string) {
-	t.Helper()
-	require.NoError(t, c.admin.DeleteAllOf(t.Context(), &v1alpha1.AgentPlatformOrganization{}, client.InNamespace(ns)))
-}
-
-// finalizeNamespace ends a terminating namespace, as the namespace controller
-// does once it is empty.
-func (c *cluster) finalizeNamespace(t *testing.T, name string) {
-	t.Helper()
-	ns := &corev1.Namespace{}
-	require.NoError(t, c.admin.Get(t.Context(), client.ObjectKey{Name: name}, ns))
-	ns.Spec.Finalizers = nil
-	require.NoError(t, c.admin.SubResource("finalize").Update(t.Context(), ns))
 }
