@@ -31,7 +31,8 @@ networkPolicy:
 agentChart:
   # -- OCI URL of the agent chart. The OCIRepository kept in every
   # organization namespace is named after its last segment (`agent`); the
-  # organization's HelmReleases reference it by that name. Empty keeps none.
+  # organization's HelmReleases reference it by that name. Every reconcile
+  # resets its url, interval and ref to these values. Empty keeps none.
   ociUrl: oci://gsoci.azurecr.io/charts/giantswarm/agent
   # -- Semver range the OCIRepository tracks.
   semver: "2.x"
@@ -42,6 +43,14 @@ agentChart:
   interval: 30m
   # -- source.toolkit.fluxcd.io API version of the OCIRepository.
   ociRepositoryApiVersion: source.toolkit.fluxcd.io/v1
+  # -- agent-manager migrate's report ConfigMap in an organization namespace.
+  # A move to a higher major (`2.x` to `3.x`) waits until migrate annotates it
+  # `agent-platform.giantswarm.io/agent-chart-ready-major` with the new major
+  # (organization not Ready, `ChartSourceHeld`, meanwhile). The operator reads
+  # this one ConfigMap name only.
+  migrationReport: agent-manager-migrate-report
+  # -- How often a waiting organization looks for migrate's annotation again.
+  migrationPoll: 1m
 
 # -- The ServiceAccount the organization's HelmReleases run as
 # (`spec.serviceAccountName`, which helm-controller impersonates), kept in

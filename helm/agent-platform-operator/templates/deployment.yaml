@@ -35,6 +35,8 @@ spec:
             {{- end }}
             - --ocirepository-interval={{ .Values.agentChart.interval }}
             - --flux-ocirepository-api-version={{ .Values.agentChart.ociRepositoryApiVersion }}
+            - --agent-chart-migration-report={{ .Values.agentChart.migrationReport }}
+            - --agent-chart-migration-poll={{ .Values.agentChart.migrationPoll }}
             - --helmrelease-service-account={{ .Values.helmReleaseServiceAccount }}
             {{- with .Values.serviceAccountBindings }}
             - {{ printf "--service-account-bindings=%s" (include "serviceAccountBindings" $) | quote }}

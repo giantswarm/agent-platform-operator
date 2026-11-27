@@ -17,7 +17,8 @@
 // In the namespace the reconciler keeps, from the first reconcile on:
 //
 //   - the network policies copied from the platform namespace;
-//   - the agent chart's OCIRepository;
+//   - the agent chart's OCIRepository, whose url, interval and ref follow
+//     Config.Chart (ensureChartSource);
 //   - the Helm ServiceAccount the organization's HelmReleases run as, with its
 //     RoleBinding to the ClusterRole Config.HelmClusterRole
 //     (agent-platform-tenant-flux by default);
@@ -417,12 +418,26 @@ func (r *OrganizationReconciler) Reconcile(ctx context.Context, req reconcile.Re
 	// First: the worker replica rule reads it.
 	orphanedErr := r.setOrphaned(ctx, org, status)
 
-	ready, err := readyCondition(errors.Join(orphanedErr, r.reconcile(ctx, org, status)), org.Generation)
+	reconcileErr := errors.Join(orphanedErr, r.reconcile(ctx, org, status))
+	ready, err := readyCondition(reconcileErr, org.Generation)
 	meta.SetStatusCondition(&status.Conditions, ready)
 	if uerr := r.writeStatus(ctx, org, status); uerr != nil {
 		return reconcile.Result{}, errors.Join(err, uerr)
 	}
-	return reconcile.Result{}, err
+	return reconcile.Result{RequeueAfter: requeueAfter(reconcileErr)}, err
+}
+
+// requeueAfter is the shortest requeueAfter of the causes of Ready=False in
+// err; zero when none asks for one.
+func requeueAfter(err error) time.Duration {
+	_, notReady := split(err)
+	var after time.Duration
+	for _, nr := range notReady {
+		if nr.requeueAfter > 0 && (after == 0 || nr.requeueAfter < after) {
+			after = nr.requeueAfter
+		}
+	}
+	return after
 }
 
 // reportSwitchOff reports an organization whose Agent Platform was turned
@@ -553,7 +568,7 @@ func (r *OrganizationReconciler) reconcile(ctx context.Context, org *orgv1.Organ
 	}
 	var errs []error
 	if r.Config.Chart.URL != "" {
-		errs = append(errs, r.ensureExists(ctx, ns.Name, r.Config.Chart.object(ns.Name)))
+		errs = append(errs, r.ensureChartSource(ctx, ns.Name))
 	}
 	if sa := r.Config.HelmServiceAccount; sa != "" {
 		errs = append(errs, r.ensureServiceAccount(ctx, ns.Name, sa, ScopeNamespace), r.ensureHelmRoleBinding(ctx, ns.Name))
@@ -577,8 +592,13 @@ func (r *OrganizationReconciler) reconcile(ctx context.Context, org *orgv1.Organ
 }
 
 // notReadyError is a cause of AgentPlatformReady=False that a retry does not
-// change: the reconcile has done what it can.
-type notReadyError struct{ reason, message string }
+// change: the reconcile has done what it can. With requeueAfter the
+// organization is reconciled again after that long, for a cause no watched
+// event ends (the chart source held for migrate, chartSourceHeld).
+type notReadyError struct {
+	reason, message string
+	requeueAfter    time.Duration
+}
 
 func (e *notReadyError) Error() string { return e.message }
 

@@ -3,7 +3,8 @@ The operator's own permissions.
 
 RBAC cannot select namespaces by label, so the ClusterRole lets the
 ServiceAccount create namespaces and write RoleBindings, ServiceAccounts,
-OCIRepositories, network policies and ResourceQuotas in every namespace, and
+OCIRepositories (updates only of the agent chart's name), network policies
+and ResourceQuotas in every namespace, and
 with curated.enabled write and delete Agents, AgentTemplates, Harnesses,
 RemoteMCPServers and WorkerPools in every namespace, the platform namespace's
 curated sources included. The erasure of a deleted organization deletes
@@ -87,9 +88,26 @@ rules:
     resources: ["serviceaccounts"]
     verbs: ["update"]
   {{- end }}
+  {{- with .Values.agentChart.ociUrl }}
+  # The agent chart's OCIRepository: created, and brought back to
+  # agentChart.* on every reconcile. RBAC cannot name the object of a create;
+  # an update is held to the chart's name (the last segment of
+  # agentChart.ociUrl), so without the platform chart's scope policy a leaked
+  # token still cannot repoint another Flux source.
   - apiGroups: ["source.toolkit.fluxcd.io"]
     resources: ["ocirepositories"]
     verbs: ["get", "create"]
+  - apiGroups: ["source.toolkit.fluxcd.io"]
+    resources: ["ocirepositories"]
+    resourceNames: [{{ base . | quote }}]
+    verbs: ["update"]
+  # agent-manager migrate's report, read before the source moves to a higher
+  # agent chart major (agentChart.migrationReport); no other ConfigMap.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: [{{ $.Values.agentChart.migrationReport | quote }}]
+    verbs: ["get"]
+  {{- end }}
   # The organization's Flux Kustomization: kept in commit mode, deleted by
   # the erasure; with the installation's set, the one that applied each
   # organization is read for the AgentPlatformOrphaned condition, in any
@@ -109,6 +127,8 @@ rules:
       - "create"
       - "update"
       {{- end }}
+  # The HelmReleases are listed too before a move of the chart source to a
+  # higher major: one with no release on it moves without migrate's mark.
   - apiGroups: ["helm.toolkit.fluxcd.io"]
     resources: ["helmreleases"]
     verbs: ["list", "delete"]
